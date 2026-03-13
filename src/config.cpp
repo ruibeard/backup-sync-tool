@@ -62,7 +62,11 @@ std::wstring ReadFileText(const std::wstring& path) {
 }
 
 bool WriteFileText(const std::wstring& path, const std::wstring& text) {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Write to a temp file first, then rename over the target so a crash or
+    // disk-full during the write never leaves config.json in a partial state.
+    const std::wstring tmp_path = path + L".tmp";
+
+    HANDLE file = CreateFileW(tmp_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return false;
     }
@@ -71,7 +75,20 @@ bool WriteFileText(const std::wstring& path, const std::wstring& text) {
     DWORD written = 0;
     const BOOL ok = utf8.empty() ? TRUE : WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
     CloseHandle(file);
-    return ok && written == utf8.size();
+
+    if (!ok || written != utf8.size()) {
+        DeleteFileW(tmp_path.c_str());
+        return false;
+    }
+
+    // Atomic replace: MoveFileExW with MOVEFILE_REPLACE_EXISTING is atomic
+    // on the same volume under NTFS.
+    if (!MoveFileExW(tmp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp_path.c_str());
+        return false;
+    }
+
+    return true;
 }
 
 std::wstring EscapeJson(const std::wstring& value) {
@@ -182,7 +199,6 @@ bool LoadConfig(AppConfig& config) {
     config.webdav_url = ExtractString(text, L"webdav_url");
     config.username = ExtractString(text, L"username");
     config.start_with_windows = ExtractBool(text, L"start_with_windows");
-    config.sync_deletes = ExtractBool(text, L"sync_deletes");
 
     const std::wstring protected_password = ExtractString(text, L"password_protected");
     if (!protected_password.empty()) {
@@ -204,8 +220,7 @@ bool SaveConfig(const AppConfig& config) {
     json << L"  \"webdav_url\": \"" << EscapeJson(config.webdav_url) << L"\",\n";
     json << L"  \"username\": \"" << EscapeJson(config.username) << L"\",\n";
     json << L"  \"password_protected\": \"" << EscapeJson(protected_password) << L"\",\n";
-    json << L"  \"start_with_windows\": " << (config.start_with_windows ? L"true" : L"false") << L",\n";
-    json << L"  \"sync_deletes\": " << (config.sync_deletes ? L"true" : L"false") << L"\n";
+    json << L"  \"start_with_windows\": " << (config.start_with_windows ? L"true" : L"false") << L"\n";
     json << L"}\n";
 
     return WriteFileText(GetConfigPath(), json.str());

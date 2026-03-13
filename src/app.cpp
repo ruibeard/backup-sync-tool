@@ -1,7 +1,9 @@
 #include "app.h"
+#include "resource.h"
 
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shlwapi.h>
 #include <commctrl.h>
 #include <strsafe.h>
@@ -20,16 +22,16 @@ constexpr int IDC_WEBDAV_URL = 2002;
 constexpr int IDC_USERNAME = 2003;
 constexpr int IDC_PASSWORD = 2004;
 constexpr int IDC_STARTUP = 2005;
-constexpr int IDC_DELETE = 2006;
+constexpr int IDC_CONNECTION_STATE = 2006;
 constexpr int IDC_STATUS = 2007;
 constexpr int IDC_SAVE = 2008;
-constexpr int IDC_SYNC_NOW = 2009;
 constexpr int IDC_TEST = 2010;
+constexpr int IDC_BROWSE_FOLDER = 2011;
+constexpr int IDC_OPEN_WEBDAV_URL = 2012;
 
-constexpr UINT IDM_TRAY_OPEN = 3001;
-constexpr UINT IDM_TRAY_SYNC = 3002;
 constexpr UINT IDM_TRAY_LOG = 3003;
 constexpr UINT IDM_TRAY_EXIT = 3004;
+constexpr wchar_t kDefaultWatchFolder[] = L"C:\\XDSoftware\\backups";
 
 std::wstring JoinPath(const std::wstring& left, const std::wstring& right) {
     if (left.empty()) {
@@ -76,12 +78,68 @@ void AppendUtf8Line(const std::wstring& path, const std::wstring& line) {
     CloseHandle(file);
 }
 
+HICON LoadStockIcon(SHSTOCKICONID icon_id, UINT flags) {
+    SHSTOCKICONINFO info{};
+    info.cbSize = sizeof(info);
+    if (SUCCEEDED(SHGetStockIconInfo(icon_id, flags, &info)) && info.hIcon) {
+        return info.hIcon;
+    }
+    return LoadIconW(nullptr, IDI_APPLICATION);
+}
+
+HICON LoadOpenUrlIcon() {
+    return LoadStockIcon(SIID_INTERNET, SHGSI_ICON | SHGSI_SMALLICON);
+}
+
+HICON LoadResourceIcon(int resource_id, int size, SHSTOCKICONID fallback_id, UINT fallback_flags) {
+    const HICON icon = static_cast<HICON>(LoadImageW(
+        GetModuleHandleW(nullptr),
+        MAKEINTRESOURCEW(resource_id),
+        IMAGE_ICON,
+        size,
+        size,
+        LR_DEFAULTCOLOR));
+    if (icon) {
+        return icon;
+    }
+    return LoadStockIcon(fallback_id, fallback_flags);
+}
+
 } // namespace
 
 App::App(HINSTANCE instance, int show_command)
     : instance_(instance),
       show_command_(show_command) {
+    large_icon_ = LoadResourceIcon(IDI_APP_IDLE, GetSystemMetrics(SM_CXICON), SIID_FOLDER, SHGSI_ICON | SHGSI_LARGEICON);
+    idle_icon_ = LoadResourceIcon(IDI_APP_IDLE, GetSystemMetrics(SM_CXSMICON), SIID_FOLDER, SHGSI_ICON | SHGSI_SMALLICON);
+    syncing_icon_ = LoadResourceIcon(IDI_APP_SYNCING, GetSystemMetrics(SM_CXSMICON), SIID_FOLDEROPEN, SHGSI_ICON | SHGSI_SMALLICON);
+    error_icon_ = LoadStockIcon(SIID_ERROR, SHGSI_ICON | SHGSI_SMALLICON);
+    open_url_icon_ = LoadOpenUrlIcon();
     LoadConfig(config_);
+    if (config_.watch_folder.empty()) {
+        const DWORD attributes = GetFileAttributesW(kDefaultWatchFolder);
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            config_.watch_folder = kDefaultWatchFolder;
+        }
+    }
+}
+
+App::~App() {
+    if (large_icon_) {
+        DestroyIcon(large_icon_);
+    }
+    if (idle_icon_) {
+        DestroyIcon(idle_icon_);
+    }
+    if (syncing_icon_) {
+        DestroyIcon(syncing_icon_);
+    }
+    if (error_icon_) {
+        DestroyIcon(error_icon_);
+    }
+    if (open_url_icon_) {
+        DestroyIcon(open_url_icon_);
+    }
 }
 
 int App::Run() {
@@ -124,7 +182,7 @@ LRESULT CALLBACK App::WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpa
     }
 
     if (app) {
-        return app->HandleMessage(message, wparam, lparam);
+        return app->HandleMessage(hwnd, message, wparam, lparam);
     }
 
     return DefWindowProcW(hwnd, message, wparam, lparam);
@@ -136,7 +194,8 @@ bool App::CreateMainWindow() {
     window_class.hInstance = instance_;
     window_class.lpszClassName = kWindowClassName;
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    window_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    window_class.hIcon = large_icon_;
+    window_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
 
     if (!RegisterClassW(&window_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
         return false;
@@ -150,7 +209,7 @@ bool App::CreateMainWindow() {
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         520,
-        320,
+        340,
         nullptr,
         nullptr,
         instance_,
@@ -159,6 +218,9 @@ bool App::CreateMainWindow() {
     if (!hwnd_) {
         return false;
     }
+
+    SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large_icon_));
+    SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(idle_icon_));
 
     CreateControls();
     return true;
@@ -172,37 +234,59 @@ void App::CreateControls() {
         SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     };
 
-    auto make_edit = [&](int id, int x, int y, int width, DWORD extra_style = 0) {
+    auto make_edit = [&](int id, int x, int y, int width, const wchar_t* cue_banner = nullptr, DWORD extra_style = 0) {
         HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | extra_style, x, y, width, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+        if (cue_banner) {
+            SendMessageW(edit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(cue_banner));
+        }
+        return edit;
     };
 
     make_label(L"Folder", 20, 22);
-    make_edit(IDC_WATCH_FOLDER, 150, 20, 330);
+    make_edit(IDC_WATCH_FOLDER, 150, 20, 240, L"Choose the local folder to sync");
+    HWND browse = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 400, 20, 80, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BROWSE_FOLDER)), instance_, nullptr);
+    SendMessageW(browse, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     make_label(L"WebDAV URL", 20, 56);
-    make_edit(IDC_WEBDAV_URL, 150, 54, 330);
+    make_edit(IDC_WEBDAV_URL, 150, 54, 294, L"https://example.com/webdav/");
+    HWND open_url = CreateWindowW(
+        L"BUTTON",
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_ICON,
+        450,
+        54,
+        30,
+        24,
+        hwnd_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_OPEN_WEBDAV_URL)),
+        instance_,
+        nullptr);
+    if (open_url_icon_) {
+        SendMessageW(open_url, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(open_url_icon_));
+    } else {
+        SetWindowTextW(open_url, L"Go");
+        SendMessageW(open_url, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    }
     make_label(L"Username", 20, 90);
-    make_edit(IDC_USERNAME, 150, 88, 330);
+    make_edit(IDC_USERNAME, 150, 88, 330, L"name@example.com");
     make_label(L"Password", 20, 124);
-    make_edit(IDC_PASSWORD, 150, 122, 330, ES_PASSWORD);
+    make_edit(IDC_PASSWORD, 150, 122, 330, L"Enter your password", ES_PASSWORD);
 
     HWND startup = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 150, 158, 150, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STARTUP)), instance_, nullptr);
     SendMessageW(startup, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND deletes = CreateWindowW(L"BUTTON", L"Delete remote files too", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 310, 158, 170, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_DELETE)), instance_, nullptr);
-    SendMessageW(deletes, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    make_label(L"Connection", 20, 194);
+    HWND connection = CreateWindowW(L"STATIC", L"Not connected", WS_CHILD | WS_VISIBLE, 150, 194, 330, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECTION_STATE)), instance_, nullptr);
+    SendMessageW(connection, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 198, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
+    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 218, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
     SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 150, 232, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
+    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 150, 250, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
     SendMessageW(save, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND test = CreateWindowW(L"BUTTON", L"Test Connection", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 250, 232, 110, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TEST)), instance_, nullptr);
+    HWND test = CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 250, 250, 110, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TEST)), instance_, nullptr);
     SendMessageW(test, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-
-    HWND sync = CreateWindowW(L"BUTTON", L"Sync Now", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 370, 232, 110, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SYNC_NOW)), instance_, nullptr);
-    SendMessageW(sync, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
 void App::LoadIntoControls() {
@@ -211,7 +295,6 @@ void App::LoadIntoControls() {
     SetControlText(IDC_USERNAME, config_.username);
     SetControlText(IDC_PASSWORD, config_.password);
     SetCheck(IDC_STARTUP, config_.start_with_windows);
-    SetCheck(IDC_DELETE, config_.sync_deletes);
 }
 
 void App::SaveFromControls() {
@@ -220,7 +303,6 @@ void App::SaveFromControls() {
     config_.username = GetControlText(IDC_USERNAME);
     config_.password = GetControlText(IDC_PASSWORD);
     config_.start_with_windows = GetCheck(IDC_STARTUP);
-    config_.sync_deletes = GetCheck(IDC_DELETE);
 }
 
 void App::ShowSettings(bool show) {
@@ -238,7 +320,7 @@ void App::StartSync() {
     engine_.Start(
         config_,
         [this](const std::wstring& line) { Log(line); },
-        [this](SyncState, const std::wstring& text) { UpdateStatusLabel(text); });
+        [this](SyncState state, const std::wstring& text) { UpdateStatus(state, text); });
 }
 
 void App::StopSync() {
@@ -261,11 +343,85 @@ void App::ApplyStartupSetting() {
     RegCloseKey(key);
 }
 
+void App::UpdateStatus(SyncState state, const std::wstring& text) {
+    sync_state_ = state;
+    UpdateStatusLabel(text);
+    UpdateTrayIcon(state);
+}
+
 void App::UpdateStatusLabel(const std::wstring& text) {
     if (!hwnd_) {
         return;
     }
     SetControlText(IDC_STATUS, text);
+}
+
+void App::SetConnectionState(ConnectionState state, const std::wstring& text) {
+    connection_state_ = state;
+    if (!text.empty()) {
+        connection_text_ = text;
+    } else {
+        switch (state) {
+        case ConnectionState::Connecting:
+            connection_text_ = L"Connecting...";
+            break;
+        case ConnectionState::Connected:
+            connection_text_ = L"Connected";
+            break;
+        case ConnectionState::Failed:
+            connection_text_ = L"Connection failed";
+            break;
+        case ConnectionState::NotConnected:
+        default:
+            connection_text_ = L"Not connected";
+            break;
+        }
+    }
+
+    if (hwnd_) {
+        SetControlText(IDC_CONNECTION_STATE, connection_text_);
+        InvalidateRect(GetDlgItem(hwnd_, IDC_CONNECTION_STATE), nullptr, TRUE);
+    }
+}
+
+void App::UpdateTrayIcon(SyncState state) {
+    if (!tray_added_) {
+        return;
+    }
+
+    HICON icon = idle_icon_;
+    switch (state) {
+    case SyncState::Syncing:
+        icon = syncing_icon_;
+        break;
+    case SyncState::Error:
+        icon = error_icon_;
+        break;
+    case SyncState::Idle:
+    default:
+        icon = idle_icon_;
+        break;
+    }
+
+    NOTIFYICONDATAW data{};
+    data.cbSize = sizeof(data);
+    data.hWnd = hwnd_;
+    data.uID = kTrayIconId;
+    data.uFlags = NIF_ICON | NIF_TIP;
+    data.hIcon = icon;
+
+    std::wstring tip = L"WebDavSync";
+    HWND status = GetDlgItem(hwnd_, IDC_STATUS);
+    if (status) {
+        wchar_t buffer[96] = {};
+        GetWindowTextW(status, buffer, static_cast<int>(_countof(buffer)));
+        if (buffer[0] != L'\0') {
+            tip += L" - ";
+            tip += buffer;
+        }
+    }
+    StringCchCopyW(data.szTip, _countof(data.szTip), tip.c_str());
+    Shell_NotifyIconW(NIM_MODIFY, &data);
 }
 
 void App::AddTrayIcon() {
@@ -279,9 +435,12 @@ void App::AddTrayIcon() {
     data.uID = kTrayIconId;
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     data.uCallbackMessage = kTrayMessage;
-    data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    data.hIcon = idle_icon_;
     StringCchCopyW(data.szTip, _countof(data.szTip), L"WebDavSync");
     tray_added_ = Shell_NotifyIconW(NIM_ADD, &data) == TRUE;
+    if (tray_added_) {
+        UpdateTrayIcon(sync_state_);
+    }
 }
 
 void App::RemoveTrayIcon() {
@@ -303,8 +462,6 @@ void App::ShowTrayMenu() {
         return;
     }
 
-    AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"Open Settings");
-    AppendMenuW(menu, MF_STRING, IDM_TRAY_SYNC, L"Sync Now");
     AppendMenuW(menu, MF_STRING, IDM_TRAY_LOG, L"Open Logs");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"Exit");
@@ -337,22 +494,61 @@ void App::OpenLogFolder() {
     ShellExecuteW(hwnd_, L"open", log_folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-bool App::TestConnection() {
+void App::OpenWebDavUrl() {
+    const std::wstring url = GetControlText(IDC_WEBDAV_URL);
+    if (url.empty()) {
+        MessageBoxW(hwnd_, L"WebDAV URL is required.", L"WebDavSync", MB_ICONWARNING);
+        return;
+    }
+
+    const HINSTANCE result = ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32) {
+        MessageBoxW(hwnd_, L"Could not open the URL in the default browser.", L"WebDavSync", MB_ICONERROR);
+    }
+}
+
+void App::BrowseForWatchFolder() {
+    BROWSEINFOW info{};
+    info.hwndOwner = hwnd_;
+    info.lpszTitle = L"Select the local folder to sync";
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI | BIF_VALIDATE;
+
+    PIDLIST_ABSOLUTE selected = SHBrowseForFolderW(&info);
+    if (!selected) {
+        return;
+    }
+
+    wchar_t folder[MAX_PATH] = {};
+    if (SHGetPathFromIDListW(selected, folder)) {
+        SetControlText(IDC_WATCH_FOLDER, folder);
+    }
+
+    CoTaskMemFree(selected);
+}
+
+bool App::Connect() {
     SaveFromControls();
+    SetConnectionState(ConnectionState::Connecting);
 
     std::wstring error_message;
     if (!ValidateConfig(error_message)) {
+        SetConnectionState(ConnectionState::Failed, L"Check your settings");
         MessageBoxW(hwnd_, error_message.c_str(), L"WebDavSync", MB_ICONWARNING);
         return false;
     }
 
     WebDavClient client(config_);
     if (!client.TestConnection(error_message)) {
+        SetConnectionState(ConnectionState::Failed);
+        UpdateStatus(SyncState::Error, L"Connection test failed");
         MessageBoxW(hwnd_, error_message.c_str(), L"WebDavSync", MB_ICONERROR);
         return false;
     }
 
-    UpdateStatusLabel(L"Connection successful");
+    SetConnectionState(ConnectionState::Connected);
+    StopSync();
+    StartSync();
+    UpdateStatus(SyncState::Idle, L"Connected and watching for changes");
     return true;
 }
 
@@ -409,6 +605,12 @@ std::wstring App::GetLogPath() const {
 
 void App::HandleCommand(int control_id) {
     switch (control_id) {
+    case IDC_BROWSE_FOLDER:
+        BrowseForWatchFolder();
+        break;
+    case IDC_OPEN_WEBDAV_URL:
+        OpenWebDavUrl();
+        break;
     case IDC_SAVE: {
         SaveFromControls();
         std::wstring error_message;
@@ -425,16 +627,11 @@ void App::HandleCommand(int control_id) {
         ApplyStartupSetting();
         StopSync();
         StartSync();
-        UpdateStatusLabel(L"Configuration saved");
-        ShowSettings(false);
+        UpdateStatus(SyncState::Idle, L"Configuration saved");
         break;
     }
     case IDC_TEST:
-        TestConnection();
-        break;
-    case IDC_SYNC_NOW:
-        engine_.SyncNow();
-        UpdateStatusLabel(L"Manual sync requested");
+        Connect();
         break;
     default:
         break;
@@ -443,12 +640,6 @@ void App::HandleCommand(int control_id) {
 
 void App::HandleTrayAction(UINT action) {
     switch (action) {
-    case IDM_TRAY_OPEN:
-        ShowSettings(true);
-        break;
-    case IDM_TRAY_SYNC:
-        engine_.SyncNow();
-        break;
     case IDM_TRAY_LOG:
         OpenLogFolder();
         break;
@@ -460,8 +651,31 @@ void App::HandleTrayAction(UINT action) {
     }
 }
 
-LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
+LRESULT App::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = reinterpret_cast<HDC>(wparam);
+        SetBkMode(dc, TRANSPARENT);
+        const HWND control = reinterpret_cast<HWND>(lparam);
+        if (GetDlgCtrlID(control) == IDC_CONNECTION_STATE) {
+            switch (connection_state_) {
+            case ConnectionState::Connected:
+                SetTextColor(dc, RGB(0, 128, 0));
+                break;
+            case ConnectionState::Connecting:
+                SetTextColor(dc, RGB(180, 120, 0));
+                break;
+            case ConnectionState::Failed:
+                SetTextColor(dc, RGB(192, 0, 0));
+                break;
+            case ConnectionState::NotConnected:
+            default:
+                SetTextColor(dc, RGB(96, 96, 96));
+                break;
+            }
+        }
+        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    }
     case WM_COMMAND:
         HandleCommand(LOWORD(wparam));
         HandleTrayAction(LOWORD(wparam));
@@ -485,5 +699,5 @@ LRESULT App::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
         return 0;
     }
 
-    return DefWindowProcW(hwnd_, message, wparam, lparam);
+    return DefWindowProcW(hwnd, message, wparam, lparam);
 }

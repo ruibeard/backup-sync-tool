@@ -7,8 +7,7 @@ struct AppConfig {
     std::wstring webdav_url;
     std::wstring username;
     std::wstring password;
-    bool start_with_windows = false;
-    bool sync_deletes = false;
+    bool start_with_windows = true;
 };
 
 std::wstring GetExecutableDirectory();
