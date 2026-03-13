@@ -1,6 +1,7 @@
 #pragma once
 
 #include "config.h"
+#include "file_scanner.h"
 #include <windows.h>
 #include <winhttp.h>
 #include <string>
@@ -10,6 +11,7 @@ public:
     explicit WebDavClient(const AppConfig& config);
 
     bool TestConnection(std::wstring& error_message);
+    bool IsRemoteFileCurrent(const std::wstring& relative_path, const FileEntry& local_entry, bool& is_current, std::wstring& error_message);
     bool UploadFile(const std::wstring& local_path, const std::wstring& relative_path, std::wstring& error_message);
     bool DeleteFile(const std::wstring& relative_path, std::wstring& error_message);
 

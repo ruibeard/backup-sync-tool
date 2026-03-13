@@ -18,7 +18,7 @@ enum class SyncState {
 class SyncEngine {
 public:
     using LogFn = std::function<void(const std::wstring&)>;
-    using StatusFn = std::function<void(SyncState, const std::wstring&)>;
+    using StatusFn = std::function<void(SyncState, const std::wstring&, int, int)>;
 
     SyncEngine();
     ~SyncEngine();
