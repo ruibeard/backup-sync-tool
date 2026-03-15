@@ -29,7 +29,7 @@ public:
 
 private:
     void WorkerLoop();
-    void PerformSync(FileSnapshot& previous);
+    void PerformSync(FileSnapshot& previous_local, FileSnapshot& previous_remote);
 
     AppConfig config_;
     LogFn log_fn_;
