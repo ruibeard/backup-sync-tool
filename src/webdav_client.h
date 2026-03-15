@@ -27,9 +27,7 @@ private:
         const void* body,
         DWORD body_size,
         DWORD& status_code,
-        std::wstring& error_message,
-        const wchar_t* extra_headers = nullptr,
-        std::vector<BYTE>* response_body = nullptr);
+        std::wstring& error_message);
     bool EnsureCollectionExists(const std::wstring& full_path, std::wstring& error_message);
     bool EnsureBaseCollectionExists(std::wstring& error_message);
     bool EnsureRemoteFolders(const std::wstring& relative_path, std::wstring& error_message);
