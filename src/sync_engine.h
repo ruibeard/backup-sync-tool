@@ -2,7 +2,9 @@
 
 #include "config.h"
 #include "file_scanner.h"
+
 #include <windows.h>
+
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -29,7 +31,7 @@ public:
 
 private:
     void WorkerLoop();
-    void PerformSync(FileSnapshot& previous);
+    void PerformSync(FileSnapshot& previous_local, FileSnapshot& previous_remote);
 
     AppConfig config_;
     LogFn log_fn_;

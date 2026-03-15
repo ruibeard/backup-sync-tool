@@ -25,6 +25,7 @@ constexpr int IDC_WEBDAV_URL = 2002;
 constexpr int IDC_USERNAME = 2003;
 constexpr int IDC_PASSWORD = 2004;
 constexpr int IDC_STARTUP = 2005;
+constexpr int IDC_DOWNLOAD_REMOTE = 2006;
 constexpr int IDC_STATUS = 2007;
 constexpr int IDC_SAVE = 2008;
 constexpr int IDC_CLOSE = 2009;
@@ -216,7 +217,7 @@ bool App::CreateMainWindow() {
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         520,
-        470,
+        500,
         nullptr,
         nullptr,
         instance_,
@@ -282,7 +283,21 @@ void App::CreateControls() {
     HWND startup = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 150, 158, 150, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STARTUP)), instance_, nullptr);
     SendMessageW(startup, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 198, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
+    HWND download_remote = CreateWindowW(
+        L"BUTTON",
+        L"Download remote changes too",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+        150,
+        182,
+        220,
+        24,
+        hwnd_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_DOWNLOAD_REMOTE)),
+        instance_,
+        nullptr);
+    SendMessageW(download_remote, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 218, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
     SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
     progress_bar_ = CreateWindowExW(
@@ -291,7 +306,7 @@ void App::CreateControls() {
         nullptr,
         WS_CHILD | WS_VISIBLE,
         20,
-        220,
+        240,
         460,
         18,
         hwnd_,
@@ -301,14 +316,14 @@ void App::CreateControls() {
     SendMessageW(progress_bar_, PBM_SETRANGE32, 0, 1);
     SendMessageW(progress_bar_, PBM_SETPOS, 0, 0);
 
-    make_label(L"Recent Activity", 20, 246);
+    make_label(L"Recent Activity", 20, 266);
     activity_list_ = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"LISTBOX",
         nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
         20,
-        268,
+        288,
         460,
         110,
         hwnd_,
@@ -317,10 +332,10 @@ void App::CreateControls() {
         nullptr);
     SendMessageW(activity_list_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 190, 392, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
+    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 190, 412, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
     SendMessageW(save, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 290, 392, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CLOSE)), instance_, nullptr);
+    HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 290, 412, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CLOSE)), instance_, nullptr);
     SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
@@ -330,6 +345,7 @@ void App::LoadIntoControls() {
     SetControlText(IDC_USERNAME, config_.username);
     SetControlText(IDC_PASSWORD, config_.password);
     SetCheck(IDC_STARTUP, config_.start_with_windows);
+    SetCheck(IDC_DOWNLOAD_REMOTE, config_.download_remote_changes);
 }
 
 void App::SaveFromControls() {
@@ -338,6 +354,7 @@ void App::SaveFromControls() {
     config_.username = GetControlText(IDC_USERNAME);
     config_.password = GetControlText(IDC_PASSWORD);
     config_.start_with_windows = GetCheck(IDC_STARTUP);
+    config_.download_remote_changes = GetCheck(IDC_DOWNLOAD_REMOTE);
 }
 
 void App::ShowSettings(bool show) {
