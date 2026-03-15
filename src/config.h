@@ -8,7 +8,6 @@ struct AppConfig {
     std::wstring username;
     std::wstring password;
     bool start_with_windows = true;
-    bool download_remote_changes = false;
 };
 
 std::wstring GetExecutableDirectory();

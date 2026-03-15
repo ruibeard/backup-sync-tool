@@ -199,7 +199,6 @@ bool LoadConfig(AppConfig& config) {
     config.webdav_url = ExtractString(text, L"webdav_url");
     config.username = ExtractString(text, L"username");
     config.start_with_windows = ExtractBool(text, L"start_with_windows");
-    config.download_remote_changes = ExtractBool(text, L"download_remote_changes");
 
     const std::wstring protected_password = ExtractString(text, L"password_protected");
     if (!protected_password.empty()) {
@@ -221,8 +220,7 @@ bool SaveConfig(const AppConfig& config) {
     json << L"  \"webdav_url\": \"" << EscapeJson(config.webdav_url) << L"\",\n";
     json << L"  \"username\": \"" << EscapeJson(config.username) << L"\",\n";
     json << L"  \"password_protected\": \"" << EscapeJson(protected_password) << L"\",\n";
-    json << L"  \"start_with_windows\": " << (config.start_with_windows ? L"true" : L"false") << L",\n";
-    json << L"  \"download_remote_changes\": " << (config.download_remote_changes ? L"true" : L"false") << L"\n";
+    json << L"  \"start_with_windows\": " << (config.start_with_windows ? L"true" : L"false") << L"\n";
     json << L"}\n";
 
     return WriteFileText(GetConfigPath(), json.str());

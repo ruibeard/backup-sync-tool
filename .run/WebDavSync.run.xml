@@ -1,0 +1,5 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="WebDavSync" type="CMakeRunConfiguration" factoryName="Application" singleton="false" nameIsGenerated="true" REDIRECT_INPUT="false" ELEVATE="false" USE_EXTERNAL_CONSOLE="false" EMULATE_TERMINAL="false" PASS_PARENT_ENVS_2="true" PROJECT_NAME="WebDavSync" TARGET_NAME="WebDavSync" CONFIG_NAME="Release" RUN_TARGET_PROJECT_NAME="WebDavSync" RUN_TARGET_NAME="WebDavSync">
+    <method v="2" />
+  </configuration>
+</component>

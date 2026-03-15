@@ -18,13 +18,13 @@ This application is being built as a:
 - Native C++ Win32 application
 - Portable single executable
 - Tray-based background sync tool
-- One-way sync client by default: local folder -> WebDAV server
+- One-way sync client: local folder -> WebDAV server
 
 The current design avoids unnecessary complexity:
 
 - no service for v1
 - no multi-folder sync for v1
-- no full two-way sync with conflict resolution for v1
+- no two-way sync for v1
 - no dependency on .NET
 - no installer requirement for normal use
 
@@ -159,7 +159,6 @@ The current codebase already includes:
 - upload of changed files to WebDAV
 - remote folder creation using `MKCOL`
 - optional remote delete mirroring
-- optional remote-to-local download sync for missing or clearly newer remote files
 - connection test action
 
 ## What Still Needs To Be Built Or Hardened

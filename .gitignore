@@ -29,7 +29,8 @@
 
 # IDE settings
 /.idea/
-
+!/.idea/cmake.xml
+#
 # App runtime files
 /config.json
 /logs/
