@@ -4,6 +4,35 @@
 #include <wincrypt.h>
 #include <vector>
 
+#ifndef CRYPTPROTECT_UI_FORBIDDEN
+#define CRYPTPROTECT_UI_FORBIDDEN 0x1
+#endif
+
+typedef struct _CRYPTPROTECT_PROMPTSTRUCT {
+    DWORD cbSize;
+    DWORD dwPromptFlags;
+    HWND hwndApp;
+    LPCWSTR szPrompt;
+} CRYPTPROTECT_PROMPTSTRUCT, *PCRYPTPROTECT_PROMPTSTRUCT;
+
+extern "C" BOOL WINAPI CryptProtectData(
+    DATA_BLOB* pDataIn,
+    LPCWSTR szDataDescr,
+    DATA_BLOB* pOptionalEntropy,
+    PVOID pvReserved,
+    PCRYPTPROTECT_PROMPTSTRUCT pPromptStruct,
+    DWORD dwFlags,
+    DATA_BLOB* pDataOut);
+
+extern "C" BOOL WINAPI CryptUnprotectData(
+    DATA_BLOB* pDataIn,
+    LPWSTR* ppszDataDescr,
+    DATA_BLOB* pOptionalEntropy,
+    PVOID pvReserved,
+    PCRYPTPROTECT_PROMPTSTRUCT pPromptStruct,
+    DWORD dwFlags,
+    DATA_BLOB* pDataOut);
+
 namespace {
 
 bool EncodeBase64(const BYTE* data, DWORD size, std::wstring& output) {

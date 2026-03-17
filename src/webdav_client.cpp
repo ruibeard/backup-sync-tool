@@ -107,6 +107,10 @@ bool WebDavClient::TestConnection(std::wstring& error_message) {
 }
 
 bool WebDavClient::UploadFile(const std::wstring& local_path, const std::wstring& relative_path, std::wstring& error_message) {
+    if (!EnsureBaseCollectionExists(error_message)) {
+        return false;
+    }
+
     if (!EnsureRemoteFolders(relative_path, error_message)) {
         return false;
     }
@@ -235,21 +239,55 @@ bool WebDavClient::EnsureRemoteFolders(const std::wstring& relative_path, std::w
     return true;
 }
 
-std::wstring WebDavClient::BuildRequestPath(const std::wstring& relative_path) const {
-    std::wstring path = base_path_;
-    if (!relative_path.empty()) {
-        if (!path.empty() && path.back() != L'/') {
-            path += L'/';
-        }
-
-        std::wstring normalized = relative_path;
-        for (wchar_t& ch : normalized) {
-            if (ch == L'\\') {
-                ch = L'/';
-            }
-        }
-        path += UrlEncode(normalized);
+bool WebDavClient::EnsureCollectionExists(
+    const std::wstring& full_path,
+    std::wstring& error_message) {
+    if (full_path.empty() || full_path == L"/") {
+        return true;
     }
+
+    DWORD status_code = 0;
+    if (!SendRequest(L"MKCOL", full_path, nullptr, 0, status_code, error_message)) {
+        return false;
+    }
+
+    if (status_code == 201 || status_code == 301 || status_code == 405) {
+        return true;
+    }
+
+    error_message = StatusToMessage(L"Folder creation failed", status_code);
+    return false;
+}
+
+bool WebDavClient::EnsureBaseCollectionExists(std::wstring& error_message) {
+    if (base_path_.empty() || base_path_ == L"/") {
+        return true;
+    }
+    return EnsureCollectionExists(base_path_, error_message);
+}
+
+std::wstring WebDavClient::BuildRequestPath(const std::wstring& relative_path) const {
+    std::wstring normalized = relative_path;
+    for (wchar_t& ch : normalized) {
+        if (ch == L'\\') {
+            ch = L'/';
+        }
+    }
+
+    if (!normalized.empty() && normalized.front() == L'/') {
+        return UrlEncode(normalized);
+    }
+
+    std::wstring path = base_path_;
+    if (normalized.empty()) {
+        return path;
+    }
+
+    if (!path.empty() && path.back() != L'/') {
+        path += L'/';
+    }
+
+    path += UrlEncode(normalized);
     return path;
 }
 

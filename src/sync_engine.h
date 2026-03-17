@@ -1,6 +1,8 @@
 #pragma once
 
 #include "config.h"
+#include "file_scanner.h"
+#include <windows.h>
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -27,6 +29,7 @@ public:
 
 private:
     void WorkerLoop();
+    void PerformSync(FileSnapshot& previous);
 
     AppConfig config_;
     LogFn log_fn_;
@@ -35,4 +38,5 @@ private:
     std::mutex mutex_;
     std::atomic<bool> running_{false};
     std::atomic<bool> force_sync_{false};
+    HANDLE wake_event_ = nullptr;
 };

@@ -1,0 +1,35 @@
+# Build directories
+/build/
+/out/
+/bin/
+
+# CMake-generated files
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+/Makefile
+/Testing/
+/install_manifest.txt
+
+# Visual Studio / MSVC
+/.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.VC.db
+*.VC.opendb
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.tlog
+*.lastbuildstate
+
+# IDE settings
+/.idea/
+
+# App runtime files
+/config.json
+/logs/

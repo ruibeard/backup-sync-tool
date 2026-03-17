@@ -1,6 +1,8 @@
 #pragma once
 
 #include "config.h"
+#include <windows.h>
+#include <winhttp.h>
 #include <string>
 
 class WebDavClient {
@@ -19,6 +21,10 @@ private:
         DWORD body_size,
         DWORD& status_code,
         std::wstring& error_message);
+    bool EnsureCollectionExists(
+        const std::wstring& full_path,
+        std::wstring& error_message);
+    bool EnsureBaseCollectionExists(std::wstring& error_message);
     bool EnsureRemoteFolders(const std::wstring& relative_path, std::wstring& error_message);
     std::wstring BuildRequestPath(const std::wstring& relative_path) const;
     std::wstring UrlEncode(const std::wstring& value) const;

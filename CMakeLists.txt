@@ -11,6 +11,7 @@ add_executable(WebDavSync WIN32
     src/config.cpp
     src/dpapi.cpp
     src/file_scanner.cpp
+    src/resource.rc
     src/sync_engine.cpp
     src/webdav_client.cpp
 )
