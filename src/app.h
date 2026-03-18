@@ -5,13 +5,6 @@
 #include <windows.h>
 #include <string>
 
-enum class ConnectionState {
-    NotConnected,
-    Connecting,
-    Connected,
-    Failed,
-};
-
 class App {
 public:
     App(HINSTANCE instance, int show_command);
@@ -29,8 +22,10 @@ private:
     void StartSync();
     void StopSync();
     void ApplyStartupSetting();
-    void UpdateStatus(SyncState state, const std::wstring& text);
+    void UpdateStatus(SyncState state, const std::wstring& text, int completed = -1, int total = -1);
     void UpdateStatusLabel(const std::wstring& text);
+    void UpdateProgress(int completed, int total);
+    void AppendActivity(const std::wstring& text);
     void UpdateTrayIcon(SyncState state);
     void AddTrayIcon();
     void RemoveTrayIcon();
@@ -39,9 +34,7 @@ private:
     void OpenLogFolder();
     void OpenWebDavUrl();
     void BrowseForWatchFolder();
-    bool Connect();
     bool ValidateConfig(std::wstring& error_message);
-    void SetConnectionState(ConnectionState state, const std::wstring& text = L"");
     std::wstring GetControlText(int control_id) const;
     void SetControlText(int control_id, const std::wstring& value);
     void SetCheck(int control_id, bool checked);
@@ -59,9 +52,9 @@ private:
     HICON syncing_icon_ = nullptr;
     HICON error_icon_ = nullptr;
     HICON open_url_icon_ = nullptr;
+    HWND progress_bar_ = nullptr;
+    HWND activity_list_ = nullptr;
     SyncState sync_state_ = SyncState::Idle;
-    ConnectionState connection_state_ = ConnectionState::NotConnected;
-    std::wstring connection_text_ = L"Not connected";
     AppConfig config_;
     SyncEngine engine_;
     bool tray_added_ = false;

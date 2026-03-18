@@ -36,6 +36,20 @@ std::string ToUtf8(const std::wstring& value) {
     return utf8;
 }
 
+ULONGLONG FileTimeToUInt64(const FILETIME& value) {
+    ULARGE_INTEGER converted{};
+    converted.LowPart = value.dwLowDateTime;
+    converted.HighPart = value.dwHighDateTime;
+    return converted.QuadPart;
+}
+
+bool FileTimesMatchWithinSeconds(const FILETIME& left, const FILETIME& right, ULONGLONG seconds_tolerance) {
+    const ULONGLONG left_value = FileTimeToUInt64(left);
+    const ULONGLONG right_value = FileTimeToUInt64(right);
+    const ULONGLONG difference = left_value > right_value ? (left_value - right_value) : (right_value - left_value);
+    return difference <= seconds_tolerance * 10000000ULL;
+}
+
 bool ReadFileBytes(const std::wstring& path, std::vector<BYTE>& data, std::wstring& error_message) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
@@ -104,6 +118,126 @@ bool WebDavClient::TestConnection(std::wstring& error_message) {
 
     error_message = StatusToMessage(L"Connection test failed", status_code);
     return false;
+}
+
+bool WebDavClient::IsRemoteFileCurrent(
+    const std::wstring& relative_path,
+    const FileEntry& local_entry,
+    bool& is_current,
+    std::wstring& error_message) {
+    is_current = false;
+
+    HINTERNET session = WinHttpOpen(L"WebDavSync/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) {
+        error_message = L"WinHTTP session failed.";
+        return false;
+    }
+
+    if (host_.empty()) {
+        WinHttpCloseHandle(session);
+        error_message = L"Invalid WebDAV URL.";
+        return false;
+    }
+
+    HINTERNET connection = WinHttpConnect(session, host_.c_str(), port_, 0);
+    if (!connection) {
+        WinHttpCloseHandle(session);
+        error_message = L"Could not connect to server host.";
+        return false;
+    }
+
+    const std::wstring request_path = BuildRequestPath(relative_path);
+    const DWORD flags = secure_ ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET request = WinHttpOpenRequest(connection, L"HEAD", request_path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!request) {
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        error_message = L"Could not open HTTP request.";
+        return false;
+    }
+
+    const BOOL sent = WinHttpSendRequest(
+        request,
+        auth_header_.c_str(),
+        static_cast<DWORD>(-1L),
+        WINHTTP_NO_REQUEST_DATA,
+        0,
+        0,
+        0);
+    if (!sent || !WinHttpReceiveResponse(request, nullptr)) {
+        error_message = L"HTTP request failed.";
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    DWORD status_code = 0;
+    DWORD status_size = sizeof(status_code);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_size, WINHTTP_NO_HEADER_INDEX)) {
+        error_message = L"Could not read response status.";
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    if (status_code == 404 || status_code == 405 || status_code == 501) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return true;
+    }
+
+    if (status_code < 200 || status_code >= 300) {
+        error_message = StatusToMessage(L"Remote file check failed", status_code);
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+
+    wchar_t content_length[64] = {};
+    DWORD content_length_size = sizeof(content_length);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX, content_length, &content_length_size, WINHTTP_NO_HEADER_INDEX)) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return true;
+    }
+
+    const ULONGLONG remote_size = _wcstoui64(content_length, nullptr, 10);
+    if (remote_size != local_entry.size) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return true;
+    }
+
+    wchar_t last_modified[128] = {};
+    DWORD last_modified_size = sizeof(last_modified);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_LAST_MODIFIED, WINHTTP_HEADER_NAME_BY_INDEX, last_modified, &last_modified_size, WINHTTP_NO_HEADER_INDEX)) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return true;
+    }
+
+    SYSTEMTIME remote_system_time{};
+    FILETIME remote_file_time{};
+    if (!WinHttpTimeToSystemTime(last_modified, &remote_system_time) || !SystemTimeToFileTime(&remote_system_time, &remote_file_time)) {
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connection);
+        WinHttpCloseHandle(session);
+        return true;
+    }
+
+    is_current = FileTimesMatchWithinSeconds(local_entry.last_write, remote_file_time, 2);
+
+    WinHttpCloseHandle(request);
+    WinHttpCloseHandle(connection);
+    WinHttpCloseHandle(session);
+    return true;
 }
 
 bool WebDavClient::UploadFile(const std::wstring& local_path, const std::wstring& relative_path, std::wstring& error_message) {

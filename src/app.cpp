@@ -7,6 +7,8 @@
 #include <shlwapi.h>
 #include <commctrl.h>
 #include <strsafe.h>
+#include <algorithm>
+#include <memory>
 #include <vector>
 
 #include "webdav_client.h"
@@ -15,6 +17,7 @@ namespace {
 
 constexpr wchar_t kWindowClassName[] = L"WebDavSyncMainWindow";
 constexpr UINT kTrayMessage = WM_APP + 1;
+constexpr UINT kActivityMessage = WM_APP + 2;
 constexpr UINT kTrayIconId = 1001;
 
 constexpr int IDC_WATCH_FOLDER = 2001;
@@ -22,12 +25,13 @@ constexpr int IDC_WEBDAV_URL = 2002;
 constexpr int IDC_USERNAME = 2003;
 constexpr int IDC_PASSWORD = 2004;
 constexpr int IDC_STARTUP = 2005;
-constexpr int IDC_CONNECTION_STATE = 2006;
 constexpr int IDC_STATUS = 2007;
 constexpr int IDC_SAVE = 2008;
-constexpr int IDC_TEST = 2010;
+constexpr int IDC_CLOSE = 2009;
+constexpr int IDC_PROGRESS = 2010;
 constexpr int IDC_BROWSE_FOLDER = 2011;
 constexpr int IDC_OPEN_WEBDAV_URL = 2012;
+constexpr int IDC_ACTIVITY = 2013;
 
 constexpr UINT IDM_TRAY_LOG = 3003;
 constexpr UINT IDM_TRAY_EXIT = 3004;
@@ -145,7 +149,7 @@ App::~App() {
 int App::Run() {
     INITCOMMONCONTROLSEX controls{};
     controls.dwSize = sizeof(controls);
-    controls.dwICC = ICC_STANDARD_CLASSES;
+    controls.dwICC = ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS;
     InitCommonControlsEx(&controls);
 
     if (!CreateMainWindow()) {
@@ -164,6 +168,9 @@ int App::Run() {
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0)) {
+        if (IsDialogMessageW(hwnd_, &message)) {
+            continue;
+        }
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
@@ -202,14 +209,14 @@ bool App::CreateMainWindow() {
     }
 
     hwnd_ = CreateWindowExW(
-        WS_EX_APPWINDOW,
+        WS_EX_APPWINDOW | WS_EX_CONTROLPARENT,
         kWindowClassName,
         L"WebDavSync",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         520,
-        340,
+        470,
         nullptr,
         nullptr,
         instance_,
@@ -275,18 +282,46 @@ void App::CreateControls() {
     HWND startup = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 150, 158, 150, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STARTUP)), instance_, nullptr);
     SendMessageW(startup, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    make_label(L"Connection", 20, 194);
-    HWND connection = CreateWindowW(L"STATIC", L"Not connected", WS_CHILD | WS_VISIBLE, 150, 194, 330, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECTION_STATE)), instance_, nullptr);
-    SendMessageW(connection, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-
-    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 218, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
+    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 198, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
     SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 150, 250, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
+    progress_bar_ = CreateWindowExW(
+        0,
+        PROGRESS_CLASSW,
+        nullptr,
+        WS_CHILD | WS_VISIBLE,
+        20,
+        220,
+        460,
+        18,
+        hwnd_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PROGRESS)),
+        instance_,
+        nullptr);
+    SendMessageW(progress_bar_, PBM_SETRANGE32, 0, 1);
+    SendMessageW(progress_bar_, PBM_SETPOS, 0, 0);
+
+    make_label(L"Recent Activity", 20, 246);
+    activity_list_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        L"LISTBOX",
+        nullptr,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
+        20,
+        268,
+        460,
+        110,
+        hwnd_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ACTIVITY)),
+        instance_,
+        nullptr);
+    SendMessageW(activity_list_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 190, 392, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
     SendMessageW(save, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND test = CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 250, 250, 110, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_TEST)), instance_, nullptr);
-    SendMessageW(test, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 290, 392, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CLOSE)), instance_, nullptr);
+    SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
 void App::LoadIntoControls() {
@@ -320,7 +355,9 @@ void App::StartSync() {
     engine_.Start(
         config_,
         [this](const std::wstring& line) { Log(line); },
-        [this](SyncState state, const std::wstring& text) { UpdateStatus(state, text); });
+        [this](SyncState state, const std::wstring& text, int completed, int total) {
+            UpdateStatus(state, text, completed, total);
+        });
 }
 
 void App::StopSync() {
@@ -343,9 +380,10 @@ void App::ApplyStartupSetting() {
     RegCloseKey(key);
 }
 
-void App::UpdateStatus(SyncState state, const std::wstring& text) {
+void App::UpdateStatus(SyncState state, const std::wstring& text, int completed, int total) {
     sync_state_ = state;
     UpdateStatusLabel(text);
+    UpdateProgress(completed, total);
     UpdateTrayIcon(state);
 }
 
@@ -356,31 +394,34 @@ void App::UpdateStatusLabel(const std::wstring& text) {
     SetControlText(IDC_STATUS, text);
 }
 
-void App::SetConnectionState(ConnectionState state, const std::wstring& text) {
-    connection_state_ = state;
-    if (!text.empty()) {
-        connection_text_ = text;
-    } else {
-        switch (state) {
-        case ConnectionState::Connecting:
-            connection_text_ = L"Connecting...";
-            break;
-        case ConnectionState::Connected:
-            connection_text_ = L"Connected";
-            break;
-        case ConnectionState::Failed:
-            connection_text_ = L"Connection failed";
-            break;
-        case ConnectionState::NotConnected:
-        default:
-            connection_text_ = L"Not connected";
-            break;
-        }
+void App::UpdateProgress(int completed, int total) {
+    if (!progress_bar_) {
+        return;
     }
 
-    if (hwnd_) {
-        SetControlText(IDC_CONNECTION_STATE, connection_text_);
-        InvalidateRect(GetDlgItem(hwnd_, IDC_CONNECTION_STATE), nullptr, TRUE);
+    if (total <= 0) {
+        SendMessageW(progress_bar_, PBM_SETRANGE32, 0, 1);
+        SendMessageW(progress_bar_, PBM_SETPOS, 0, 0);
+        return;
+    }
+
+    const int clamped_completed = std::clamp(completed, 0, total);
+    SendMessageW(progress_bar_, PBM_SETRANGE32, 0, total);
+    SendMessageW(progress_bar_, PBM_SETPOS, clamped_completed, 0);
+}
+
+void App::AppendActivity(const std::wstring& text) {
+    if (!activity_list_) {
+        return;
+    }
+
+    const int index = static_cast<int>(SendMessageW(activity_list_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str())));
+    SendMessageW(activity_list_, LB_SETTOPINDEX, index, 0);
+
+    constexpr int kMaxActivityItems = 100;
+    const int count = static_cast<int>(SendMessageW(activity_list_, LB_GETCOUNT, 0, 0));
+    if (count > kMaxActivityItems) {
+        SendMessageW(activity_list_, LB_DELETESTRING, 0, 0);
     }
 }
 
@@ -486,6 +527,10 @@ void App::Log(const std::wstring& message) {
     wchar_t line[2048];
     StringCchPrintfW(line, _countof(line), L"%02u:%02u:%02u %ls", now.wHour, now.wMinute, now.wSecond, message.c_str());
     AppendUtf8Line(JoinPath(log_folder, file_name), line);
+
+    if (hwnd_) {
+        PostMessageW(hwnd_, kActivityMessage, 0, reinterpret_cast<LPARAM>(new std::wstring(line)));
+    }
 }
 
 void App::OpenLogFolder() {
@@ -524,32 +569,6 @@ void App::BrowseForWatchFolder() {
     }
 
     CoTaskMemFree(selected);
-}
-
-bool App::Connect() {
-    SaveFromControls();
-    SetConnectionState(ConnectionState::Connecting);
-
-    std::wstring error_message;
-    if (!ValidateConfig(error_message)) {
-        SetConnectionState(ConnectionState::Failed, L"Check your settings");
-        MessageBoxW(hwnd_, error_message.c_str(), L"WebDavSync", MB_ICONWARNING);
-        return false;
-    }
-
-    WebDavClient client(config_);
-    if (!client.TestConnection(error_message)) {
-        SetConnectionState(ConnectionState::Failed);
-        UpdateStatus(SyncState::Error, L"Connection test failed");
-        MessageBoxW(hwnd_, error_message.c_str(), L"WebDavSync", MB_ICONERROR);
-        return false;
-    }
-
-    SetConnectionState(ConnectionState::Connected);
-    StopSync();
-    StartSync();
-    UpdateStatus(SyncState::Idle, L"Connected and watching for changes");
-    return true;
 }
 
 bool App::ValidateConfig(std::wstring& error_message) {
@@ -615,11 +634,21 @@ void App::HandleCommand(int control_id) {
         SaveFromControls();
         std::wstring error_message;
         if (!ValidateConfig(error_message)) {
+            UpdateStatus(SyncState::Error, error_message, 0, 0);
             MessageBoxW(hwnd_, error_message.c_str(), L"WebDavSync", MB_ICONWARNING);
             return;
         }
 
+        UpdateStatus(SyncState::Idle, L"Validating connection...", 0, 0);
+        WebDavClient client(config_);
+        if (!client.TestConnection(error_message)) {
+            UpdateStatus(SyncState::Error, error_message, 0, 0);
+            MessageBoxW(hwnd_, error_message.c_str(), L"WebDavSync", MB_ICONERROR);
+            return;
+        }
+
         if (!SaveConfig(config_)) {
+            UpdateStatus(SyncState::Error, L"Could not write config.json.", 0, 0);
             MessageBoxW(hwnd_, L"Could not write config.json.", L"WebDavSync", MB_ICONERROR);
             return;
         }
@@ -627,11 +656,11 @@ void App::HandleCommand(int control_id) {
         ApplyStartupSetting();
         StopSync();
         StartSync();
-        UpdateStatus(SyncState::Idle, L"Configuration saved");
+        UpdateStatus(SyncState::Idle, L"Connected and watching for changes", 0, 0);
         break;
     }
-    case IDC_TEST:
-        Connect();
+    case IDC_CLOSE:
+        ShowSettings(false);
         break;
     default:
         break;
@@ -653,27 +682,16 @@ void App::HandleTrayAction(UINT action) {
 
 LRESULT App::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
+    case kActivityMessage: {
+        std::unique_ptr<std::wstring> activity(reinterpret_cast<std::wstring*>(lparam));
+        if (activity) {
+            AppendActivity(*activity);
+        }
+        return 0;
+    }
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wparam);
         SetBkMode(dc, TRANSPARENT);
-        const HWND control = reinterpret_cast<HWND>(lparam);
-        if (GetDlgCtrlID(control) == IDC_CONNECTION_STATE) {
-            switch (connection_state_) {
-            case ConnectionState::Connected:
-                SetTextColor(dc, RGB(0, 128, 0));
-                break;
-            case ConnectionState::Connecting:
-                SetTextColor(dc, RGB(180, 120, 0));
-                break;
-            case ConnectionState::Failed:
-                SetTextColor(dc, RGB(192, 0, 0));
-                break;
-            case ConnectionState::NotConnected:
-            default:
-                SetTextColor(dc, RGB(96, 96, 96));
-                break;
-            }
-        }
         return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
     }
     case WM_COMMAND:

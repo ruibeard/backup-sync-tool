@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <sstream>
+#include <vector>
 #include <utility>
 
 namespace {
@@ -24,6 +25,10 @@ std::wstring JoinPath(const std::wstring& left, const std::wstring& right) {
     }
     return left + L"\\" + right;
 }
+
+struct PendingUpload {
+    std::wstring relative_path;
+};
 
 } // namespace
 
@@ -70,7 +75,7 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
     force_sync_ = false;
 
     if (status_fn_) {
-        status_fn_(SyncState::Syncing, L"Syncing changes...");
+        status_fn_(SyncState::Syncing, L"Checking remote files...", 0, 0);
     }
 
     FileSnapshot current;
@@ -79,7 +84,7 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
             log_fn_(L"Watch folder is not available.");
         }
         if (status_fn_) {
-            status_fn_(SyncState::Error, L"Folder not found");
+            status_fn_(SyncState::Error, L"Folder not found", 0, 0);
         }
         return;
     }
@@ -87,6 +92,7 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
     WebDavClient client(config_);
     bool had_error = false;
     int uploaded_count = 0;
+    std::vector<PendingUpload> pending_uploads;
 
     for (const auto& pair : current) {
         const auto found = previous.find(pair.first);
@@ -95,17 +101,58 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
         }
 
         std::wstring error_message;
-        const std::wstring local_path = JoinPath(config_.watch_folder, pair.first);
-        if (client.UploadFile(local_path, pair.first, error_message)) {
+        bool is_current = false;
+        if (!client.IsRemoteFileCurrent(pair.first, pair.second, is_current, error_message)) {
+            had_error = true;
+            if (log_fn_) {
+                log_fn_(L"Remote check failed: " + pair.first + L" - " + error_message);
+            }
+            continue;
+        }
+
+        if (is_current) {
+            if (log_fn_) {
+                log_fn_(L"Skipped existing: " + pair.first);
+            }
+            continue;
+        }
+
+        pending_uploads.push_back({pair.first});
+    }
+
+    const int total_uploads = static_cast<int>(pending_uploads.size());
+    if (status_fn_) {
+        if (total_uploads > 0) {
+            status_fn_(SyncState::Syncing, L"Uploading files...", 0, total_uploads);
+        } else {
+            status_fn_(SyncState::Idle, L"Watching for changes", 0, 0);
+        }
+    }
+
+    for (size_t index = 0; index < pending_uploads.size(); ++index) {
+        const auto& pending = pending_uploads[index];
+        std::wstringstream progress_text;
+        progress_text << L"Uploading " << (index + 1) << L" of " << total_uploads;
+        if (status_fn_) {
+            status_fn_(SyncState::Syncing, progress_text.str(), static_cast<int>(index), total_uploads);
+        }
+
+        std::wstring error_message;
+        const std::wstring local_path = JoinPath(config_.watch_folder, pending.relative_path);
+        if (client.UploadFile(local_path, pending.relative_path, error_message)) {
             ++uploaded_count;
             if (log_fn_) {
-                log_fn_(L"Uploaded: " + pair.first);
+                log_fn_(L"Uploaded: " + pending.relative_path);
             }
         } else {
             had_error = true;
             if (log_fn_) {
-                log_fn_(L"Upload failed: " + pair.first + L" - " + error_message);
+                log_fn_(L"Upload failed: " + pending.relative_path + L" - " + error_message);
             }
+        }
+
+        if (status_fn_) {
+            status_fn_(SyncState::Syncing, progress_text.str(), static_cast<int>(index + 1), total_uploads);
         }
     }
 
@@ -117,13 +164,13 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
             if (uploaded_count > 0) {
                 status << L" (" << uploaded_count << L" uploaded)";
             }
-            status_fn_(SyncState::Error, status.str());
+            status_fn_(SyncState::Error, status.str(), total_uploads, total_uploads);
         } else if (uploaded_count > 0) {
             status << L"Watching for changes";
             status << L" (" << uploaded_count << L" uploaded)";
-            status_fn_(SyncState::Idle, status.str());
+            status_fn_(SyncState::Idle, status.str(), total_uploads, total_uploads);
         } else {
-            status_fn_(SyncState::Idle, L"Watching for changes");
+            status_fn_(SyncState::Idle, L"Watching for changes", 0, 0);
         }
     }
 }
@@ -134,7 +181,7 @@ void SyncEngine::WorkerLoop() {
     HANDLE wake_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!wake_event) {
         if (status_fn_) {
-            status_fn_(SyncState::Error, L"Watcher startup failed");
+            status_fn_(SyncState::Error, L"Watcher startup failed", 0, 0);
         }
         return;
     }
@@ -161,7 +208,7 @@ void SyncEngine::WorkerLoop() {
             log_fn_(L"Could not start folder watcher.");
         }
         if (status_fn_) {
-            status_fn_(SyncState::Error, L"Folder watcher unavailable");
+            status_fn_(SyncState::Error, L"Folder watcher unavailable", 0, 0);
         }
     } else {
         HANDLE wait_handles[] = {watch, wake_event};
@@ -184,14 +231,14 @@ void SyncEngine::WorkerLoop() {
 
             if (wait_result != WAIT_OBJECT_0) {
                 if (status_fn_) {
-                    status_fn_(SyncState::Error, L"Folder watcher failed");
+                    status_fn_(SyncState::Error, L"Folder watcher failed", 0, 0);
                 }
                 break;
             }
 
             if (!FindNextChangeNotification(watch)) {
                 if (status_fn_) {
-                    status_fn_(SyncState::Error, L"Folder watcher failed");
+                    status_fn_(SyncState::Error, L"Folder watcher failed", 0, 0);
                 }
                 break;
             }
