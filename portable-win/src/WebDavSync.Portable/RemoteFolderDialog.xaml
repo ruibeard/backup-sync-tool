@@ -1,0 +1,74 @@
+<Window x:Class="WebDavSync.RemoteFolderDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Browse Remote Folder"
+        Width="420" Height="360"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource WindowBgBrush}"
+        FontFamily="Segoe UI">
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="Select a remote folder:"
+                   FontSize="13"
+                   Foreground="#333333"
+                   Margin="0,0,0,8"/>
+
+        <ListBox Grid.Row="1"
+                 x:Name="FolderList"
+                 FontFamily="Consolas"
+                 FontSize="12"
+                 Foreground="#333333"
+                 Background="White"
+                 BorderBrush="{StaticResource InputBorderBrush}"
+                 BorderThickness="1"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 MouseDoubleClick="FolderList_DoubleClick"
+                 Margin="0,0,0,8"/>
+
+        <TextBlock Grid.Row="2"
+                   x:Name="StatusText"
+                   Text="Loading…"
+                   FontSize="11"
+                   Foreground="#888888"
+                   Margin="0,0,0,8"/>
+
+        <!-- New folder row -->
+        <Grid Grid.Row="3" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBox Grid.Column="0"
+                     x:Name="NewFolderBox"
+                     Style="{StaticResource InputBox}"
+                     ToolTip="New folder name"/>
+            <Button Grid.Column="2"
+                    Content="Create Folder"
+                    Style="{StaticResource BrowseButton}"
+                    Click="CreateFolder_Click"/>
+        </Grid>
+
+        <!-- OK / Cancel -->
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="OK"
+                    Style="{StaticResource SaveButton}"
+                    MinWidth="80"
+                    Click="Ok_Click"
+                    Margin="0,0,8,0"/>
+            <Button Content="Cancel"
+                    Style="{StaticResource CloseButton}"
+                    MinWidth="80"
+                    Click="Cancel_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,21 +1,29 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>WebDavSync.Portable</RootNamespace>
-    <AssemblyName>WebDavSync.Portable</AssemblyName>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
-    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AssemblyName>WebDavSync</AssemblyName>
+    <RootNamespace>WebDavSync</RootNamespace>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <!-- Suppress warning about WinForms + WPF mixed -->
+    <DisableWinExeOutputInference>false</DisableWinExeOutputInference>
   </PropertyGroup>
+
   <ItemGroup>
-    <PackageReference Include="ModernWpfUI" Version="0.9.6" />
+    <Resource Include="Assets\app.ico" />
   </ItemGroup>
+
 </Project>
