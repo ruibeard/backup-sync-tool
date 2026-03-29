@@ -11,8 +11,12 @@ mod updater;
 mod webdav;
 
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 
 fn main() {
-    let hinstance = unsafe { GetModuleHandleW(None).unwrap().into() };
-    ui::run(hinstance);
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let hinstance = GetModuleHandleW(None).unwrap().into();
+        ui::run(hinstance);
+    }
 }

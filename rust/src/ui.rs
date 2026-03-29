@@ -25,9 +25,8 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::Shell::{
-    BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
-    DefSubclassProc, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW,
-    SetWindowSubclass,
+    DefSubclassProc, IFileOpenDialog, FileOpenDialog,
+    SetWindowSubclass, FOS_PICKFOLDERS,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -233,7 +232,7 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
     FillRect(hdc, &cr, br);
     DeleteObject(br);
 
-    // Card backgrounds + borders
+    // Card backgrounds — no border, just fill
     let st = state_ptr(hwnd);
     if st.is_null() { return; }
     for c in &(*st).cards {
@@ -241,14 +240,6 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
         let br2 = CreateSolidBrush(COLORREF(C_SECT_BG));
         FillRect(hdc, &rc, br2);
         DeleteObject(br2);
-
-        let hpen    = CreatePen(PS_SOLID, 1, COLORREF(C_SECT_BORDER));
-        let old_pen = SelectObject(hdc, hpen);
-        let old_br  = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6);
-        SelectObject(hdc, old_pen);
-        SelectObject(hdc, old_br);
-        DeleteObject(hpen);
     }
 }
 
@@ -329,7 +320,7 @@ unsafe fn on_create(hwnd: HWND) {
 
     let raw = hwnd.0 as isize;
     std::thread::spawn(move || {
-        if let Some(info) = crate::updater::check("0.1.0") {
+        if let Some(info) = crate::updater::check(env!("CARGO_PKG_VERSION")) {
             let url = Box::new(info.url);
             PostMessageW(HWND(raw), WM_APP_UPDATE, WPARAM(0),
                 LPARAM(Box::into_raw(url) as isize)).ok();
@@ -455,7 +446,8 @@ unsafe fn build_ui(
         let bar_h  = BTN_H + 10 * 2;
         let by     = bar_y + (bar_h - BTN_H) / 2;
 
-        mkstatic(hwnd, hi, IDC_VERSION, "BACKUP SYNC TOOL V0.1",
+        let ver_label = concat!("BACKUP SYNC TOOL V", env!("CARGO_PKG_VERSION"));
+        mkstatic(hwnd, hi, IDC_VERSION, ver_label,
             M, by + (BTN_H - LBL_H) / 2, 200, LBL_H, hf_hdr);
 
         let bx_close  = WIN_W - M - 80;
@@ -688,21 +680,28 @@ unsafe fn toggle_password(hwnd: HWND) {
 }
 
 unsafe fn browse_local(hwnd: HWND) {
-    let mut path = [0u16; MAX_PATH as usize];
-    let mut bi = BROWSEINFOW {
-        hwndOwner: hwnd, lpszTitle: w!("Select local folder"),
-        pszDisplayName: PWSTR(path.as_mut_ptr()),
-        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-        ..Default::default()
-    };
-    let pidl = SHBrowseForFolderW(&mut bi);
-    if pidl.is_null() { return; }
-    let mut buf = [0u16; MAX_PATH as usize];
-    if SHGetPathFromIDListW(pidl, &mut buf).as_bool() {
-        let s = wstr(&buf);
-        let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{SHCreateItemFromParsingName, IShellItem};
+    if let Ok(dialog) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) {
+        let _ = dialog.SetOptions(FOS_PICKFOLDERS);
+        // Pre-navigate to the current folder value if it exists
+        let current = gettext(hwnd, IDC_WATCH_FOLDER);
+        if !current.is_empty() {
+            let wide: Vec<u16> = current.encode_utf16().chain(std::iter::once(0)).collect();
+            if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None) {
+                let _ = dialog.SetFolder(&item);
+            }
+        }
+        if dialog.Show(hwnd).is_ok() {
+            if let Ok(item) = dialog.GetResult() {
+                if let Ok(path) = item.GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH) {
+                    let s = path.to_string().unwrap_or_default();
+                    let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
+                    windows::Win32::System::Com::CoTaskMemFree(Some(path.as_ptr() as _));
+                }
+            }
+        }
     }
-    ILFree(Some(pidl));
 }
 
 unsafe fn do_connect(hwnd: HWND) {
@@ -788,8 +787,9 @@ unsafe fn on_app_update(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // Show the UPDATE button now that we know there's a newer version
     ShowWindow(GetDlgItem(hwnd, IDC_UPDATE as i32), SW_SHOW);
     InvalidateRect(GetDlgItem(hwnd, IDC_UPDATE as i32), None, TRUE);
-    let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_VERSION as i32),
-        w!("BACKUP SYNC TOOL V0.1  \u{2191} update"));
+        let ver_update = concat!("BACKUP SYNC TOOL V", env!("CARGO_PKG_VERSION"), "  \u{2191} update");
+        let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_VERSION as i32),
+            &hstring(ver_update));
     LRESULT(0)
 }
 

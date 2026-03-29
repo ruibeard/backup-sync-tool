@@ -36,7 +36,7 @@ impl Default for Config {
 fn config_path() -> PathBuf {
     // Store next to the .exe
     let mut p = std::env::current_exe().unwrap_or_default();
-    p.set_file_name("webdavsync.json");
+    p.set_file_name("backupsynctool.json");
     p
 }
 

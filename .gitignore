@@ -41,3 +41,4 @@ rust/target/
 # App runtime files
 /config.json
 /logs/
+.env

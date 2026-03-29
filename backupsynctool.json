@@ -1,0 +1,9 @@
+{
+  "watch_folder": "C:\\XDSoftware\\backups",
+  "webdav_url": "https://u561272-sub1.your-storagebox.de",
+  "username": "u561272-sub1",
+  "password_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAKAtvQrn/30qyyTANxKS/4gAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAEE/LxOrT1lo9lVzcPG+TsdzwGPPSgW2F9Ieo23pF5W/AAAAAA6AAAAAAgAAIAAAAIQrBvOa3B5w6QVITCIWTxURKu1l1i+KW6MVaYZZWLNoIAAAABxe/+wlIS7wcw4n7lUUo2MyDi7n+owGc05RqihaOBxaQAAAAAI2u8TNYFkkggOFrToeUFgEp3GcmrtS5WaGJ+5EGpLtp57WX1RoU6PFuHNhtSqpTVA63zTvgjRZNkMqu7+HjX8=",
+  "remote_folder": "",
+  "start_with_windows": true,
+  "sync_remote_changes": false
+}

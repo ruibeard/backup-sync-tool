@@ -16,20 +16,22 @@ fn basic_auth(user: &str, pass: &str) -> String {
 }
 
 pub fn test_connection(cfg: &Config, password: &str) -> Result<(), String> {
-    let url = cfg.webdav_url.trim_end_matches('/');
+    let url = format!("{}/", cfg.webdav_url.trim_end_matches('/'));
     let auth = basic_auth(&cfg.username, password);
-    agent()
-        .request("OPTIONS", url)
+    let body = r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>"#;
+    let resp = agent()
+        .request("PROPFIND", &url)
         .set("Authorization", &auth)
-        .call()
-        .map_err(|e| e.to_string())
-        .and_then(|r| {
-            if r.status() < 400 {
-                Ok(())
-            } else {
-                Err(format!("Server returned HTTP {}", r.status()))
-            }
-        })
+        .set("Depth", "0")
+        .set("Content-Type", "application/xml")
+        .send_string(body)
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if status < 400 {
+        Ok(())
+    } else {
+        Err(format!("Server returned HTTP {}", status))
+    }
 }
 
 pub fn list_folders(cfg: &Config, password: &str, folder_url: &str) -> Result<Vec<String>, String> {
