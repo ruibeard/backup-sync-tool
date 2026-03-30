@@ -4,13 +4,9 @@
 #include <string>
 #include <vector>
 
-struct AppConfig;
+#include "webdav_client.h"
 
-struct WebDavFolderInfo {
-    std::wstring display_name;
-    std::wstring full_path;
-    bool is_collection = false;
-};
+struct AppConfig;
 
 class WebDavFolderDialog {
 public:
@@ -34,6 +30,7 @@ private:
     std::wstring* selected_folder_ = nullptr;
     std::vector<WebDavFolderInfo> folders_;
     HINSTANCE instance_ = nullptr;
-    
+    int result_ = IDCANCEL;
+
     static WebDavFolderDialog* current_dialog_;
 };

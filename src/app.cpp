@@ -150,6 +150,12 @@ App::~App() {
     if (open_url_icon_) {
         DestroyIcon(open_url_icon_);
     }
+    if (section_label_brush_) {
+        DeleteObject(section_label_brush_);
+    }
+    if (section_font_ && section_font_ != GetStockObject(DEFAULT_GUI_FONT)) {
+        DeleteObject(section_font_);
+    }
 }
 
 int App::Run() {
@@ -223,8 +229,8 @@ bool App::CreateMainWindow() {
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        540,
-        540,
+        520,
+        800,
         nullptr,
         nullptr,
         instance_,
@@ -242,125 +248,220 @@ bool App::CreateMainWindow() {
 }
 
 void App::CreateControls() {
-    const HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    // ── Fonts ────────────────────────────────────────────────────────────────
+    const HFONT ui_font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
-    auto make_label = [&](const wchar_t* text, int x, int y) {
-        HWND label = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE, x, y, 120, 20, hwnd_, nullptr, instance_, nullptr);
-        SendMessageW(label, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-    };
-
-    auto make_edit = [&](int id, int x, int y, int width, const wchar_t* cue_banner = nullptr, DWORD extra_style = 0) {
-        HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | extra_style, x, y, width, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
-        SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        if (cue_banner) {
-            SendMessageW(edit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(cue_banner));
-        }
-        return edit;
-    };
-
-    make_label(L"Folder", 20, 22);
-    make_edit(IDC_WATCH_FOLDER, 150, 20, 240, L"Choose the local folder to sync");
-    HWND browse = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 400, 20, 80, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BROWSE_FOLDER)), instance_, nullptr);
-    SendMessageW(browse, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-    
-    make_label(L"WebDAV URL", 20, 56);
-    make_edit(IDC_WEBDAV_URL, 150, 54, 294, L"https://example.com/webdav/");
-    HWND open_url = CreateWindowW(
-        L"BUTTON",
-        L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_ICON,
-        450,
-        54,
-        30,
-        24,
-        hwnd_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_OPEN_WEBDAV_URL)),
-        instance_,
-        nullptr);
-    if (open_url_icon_) {
-        SendMessageW(open_url, BM_SETIMAGE, IMAGE_ICON, reinterpret_cast<LPARAM>(open_url_icon_));
-    } else {
-        SetWindowTextW(open_url, L"Go");
-        SendMessageW(open_url, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    if (!section_font_) {
+        LOGFONTW lf{};
+        GetObjectW(ui_font, sizeof(lf), &lf);
+        // Create smaller font for section headers
+        lf.lfHeight = static_cast<LONG>(lf.lfHeight * 0.90);
+        lf.lfWeight = FW_BOLD;
+        section_font_ = CreateFontIndirectW(&lf);
+        if (!section_font_) section_font_ = ui_font;
     }
 
-    // Connection Status
-    make_label(L"Status", 20, 90);
-    HWND connection_status = CreateWindowW(L"STATIC", L"● Not connected", WS_CHILD | WS_VISIBLE, 150, 90, 330, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECTION_STATUS)), instance_, nullptr);
-    SendMessageW(connection_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-    
-    make_label(L"Username", 20, 120);
-    make_edit(IDC_USERNAME, 150, 118, 330, L"name@example.com");
-    
-    make_label(L"Password", 20, 154);
-    make_edit(IDC_PASSWORD, 150, 152, 330, L"Enter your password", ES_PASSWORD);
-    
-    make_label(L"Remote Folder", 20, 188);
-    make_edit(IDC_REMOTE_FOLDER, 150, 186, 240, L"backup");
-    HWND browse_remote = CreateWindowW(L"BUTTON", L"Browse Remote...", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 400, 186, 110, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BROWSE_REMOTE)), instance_, nullptr);
-    SendMessageW(browse_remote, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-    
-    // Connect button
-    HWND connect_btn = CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 220, 100, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), instance_, nullptr);
-    SendMessageW(connect_btn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    // ── Grid ─────────────────────────────────────────────────────────────────
+    //
+    //  Window outer 520 × 800  →  client ≈ 500 × 761
+    //  Left margin  M  = 30
+    //  Label width  LW = 100
+    //  Field start  FX = 140
+    //  Right margin     (30 px from right edge) → RX = 470
 
-    HWND startup = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 150, 224, 150, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STARTUP)), instance_, nullptr);
-    SendMessageW(startup, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    constexpr int M   = 30;
+    constexpr int LW  = 100;
+    constexpr int FX  = 140;
+    constexpr int RX  = 470;
+    constexpr int RH  = 38;    // Row stride
+    constexpr int CH  = 26;    // Control height
+    constexpr int BW  = 85;    // Button width
+    constexpr int BH  = 28;    // Button height
 
-    HWND download_remote = CreateWindowW(
-        L"BUTTON",
-        L"Download remote changes too",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        320,
-        224,
-        220,
-        24,
-        hwnd_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_DOWNLOAD_REMOTE)),
-        instance_,
-        nullptr);
-    SendMessageW(download_remote, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    // Lazy-create transparent brush for standard controls
+    if (!section_label_brush_) {
+        section_label_brush_ = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
+    }
 
-    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 260, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
-    SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    // ── Helper lambdas ───────────────────────────────────────────────────────
 
-    progress_bar_ = CreateWindowExW(
-        0,
-        PROGRESS_CLASSW,
-        nullptr,
+    // Left-aligned field label (no colons)
+    auto label = [&](const wchar_t* text, int row_y) {
+        HWND h = CreateWindowW(L"STATIC", text,
+            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+            M, row_y + 5, LW, 16,
+            hwnd_, nullptr, instance_, nullptr);
+        SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
+    };
+
+    // Single-line edit box
+    auto edit = [&](int id, int x, int row_y, int w,
+                    const wchar_t* cue = nullptr, DWORD extra_style = 0) -> HWND {
+        HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | extra_style,
+            x, row_y, w, CH,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+        SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
+        if (cue) SendMessageW(h, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(cue));
+        return h;
+    };
+
+    // Standard push / check button
+    auto btn = [&](int id, const wchar_t* text, int x, int row_y, int w, int h,
+                   DWORD extra_style = 0) -> HWND {
+        HWND hw = CreateWindowW(L"BUTTON", text,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | extra_style,
+            x, row_y, w, h,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
+        return hw;
+    };
+
+    // Bold section header (no line)
+    auto section_header = [&](const wchar_t* text, int y) {
+        HWND lbl = CreateWindowW(L"STATIC", text,
+            WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
+            M, y, 200, 16,
+            hwnd_, nullptr, instance_, nullptr);
+        SendMessageW(lbl, WM_SETFONT, reinterpret_cast<WPARAM>(section_font_), TRUE);
+        section_labels_.push_back(lbl);
+    };
+
+    auto separator = [&](int y) {
+        CreateWindowW(L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+            M, y, RX - M, 2,
+            hwnd_, nullptr, instance_, nullptr);
+    };
+
+    // ── Layout ───────────────────────────────────────────────────────────────
+    int y = 20;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // LOCAL FOLDER
+    // ════════════════════════════════════════════════════════════════════════
+    section_header(L"LOCAL FOLDER", y);
+    y += 30;
+
+    label(L"Folder", y);
+    edit(IDC_WATCH_FOLDER, FX, y, RX - FX - BW - 10, L"C:\\path\\to\\sync");
+    btn(IDC_BROWSE_FOLDER, L"Browse...", RX - BW, y, BW, BH);
+    y += RH + 10;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SERVER
+    // ════════════════════════════════════════════════════════════════════════
+    section_header(L"SERVER", y);
+    y += 30;
+
+    label(L"URL", y);
+    edit(IDC_WEBDAV_URL, FX, y, RX - FX - 40 - 10, L"https://example.com/webdav/");
+    // Small info/open button
+    {
+        HWND ou = CreateWindowW(L"BUTTON", L"i",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            RX - 40, y, 40, BH,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_OPEN_WEBDAV_URL)), instance_, nullptr);
+        SendMessageW(ou, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
+    }
+    y += RH;
+
+    label(L"Username", y);
+    edit(IDC_USERNAME, FX, y, RX - FX, L"username");
+    y += RH;
+
+    label(L"Password", y);
+    edit(IDC_PASSWORD, FX, y, RX - FX, L"password", ES_PASSWORD);
+    y += RH;
+
+    label(L"Remote folder", y);
+    edit(IDC_REMOTE_FOLDER, FX, y, RX - FX - BW - 10, L"/backups");
+    btn(IDC_BROWSE_REMOTE, L"Browse...", RX - BW, y, BW, BH);
+    y += RH + 8;
+
+    btn(IDC_CONNECT, L"Connect", M, y, BW + 20, BH);
+    {
+        HWND cs = CreateWindowW(L"STATIC", L"\u25CF NOT CONNECTED", // ● 
+            WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
+            M + BW + 35, y + 6, RX - (M + BW + 35), 16,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECTION_STATUS)),
+            instance_, nullptr);
+        SendMessageW(cs, WM_SETFONT, reinterpret_cast<WPARAM>(section_font_), TRUE);
+    }
+    y += RH + 15;
+    
+    separator(y);
+    y += 20;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // OPTIONS
+    // ════════════════════════════════════════════════════════════════════════
+    section_header(L"OPTIONS", y);
+    y += 30;
+
+    btn(IDC_STARTUP, L"Start with Windows", M, y, 200, CH, BS_AUTOCHECKBOX);
+    y += RH;
+    btn(IDC_DOWNLOAD_REMOTE, L"Sync remote changes", M, y, 200, CH, BS_AUTOCHECKBOX);
+    y += RH + 5;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // SYNC STATUS
+    // ════════════════════════════════════════════════════════════════════════
+    {
+        HWND st = CreateWindowW(L"STATIC", L"\u26A0 NOT CONFIGURED", // ⚠
+            WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
+            M, y, RX - M, 16,
+            hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
+        SendMessageW(st, WM_SETFONT, reinterpret_cast<WPARAM>(section_font_), TRUE);
+    }
+    y += 22;
+
+    progress_bar_ = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
         WS_CHILD | WS_VISIBLE,
-        20,
-        282,
-        460,
-        18,
-        hwnd_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PROGRESS)),
-        instance_,
-        nullptr);
+        M, y, RX - M, 4,
+        hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PROGRESS)), instance_, nullptr);
     SendMessageW(progress_bar_, PBM_SETRANGE32, 0, 1);
     SendMessageW(progress_bar_, PBM_SETPOS, 0, 0);
+    y += 15 + 15;
 
-    make_label(L"Recent Activity", 20, 308);
-    activity_list_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
-        L"LISTBOX",
-        nullptr,
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
-        20,
-        330,
-        460,
-        110,
-        hwnd_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ACTIVITY)),
-        instance_,
-        nullptr);
-    SendMessageW(activity_list_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    // ════════════════════════════════════════════════════════════════════════
+    // RECENT ACTIVITY
+    // ════════════════════════════════════════════════════════════════════════
+    section_header(L"RECENT ACTIVITY", y);
+    y += 30;
 
-    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 190, 454, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
-    SendMessageW(save, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    // Client height depends on 800 outer -> ~761
+    constexpr int kClientH       = 761;
+    constexpr int kBottomMargin  = 20;
+    constexpr int kBtnAreaH      = 40;
+    const int listbox_bottom     = kClientH - kBtnAreaH - kBottomMargin;
+    const int listbox_h          = listbox_bottom - y;
 
-    HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 290, 454, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CLOSE)), instance_, nullptr);
-    SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    activity_list_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP |
+        LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
+        M, y, RX - M, listbox_h > 100 ? listbox_h : 100,
+        hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_ACTIVITY)), instance_, nullptr);
+    SendMessageW(activity_list_, WM_SETFONT, reinterpret_cast<WPARAM>(ui_font), TRUE);
+    y += (listbox_h > 100 ? listbox_h : 100) + kBottomMargin;
+
+    // ════════════════════════════════════════════════════════════════════════
+    // BOTTOM BUTTONS
+    // ════════════════════════════════════════════════════════════════════════
+    
+    // Version label
+    HWND version_lbl = CreateWindowW(L"STATIC", L"WEBDAVSYNC V1.0",
+        WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
+        M, y + 8, 150, 16,
+        hwnd_, nullptr, instance_, nullptr);
+    SendMessageW(version_lbl, WM_SETFONT, reinterpret_cast<WPARAM>(section_font_), TRUE);
+    section_labels_.push_back(version_lbl); // Color it grey as well
+
+    constexpr int kSaveBtnW  = 100;
+    constexpr int kCloseBtnW = 100;
+    const int btn_y = y;
+    btn(IDC_SAVE,  L"SAVE",  RX - kSaveBtnW - kCloseBtnW - 10, btn_y, kSaveBtnW,  BH + 4, BS_DEFPUSHBUTTON);
+    btn(IDC_CLOSE, L"CLOSE", RX - kCloseBtnW,                  btn_y, kCloseBtnW, BH + 4);
 }
 
 void App::LoadIntoControls() {
@@ -816,7 +917,17 @@ LRESULT App::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     }
     case WM_CTLCOLORSTATIC: {
         HDC dc = reinterpret_cast<HDC>(wparam);
+        HWND ctrl = reinterpret_cast<HWND>(lparam);
         SetBkMode(dc, TRANSPARENT);
+        // Paint section labels in grey
+        for (HWND sh : section_labels_) {
+            if (ctrl == sh) {
+                SetTextColor(dc, RGB(120, 120, 120));
+                return reinterpret_cast<LRESULT>(section_label_brush_
+                    ? section_label_brush_
+                    : GetSysColorBrush(COLOR_WINDOW));
+            }
+        }
         return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
     }
     case WM_COMMAND:

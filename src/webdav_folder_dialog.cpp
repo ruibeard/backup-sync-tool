@@ -11,55 +11,99 @@ WebDavFolderDialog* WebDavFolderDialog::current_dialog_ = nullptr;
 
 namespace {
 
-constexpr int IDD_FOLDER_BROWSER = 100;
 constexpr int IDC_FOLDER_LIST = 1001;
 constexpr int IDC_NEW_FOLDER_EDIT = 1002;
 constexpr int IDC_CREATE_FOLDER_BTN = 1003;
 constexpr int IDC_STATUS_LABEL = 1004;
 constexpr int IDC_REFRESH_BTN = 1005;
-constexpr int IDOK = 1;
-constexpr int IDCANCEL = 2;
-
 }
+
+static const wchar_t* kFolderDialogClass = L"WebDavFolderDialogClass";
 
 bool WebDavFolderDialog::Show(HWND parent, AppConfig& config, std::wstring& selected_folder) {
     WebDavFolderDialog dialog;
     dialog.config_ = &config;
     dialog.selected_folder_ = &selected_folder;
     dialog.instance_ = GetModuleHandleW(nullptr);
-    
+
+    // Register window class (idempotent)
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DialogProc;
+    wc.hInstance = dialog.instance_;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    wc.lpszClassName = kFolderDialogClass;
+    RegisterClassExW(&wc); // OK to fail if already registered
+
     current_dialog_ = &dialog;
-    
-    INT_PTR result = DialogBoxParamW(
-        dialog.instance_,
-        MAKEINTRESOURCEW(IDD_FOLDER_BROWSER),
+
+    HWND hwnd = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        kFolderDialogClass,
+        L"Select Remote Folder",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        410, 380,
         parent,
-        reinterpret_cast<DLGPROC>(DialogProc),
-        reinterpret_cast<LPARAM>(&dialog));
-    
+        nullptr,
+        dialog.instance_,
+        &dialog);
+
+    if (!hwnd) {
+        current_dialog_ = nullptr;
+        return false;
+    }
+
+    // Disable parent while our pseudo-modal window is open
+    if (parent) {
+        EnableWindow(parent, FALSE);
+    }
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!IsDialogMessageW(hwnd, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!IsWindow(hwnd)) {
+            break;
+        }
+    }
+
+    if (parent) {
+        EnableWindow(parent, TRUE);
+        SetForegroundWindow(parent);
+    }
+
     current_dialog_ = nullptr;
-    
-    return result == IDOK;
+
+    return dialog.result_ == IDOK;
 }
 
 LRESULT CALLBACK WebDavFolderDialog::DialogProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    WebDavFolderDialog* dialog = current_dialog_;
-    
-    if (message == WM_INITDIALOG) {
-        dialog = reinterpret_cast<WebDavFolderDialog*>(lparam);
+    if (message == WM_CREATE) {
+        const CREATESTRUCTW* cs = reinterpret_cast<const CREATESTRUCTW*>(lparam);
+        WebDavFolderDialog* dialog = reinterpret_cast<WebDavFolderDialog*>(cs->lpCreateParams);
         if (dialog) {
             dialog->hwnd_ = hwnd;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(dialog));
             dialog->InitializeDialog(hwnd);
         }
-        return TRUE;
+        return 0;
     }
-    
+
+    WebDavFolderDialog* dialog = reinterpret_cast<WebDavFolderDialog*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
     if (dialog) {
         return dialog->HandleMessage(hwnd, message, wparam, lparam);
     }
-    
-    return FALSE;
+
+    return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 LRESULT WebDavFolderDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -68,33 +112,41 @@ LRESULT WebDavFolderDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wparam
         switch (LOWORD(wparam)) {
         case IDOK:
             OnFolderSelected();
-            EndDialog(hwnd, IDOK);
-            return TRUE;
+            result_ = IDOK;
+            DestroyWindow(hwnd);
+            return 0;
         case IDCANCEL:
-            EndDialog(hwnd, IDCANCEL);
-            return TRUE;
+            result_ = IDCANCEL;
+            DestroyWindow(hwnd);
+            return 0;
         case IDC_CREATE_FOLDER_BTN:
             CreateNewFolder();
-            return TRUE;
+            return 0;
         case IDC_REFRESH_BTN:
             LoadFolders();
-            return TRUE;
+            return 0;
         case IDC_FOLDER_LIST:
             if (HIWORD(wparam) == LBN_DBLCLK) {
                 OnFolderSelected();
-                EndDialog(hwnd, IDOK);
-                return TRUE;
+                result_ = IDOK;
+                DestroyWindow(hwnd);
+                return 0;
             }
             break;
         }
         break;
-        
+
     case WM_CLOSE:
-        EndDialog(hwnd, IDCANCEL);
-        return TRUE;
+        result_ = IDCANCEL;
+        DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
     }
-    
-    return FALSE;
+
+    return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 void WebDavFolderDialog::InitializeDialog(HWND hwnd) {

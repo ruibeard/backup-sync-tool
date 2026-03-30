@@ -4,6 +4,7 @@
 #include "sync_engine.h"
 #include <windows.h>
 #include <string>
+#include <vector>
 
 class App {
 public:
@@ -58,6 +59,9 @@ private:
     HWND progress_bar_ = nullptr;
     HWND activity_list_ = nullptr;
     HWND connection_status_label_ = nullptr;
+    std::vector<HWND> section_labels_;  // for grey colour in WM_CTLCOLORSTATIC
+    HBRUSH section_label_brush_ = nullptr;
+    HFONT section_font_ = nullptr;
     SyncState sync_state_ = SyncState::Idle;
     AppConfig config_;
     SyncEngine engine_;
