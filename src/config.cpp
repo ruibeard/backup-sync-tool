@@ -198,6 +198,7 @@ bool LoadConfig(AppConfig& config) {
     config.watch_folder = ExtractString(text, L"watch_folder");
     config.webdav_url = ExtractString(text, L"webdav_url");
     config.username = ExtractString(text, L"username");
+    config.remote_folder = ExtractString(text, L"remote_folder");
     config.start_with_windows = ExtractBool(text, L"start_with_windows");
     config.download_remote_changes = ExtractBool(text, L"download_remote_changes");
 
@@ -219,6 +220,7 @@ bool SaveConfig(const AppConfig& config) {
     json << L"{\n";
     json << L"  \"watch_folder\": \"" << EscapeJson(config.watch_folder) << L"\",\n";
     json << L"  \"webdav_url\": \"" << EscapeJson(config.webdav_url) << L"\",\n";
+    json << L"  \"remote_folder\": \"" << EscapeJson(config.remote_folder) << L"\",\n";
     json << L"  \"username\": \"" << EscapeJson(config.username) << L"\",\n";
     json << L"  \"password_protected\": \"" << EscapeJson(protected_password) << L"\",\n";
     json << L"  \"start_with_windows\": " << (config.start_with_windows ? L"true" : L"false") << L",\n";
@@ -232,5 +234,6 @@ bool HasUsableConfig(const AppConfig& config) {
     return !config.watch_folder.empty() &&
            !config.webdav_url.empty() &&
            !config.username.empty() &&
-           !config.password.empty();
+           !config.password.empty() &&
+           !config.remote_folder.empty();
 }

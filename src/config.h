@@ -7,6 +7,7 @@ struct AppConfig {
     std::wstring webdav_url;
     std::wstring username;
     std::wstring password;
+    std::wstring remote_folder;
     bool start_with_windows = true;
     bool download_remote_changes = false;
 };

@@ -1,5 +1,6 @@
 #include "app.h"
 #include "resource.h"
+#include "webdav_folder_dialog.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -33,6 +34,10 @@ constexpr int IDC_PROGRESS = 2010;
 constexpr int IDC_BROWSE_FOLDER = 2011;
 constexpr int IDC_OPEN_WEBDAV_URL = 2012;
 constexpr int IDC_ACTIVITY = 2013;
+constexpr int IDC_REMOTE_FOLDER = 2014;
+constexpr int IDC_BROWSE_REMOTE = 2015;
+constexpr int IDC_CONNECT = 2016;
+constexpr int IDC_CONNECTION_STATUS = 2017;
 
 constexpr UINT IDM_TRAY_LOG = 3003;
 constexpr UINT IDM_TRAY_EXIT = 3004;
@@ -161,6 +166,8 @@ int App::Run() {
     LoadIntoControls();
 
     if (HasUsableConfig(config_)) {
+        // Auto-connect on startup
+        ConnectToServer();
         StartSync();
         ShowSettings(false);
     } else {
@@ -216,8 +223,8 @@ bool App::CreateMainWindow() {
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        520,
-        500,
+        540,
+        540,
         nullptr,
         nullptr,
         instance_,
@@ -255,6 +262,7 @@ void App::CreateControls() {
     make_edit(IDC_WATCH_FOLDER, 150, 20, 240, L"Choose the local folder to sync");
     HWND browse = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 400, 20, 80, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BROWSE_FOLDER)), instance_, nullptr);
     SendMessageW(browse, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    
     make_label(L"WebDAV URL", 20, 56);
     make_edit(IDC_WEBDAV_URL, 150, 54, 294, L"https://example.com/webdav/");
     HWND open_url = CreateWindowW(
@@ -275,20 +283,36 @@ void App::CreateControls() {
         SetWindowTextW(open_url, L"Go");
         SendMessageW(open_url, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }
-    make_label(L"Username", 20, 90);
-    make_edit(IDC_USERNAME, 150, 88, 330, L"name@example.com");
-    make_label(L"Password", 20, 124);
-    make_edit(IDC_PASSWORD, 150, 122, 330, L"Enter your password", ES_PASSWORD);
 
-    HWND startup = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 150, 158, 150, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STARTUP)), instance_, nullptr);
+    // Connection Status
+    make_label(L"Status", 20, 90);
+    HWND connection_status = CreateWindowW(L"STATIC", L"● Not connected", WS_CHILD | WS_VISIBLE, 150, 90, 330, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECTION_STATUS)), instance_, nullptr);
+    SendMessageW(connection_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    
+    make_label(L"Username", 20, 120);
+    make_edit(IDC_USERNAME, 150, 118, 330, L"name@example.com");
+    
+    make_label(L"Password", 20, 154);
+    make_edit(IDC_PASSWORD, 150, 152, 330, L"Enter your password", ES_PASSWORD);
+    
+    make_label(L"Remote Folder", 20, 188);
+    make_edit(IDC_REMOTE_FOLDER, 150, 186, 240, L"backup");
+    HWND browse_remote = CreateWindowW(L"BUTTON", L"Browse Remote...", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 400, 186, 110, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BROWSE_REMOTE)), instance_, nullptr);
+    SendMessageW(browse_remote, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    
+    // Connect button
+    HWND connect_btn = CreateWindowW(L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 20, 220, 100, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CONNECT)), instance_, nullptr);
+    SendMessageW(connect_btn, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+    HWND startup = CreateWindowW(L"BUTTON", L"Start with Windows", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 150, 224, 150, 24, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STARTUP)), instance_, nullptr);
     SendMessageW(startup, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
     HWND download_remote = CreateWindowW(
         L"BUTTON",
         L"Download remote changes too",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-        150,
-        182,
+        320,
+        224,
         220,
         24,
         hwnd_,
@@ -297,7 +321,7 @@ void App::CreateControls() {
         nullptr);
     SendMessageW(download_remote, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 218, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
+    HWND status = CreateWindowW(L"STATIC", L"Not configured", WS_CHILD | WS_VISIBLE, 20, 260, 460, 20, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
     SendMessageW(status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
     progress_bar_ = CreateWindowExW(
@@ -306,7 +330,7 @@ void App::CreateControls() {
         nullptr,
         WS_CHILD | WS_VISIBLE,
         20,
-        240,
+        282,
         460,
         18,
         hwnd_,
@@ -316,14 +340,14 @@ void App::CreateControls() {
     SendMessageW(progress_bar_, PBM_SETRANGE32, 0, 1);
     SendMessageW(progress_bar_, PBM_SETPOS, 0, 0);
 
-    make_label(L"Recent Activity", 20, 266);
+    make_label(L"Recent Activity", 20, 308);
     activity_list_ = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         L"LISTBOX",
         nullptr,
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
         20,
-        288,
+        330,
         460,
         110,
         hwnd_,
@@ -332,16 +356,17 @@ void App::CreateControls() {
         nullptr);
     SendMessageW(activity_list_, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 190, 412, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
+    HWND save = CreateWindowW(L"BUTTON", L"Save", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 190, 454, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SAVE)), instance_, nullptr);
     SendMessageW(save, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 
-    HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 290, 412, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CLOSE)), instance_, nullptr);
+    HWND close = CreateWindowW(L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 290, 454, 90, 28, hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CLOSE)), instance_, nullptr);
     SendMessageW(close, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
 }
 
 void App::LoadIntoControls() {
     SetControlText(IDC_WATCH_FOLDER, config_.watch_folder);
     SetControlText(IDC_WEBDAV_URL, config_.webdav_url);
+    SetControlText(IDC_REMOTE_FOLDER, config_.remote_folder);
     SetControlText(IDC_USERNAME, config_.username);
     SetControlText(IDC_PASSWORD, config_.password);
     SetCheck(IDC_STARTUP, config_.start_with_windows);
@@ -351,6 +376,7 @@ void App::LoadIntoControls() {
 void App::SaveFromControls() {
     config_.watch_folder = GetControlText(IDC_WATCH_FOLDER);
     config_.webdav_url = GetControlText(IDC_WEBDAV_URL);
+    config_.remote_folder = GetControlText(IDC_REMOTE_FOLDER);
     config_.username = GetControlText(IDC_USERNAME);
     config_.password = GetControlText(IDC_PASSWORD);
     config_.start_with_windows = GetCheck(IDC_STARTUP);
@@ -588,6 +614,77 @@ void App::BrowseForWatchFolder() {
     CoTaskMemFree(selected);
 }
 
+void App::BrowseRemoteFolder() {
+    // First save current values from controls
+    SaveFromControls();
+    
+    // Validate we have URL, username, password first
+    if (config_.webdav_url.empty() || config_.username.empty() || config_.password.empty()) {
+        MessageBoxW(hwnd_, L"Please enter WebDAV URL, Username, and Password first.", L"WebDavSync", MB_ICONWARNING);
+        return;
+    }
+    
+    std::wstring selected_folder;
+    if (WebDavFolderDialog::Show(hwnd_, config_, selected_folder)) {
+        SetControlText(IDC_REMOTE_FOLDER, selected_folder);
+    }
+}
+
+void App::ConnectToServer() {
+    // Save current values
+    SaveFromControls();
+    
+    // Validate basic requirements
+    if (config_.webdav_url.empty() || config_.username.empty() || config_.password.empty()) {
+        UpdateStatus(SyncState::Error, L"WebDAV URL, Username, and Password are required", 0, 0);
+        MessageBoxW(hwnd_, L"Please enter WebDAV URL, Username, and Password.", L"WebDavSync", MB_ICONWARNING);
+        return;
+    }
+    
+    UpdateStatus(SyncState::Idle, L"Connecting to server...", 0, 0);
+    
+    WebDavClient client(config_);
+    std::wstring error_message;
+    
+    if (!client.TestConnection(error_message)) {
+        UpdateConnectionStatus(false);
+        UpdateStatus(SyncState::Error, L"Connection failed", 0, 0);
+        MessageBoxW(hwnd_, error_message.c_str(), L"WebDavSync - Connection Failed", MB_ICONERROR);
+        return;
+    }
+    
+    // Connection successful
+    is_connected_ = true;
+    GetLocalTime(&connection_time_);
+    UpdateConnectionStatus(true);
+    UpdateStatus(SyncState::Idle, L"Connected successfully", 0, 0);
+    Log(L"Connected to WebDAV server");
+}
+
+void App::UpdateConnectionStatus(bool connected) {
+    HWND status_label = GetDlgItem(hwnd_, IDC_CONNECTION_STATUS);
+    if (!status_label) {
+        return;
+    }
+    
+    is_connected_ = connected;
+    
+    if (connected) {
+        wchar_t time_buffer[64] = {};
+        SYSTEMTIME now;
+        GetLocalTime(&now);
+        StringCchPrintfW(time_buffer, _countof(time_buffer), L"%02d:%02d", now.wHour, now.wMinute);
+        
+        std::wstring status = L"● Connected since " + std::wstring(time_buffer);
+        SetWindowTextW(status_label, status.c_str());
+        
+        // Set text color to green (using owner draw would be better, but this works for now)
+        // For a visual dot, we use Unicode bullet character
+    } else {
+        SetWindowTextW(status_label, L"● Not connected");
+    }
+}
+
 bool App::ValidateConfig(std::wstring& error_message) {
     if (config_.watch_folder.empty()) {
         error_message = L"Folder is required.";
@@ -603,6 +700,10 @@ bool App::ValidateConfig(std::wstring& error_message) {
     }
     if (config_.password.empty()) {
         error_message = L"Password is required.";
+        return false;
+    }
+    if (config_.remote_folder.empty()) {
+        error_message = L"Remote folder is required.";
         return false;
     }
 
@@ -647,6 +748,12 @@ void App::HandleCommand(int control_id) {
     case IDC_OPEN_WEBDAV_URL:
         OpenWebDavUrl();
         break;
+    case IDC_BROWSE_REMOTE:
+        BrowseRemoteFolder();
+        break;
+    case IDC_CONNECT:
+        ConnectToServer();
+        break;
     case IDC_SAVE: {
         SaveFromControls();
         std::wstring error_message;
@@ -673,6 +780,7 @@ void App::HandleCommand(int control_id) {
         ApplyStartupSetting();
         StopSync();
         StartSync();
+        UpdateConnectionStatus(true);
         UpdateStatus(SyncState::Idle, L"Connected and watching for changes", 0, 0);
         break;
     }

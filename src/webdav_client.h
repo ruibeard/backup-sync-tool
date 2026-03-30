@@ -9,6 +9,12 @@
 #include <string>
 #include <vector>
 
+struct WebDavFolderInfo {
+    std::wstring display_name;
+    std::wstring full_path;
+    bool is_collection = false;
+};
+
 class WebDavClient {
 public:
     explicit WebDavClient(const AppConfig& config);
@@ -16,6 +22,8 @@ public:
     bool TestConnection(std::wstring& error_message);
     bool IsRemoteFileCurrent(const std::wstring& relative_path, const FileEntry& local_entry, bool& is_current, std::wstring& error_message);
     bool ListRemoteFiles(FileSnapshot& snapshot, std::wstring& error_message);
+    bool ListRemoteFolder(std::vector<WebDavFolderInfo>& folders, std::wstring& error_message);
+    bool CreateFolder(const std::wstring& folder_name, std::wstring& error_message);
     bool DownloadFile(const std::wstring& relative_path, std::vector<BYTE>& data, std::wstring& error_message);
     bool UploadFile(const std::wstring& local_path, const std::wstring& relative_path, std::wstring& error_message);
     bool DeleteFile(const std::wstring& relative_path, std::wstring& error_message);
@@ -27,7 +35,9 @@ private:
         const void* body,
         DWORD body_size,
         DWORD& status_code,
-        std::wstring& error_message);
+        std::wstring& error_message,
+        const wchar_t* extra_headers = nullptr,
+        std::vector<BYTE>* response_body = nullptr);
     bool EnsureCollectionExists(const std::wstring& full_path, std::wstring& error_message);
     bool EnsureBaseCollectionExists(std::wstring& error_message);
     bool EnsureRemoteFolders(const std::wstring& relative_path, std::wstring& error_message);

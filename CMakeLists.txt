@@ -14,6 +14,7 @@ add_executable(WebDavSync WIN32
     src/resource.rc
     src/sync_engine.cpp
     src/webdav_client.cpp
+    src/webdav_folder_dialog.cpp
 )
 
 target_include_directories(WebDavSync PRIVATE src)

@@ -3,10 +3,14 @@
 #include "file_scanner.h"
 #include "webdav_client.h"
 
+#include <windows.h>
+#include <shlobj.h>
+
 #include <chrono>
+#include <set>
 #include <sstream>
-#include <vector>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -14,6 +18,24 @@ bool SameFileEntry(const FileEntry& left, const FileEntry& right) {
     return left.size == right.size &&
            left.last_write.dwLowDateTime == right.last_write.dwLowDateTime &&
            left.last_write.dwHighDateTime == right.last_write.dwHighDateTime;
+}
+
+ULONGLONG FileTimeToUInt64(const FILETIME& value) {
+    ULARGE_INTEGER converted{};
+    converted.LowPart = value.dwLowDateTime;
+    converted.HighPart = value.dwHighDateTime;
+    return converted.QuadPart;
+}
+
+bool FileTimesMatchWithinSeconds(const FILETIME& left, const FILETIME& right, ULONGLONG seconds_tolerance) {
+    const ULONGLONG left_value = FileTimeToUInt64(left);
+    const ULONGLONG right_value = FileTimeToUInt64(right);
+    const ULONGLONG difference = left_value > right_value ? (left_value - right_value) : (right_value - left_value);
+    return difference <= seconds_tolerance * 10000000ULL;
+}
+
+bool EquivalentEntries(const FileEntry& left, const FileEntry& right) {
+    return left.size == right.size && FileTimesMatchWithinSeconds(left.last_write, right.last_write, 2);
 }
 
 std::wstring JoinPath(const std::wstring& left, const std::wstring& right) {
@@ -29,6 +51,62 @@ std::wstring JoinPath(const std::wstring& left, const std::wstring& right) {
 struct PendingUpload {
     std::wstring relative_path;
 };
+
+struct PendingDownload {
+    std::wstring relative_path;
+    FileEntry remote_entry;
+};
+
+bool SnapshotEntryChanged(const FileSnapshot& previous, const std::wstring& relative_path, const FileEntry& current) {
+    const auto found = previous.find(relative_path);
+    return found == previous.end() || !SameFileEntry(found->second, current);
+}
+
+std::wstring GetParentPath(const std::wstring& path) {
+    const size_t separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) {
+        return L"";
+    }
+    return path.substr(0, separator);
+}
+
+bool WriteLocalFile(const std::wstring& local_path, const std::vector<BYTE>& data, const FILETIME& last_write, std::wstring& error_message) {
+    const std::wstring parent_path = GetParentPath(local_path);
+    if (!parent_path.empty()) {
+        const int directory_result = SHCreateDirectoryExW(nullptr, parent_path.c_str(), nullptr);
+        if (!(directory_result == ERROR_SUCCESS || directory_result == ERROR_ALREADY_EXISTS || directory_result == ERROR_FILE_EXISTS)) {
+            error_message = L"Could not create local folder.";
+            return false;
+        }
+    }
+
+    const std::wstring temp_path = local_path + L".tmp";
+    HANDLE file = CreateFileW(temp_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error_message = L"Could not create local file.";
+        return false;
+    }
+
+    DWORD written = 0;
+    const BOOL write_ok = data.empty() ? TRUE : WriteFile(file, data.data(), static_cast<DWORD>(data.size()), &written, nullptr);
+    const bool has_last_write = last_write.dwLowDateTime != 0 || last_write.dwHighDateTime != 0;
+    const BOOL time_ok = has_last_write ? SetFileTime(file, nullptr, nullptr, &last_write) : TRUE;
+    CloseHandle(file);
+
+    if (!write_ok || written != data.size() || !time_ok) {
+        DeleteFileW(temp_path.c_str());
+        error_message = L"Could not write downloaded file.";
+        return false;
+    }
+
+    if (!MoveFileExW(temp_path.c_str(), local_path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(temp_path.c_str());
+        error_message = L"Could not replace local file.";
+        return false;
+    }
+
+    return true;
+}
 
 } // namespace
 
@@ -71,7 +149,7 @@ void SyncEngine::SyncNow() {
     }
 }
 
-void SyncEngine::PerformSync(FileSnapshot& previous) {
+void SyncEngine::PerformSync(FileSnapshot& previous_local, FileSnapshot& previous_remote) {
     force_sync_ = false;
 
     if (status_fn_) {
@@ -91,12 +169,76 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
 
     WebDavClient client(config_);
     bool had_error = false;
+    int downloaded_count = 0;
     int uploaded_count = 0;
+    bool remote_snapshot_available = false;
+    FileSnapshot remote_current;
+    std::vector<PendingDownload> pending_downloads;
     std::vector<PendingUpload> pending_uploads;
+    std::set<std::wstring> conflict_paths;
+
+    if (config_.download_remote_changes) {
+        std::wstring error_message;
+        if (client.ListRemoteFiles(remote_current, error_message)) {
+            remote_snapshot_available = true;
+        } else {
+            had_error = true;
+            if (log_fn_) {
+                log_fn_(L"Remote listing failed: " + error_message);
+            }
+        }
+    }
+
+    if (remote_snapshot_available) {
+        for (const auto& pair : remote_current) {
+            const auto local_found = current.find(pair.first);
+            if (local_found == current.end()) {
+                pending_downloads.push_back({pair.first, pair.second});
+                continue;
+            }
+
+            if (EquivalentEntries(local_found->second, pair.second)) {
+                continue;
+            }
+
+            const bool local_changed = SnapshotEntryChanged(previous_local, pair.first, local_found->second);
+            const bool remote_changed = SnapshotEntryChanged(previous_remote, pair.first, pair.second);
+            if (remote_changed && !local_changed) {
+                pending_downloads.push_back({pair.first, pair.second});
+                continue;
+            }
+
+            if (remote_changed && local_changed) {
+                conflict_paths.insert(pair.first);
+                if (log_fn_) {
+                    log_fn_(L"Conflict skipped: " + pair.first + L" changed locally and remotely.");
+                }
+            }
+        }
+    }
 
     for (const auto& pair : current) {
-        const auto found = previous.find(pair.first);
-        if (found != previous.end() && SameFileEntry(found->second, pair.second)) {
+        if (remote_snapshot_available) {
+            const auto remote_found = remote_current.find(pair.first);
+            if (remote_found != remote_current.end() && EquivalentEntries(remote_found->second, pair.second)) {
+                continue;
+            }
+
+            const bool local_changed = SnapshotEntryChanged(previous_local, pair.first, pair.second);
+            const bool remote_changed = remote_found != remote_current.end() && SnapshotEntryChanged(previous_remote, pair.first, remote_found->second);
+            if (remote_found == remote_current.end() || (local_changed && !remote_changed)) {
+                pending_uploads.push_back({pair.first});
+                continue;
+            }
+
+            if (local_changed && remote_changed) {
+                conflict_paths.insert(pair.first);
+            }
+            continue;
+        }
+
+        const auto found = previous_local.find(pair.first);
+        if (found != previous_local.end() && SameFileEntry(found->second, pair.second)) {
             continue;
         }
 
@@ -120,12 +262,45 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
         pending_uploads.push_back({pair.first});
     }
 
+    const int total_downloads = static_cast<int>(pending_downloads.size());
     const int total_uploads = static_cast<int>(pending_uploads.size());
+    const int total_operations = total_downloads + total_uploads;
     if (status_fn_) {
-        if (total_uploads > 0) {
-            status_fn_(SyncState::Syncing, L"Uploading files...", 0, total_uploads);
+        if (total_operations > 0) {
+            status_fn_(SyncState::Syncing, total_downloads > 0 ? L"Downloading files..." : L"Uploading files...", 0, total_operations);
         } else {
             status_fn_(SyncState::Idle, L"Watching for changes", 0, 0);
+        }
+    }
+
+    int completed_operations = 0;
+
+    for (size_t index = 0; index < pending_downloads.size(); ++index) {
+        const auto& pending = pending_downloads[index];
+        std::wstringstream progress_text;
+        progress_text << L"Downloading " << (index + 1) << L" of " << total_downloads;
+        if (status_fn_) {
+            status_fn_(SyncState::Syncing, progress_text.str(), completed_operations, total_operations);
+        }
+
+        std::vector<BYTE> data;
+        std::wstring error_message;
+        if (client.DownloadFile(pending.relative_path, data, error_message) &&
+            WriteLocalFile(JoinPath(config_.watch_folder, pending.relative_path), data, pending.remote_entry.last_write, error_message)) {
+            ++downloaded_count;
+            if (log_fn_) {
+                log_fn_(L"Downloaded: " + pending.relative_path);
+            }
+        } else {
+            had_error = true;
+            if (log_fn_) {
+                log_fn_(L"Download failed: " + pending.relative_path + L" - " + error_message);
+            }
+        }
+
+        ++completed_operations;
+        if (status_fn_) {
+            status_fn_(SyncState::Syncing, progress_text.str(), completed_operations, total_operations);
         }
     }
 
@@ -134,7 +309,7 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
         std::wstringstream progress_text;
         progress_text << L"Uploading " << (index + 1) << L" of " << total_uploads;
         if (status_fn_) {
-            status_fn_(SyncState::Syncing, progress_text.str(), static_cast<int>(index), total_uploads);
+            status_fn_(SyncState::Syncing, progress_text.str(), completed_operations, total_operations);
         }
 
         std::wstring error_message;
@@ -151,23 +326,73 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
             }
         }
 
+        ++completed_operations;
         if (status_fn_) {
-            status_fn_(SyncState::Syncing, progress_text.str(), static_cast<int>(index + 1), total_uploads);
+            status_fn_(SyncState::Syncing, progress_text.str(), completed_operations, total_operations);
         }
     }
-    previous = current;
+
+    FileSnapshot refreshed_local;
+    if (BuildSnapshot(config_.watch_folder, refreshed_local)) {
+        previous_local = std::move(refreshed_local);
+    } else {
+        previous_local = current;
+    }
+
+    if (config_.download_remote_changes) {
+        FileSnapshot refreshed_remote;
+        std::wstring error_message;
+        if (client.ListRemoteFiles(refreshed_remote, error_message)) {
+            previous_remote = std::move(refreshed_remote);
+        } else if (remote_snapshot_available) {
+            previous_remote = remote_current;
+        } else {
+            previous_remote.clear();
+        }
+    } else {
+        previous_remote.clear();
+    }
+
     if (status_fn_) {
         std::wstringstream status;
         if (had_error) {
             status << L"Sync finished with errors";
-            if (uploaded_count > 0) {
-                status << L" (" << uploaded_count << L" uploaded)";
+            if (downloaded_count > 0 || uploaded_count > 0) {
+                status << L" (";
+                if (downloaded_count > 0) {
+                    status << downloaded_count << L" downloaded";
+                }
+                if (downloaded_count > 0 && uploaded_count > 0) {
+                    status << L", ";
+                }
+                if (uploaded_count > 0) {
+                    status << uploaded_count << L" uploaded";
+                }
+                status << L")";
             }
-            status_fn_(SyncState::Error, status.str(), total_uploads, total_uploads);
-        } else if (uploaded_count > 0) {
+            if (!conflict_paths.empty()) {
+                status << L" - conflicts skipped";
+            }
+            status_fn_(SyncState::Error, status.str(), total_operations, total_operations);
+        } else if (downloaded_count > 0 || uploaded_count > 0 || !conflict_paths.empty()) {
             status << L"Watching for changes";
-            status << L" (" << uploaded_count << L" uploaded)";
-            status_fn_(SyncState::Idle, status.str(), total_uploads, total_uploads);
+            if (downloaded_count > 0 || uploaded_count > 0) {
+                status << L" (";
+                if (downloaded_count > 0) {
+                    status << downloaded_count << L" downloaded";
+                }
+                if (downloaded_count > 0 && uploaded_count > 0) {
+                    status << L", ";
+                }
+                if (uploaded_count > 0) {
+                    status << uploaded_count << L" uploaded";
+                }
+                status << L")";
+            }
+            if (!conflict_paths.empty()) {
+                status << L" - conflicts skipped";
+            }
+            status_fn_(SyncState::Idle, status.str(), total_operations, total_operations);
         } else {
             status_fn_(SyncState::Idle, L"Watching for changes", 0, 0);
         }
@@ -175,7 +400,8 @@ void SyncEngine::PerformSync(FileSnapshot& previous) {
 }
 
 void SyncEngine::WorkerLoop() {
-    FileSnapshot previous;
+    FileSnapshot previous_local;
+    FileSnapshot previous_remote;
 
     HANDLE wake_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!wake_event) {
@@ -200,7 +426,7 @@ void SyncEngine::WorkerLoop() {
         wake_event_ = wake_event;
     }
 
-    PerformSync(previous);
+    PerformSync(previous_local, previous_remote);
 
     if (watch == INVALID_HANDLE_VALUE) {
         if (log_fn_) {
@@ -214,7 +440,7 @@ void SyncEngine::WorkerLoop() {
 
         while (running_) {
             if (force_sync_) {
-                PerformSync(previous);
+                PerformSync(previous_local, previous_remote);
                 continue;
             }
 
@@ -243,7 +469,7 @@ void SyncEngine::WorkerLoop() {
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            PerformSync(previous);
+            PerformSync(previous_local, previous_remote);
         }
     }
 

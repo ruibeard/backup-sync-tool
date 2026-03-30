@@ -35,6 +35,9 @@ private:
     void OpenWebDavUrl();
     void BrowseForWatchFolder();
     bool ValidateConfig(std::wstring& error_message);
+    void UpdateConnectionStatus(bool connected);
+    void BrowseRemoteFolder();
+    void ConnectToServer();
     std::wstring GetControlText(int control_id) const;
     void SetControlText(int control_id, const std::wstring& value);
     void SetCheck(int control_id, bool checked);
@@ -54,8 +57,11 @@ private:
     HICON open_url_icon_ = nullptr;
     HWND progress_bar_ = nullptr;
     HWND activity_list_ = nullptr;
+    HWND connection_status_label_ = nullptr;
     SyncState sync_state_ = SyncState::Idle;
     AppConfig config_;
     SyncEngine engine_;
     bool tray_added_ = false;
+    bool is_connected_ = false;
+    SYSTEMTIME connection_time_;
 };
