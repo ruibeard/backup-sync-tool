@@ -319,6 +319,18 @@ unsafe fn on_create(hwnd: HWND) {
     tray::add_tray_icon(hwnd, hicon);
 
     let raw = hwnd.0 as isize;
+
+    // Auto-connect on startup if creds are saved
+    if !cfg.webdav_url.is_empty() && !cfg.username.is_empty() && !pass.is_empty() {
+        let cfg2 = cfg.clone();
+        let pass2 = pass.clone();
+        std::thread::spawn(move || {
+            let ok = crate::webdav::test_connection(&cfg2, &pass2).is_ok();
+            PostMessageW(HWND(raw), WM_APP_CONNECTED,
+                WPARAM(if ok { 1 } else { 0 }), LPARAM(0)).ok();
+        });
+    }
+
     std::thread::spawn(move || {
         if let Some(info) = crate::updater::check(env!("CARGO_PKG_VERSION")) {
             let url = Box::new(info.url);
@@ -394,7 +406,7 @@ unsafe fn build_ui(
         y += INP_H + ROW_GAP;
 
         // Connect row
-        mkbtn_blue(hwnd, hi, IDC_CONNECT, "Connect", M + PAD, y, 110, CONN_H, hf_b);
+        mkbtn_blue(hwnd, hi, IDC_CONNECT, "Save & Connect", M + PAD, y, 130, CONN_H, hf_b);
         mkstatic(hwnd, hi, IDC_STATUS_TEXT, "\u{25cf}  NOT CONNECTED",
             M + PAD + 110 + 12, y + (CONN_H - LBL_H) / 2, 200, LBL_H, hf);
         y += CONN_H + PAD;
@@ -682,24 +694,29 @@ unsafe fn toggle_password(hwnd: HWND) {
 unsafe fn browse_local(hwnd: HWND) {
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::{SHCreateItemFromParsingName, IShellItem};
-    if let Ok(dialog) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) {
-        let _ = dialog.SetOptions(FOS_PICKFOLDERS);
-        // Pre-navigate to the current folder value if it exists
-        let current = gettext(hwnd, IDC_WATCH_FOLDER);
-        if !current.is_empty() {
-            let wide: Vec<u16> = current.encode_utf16().chain(std::iter::once(0)).collect();
-            if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None) {
-                let _ = dialog.SetFolder(&item);
-            }
+    let dialog = match CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) {
+        Ok(d) => d,
+        Err(e) => { msgbox(hwnd, &format!("CoCreateInstance failed: {e}"), "Browse Error"); return; }
+    };
+    if let Err(e) = dialog.SetOptions(FOS_PICKFOLDERS) {
+        msgbox(hwnd, &format!("SetOptions failed: {e}"), "Browse Error"); return;
+    }
+    let current = gettext(hwnd, IDC_WATCH_FOLDER);
+    if !current.is_empty() {
+        let wide: Vec<u16> = current.encode_utf16().chain(std::iter::once(0)).collect();
+        if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None) {
+            let _ = dialog.SetFolder(&item);
         }
-        if dialog.Show(hwnd).is_ok() {
-            if let Ok(item) = dialog.GetResult() {
-                if let Ok(path) = item.GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH) {
-                    let s = path.to_string().unwrap_or_default();
-                    let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
-                    windows::Win32::System::Com::CoTaskMemFree(Some(path.as_ptr() as _));
-                }
-            }
+    }
+    match dialog.Show(hwnd) {
+        Err(e) => { msgbox(hwnd, &format!("Show failed: {:?}", e), "Browse Error"); return; }
+        Ok(_) => {}
+    }
+    if let Ok(item) = dialog.GetResult() {
+        if let Ok(path) = item.GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH) {
+            let s = path.to_string().unwrap_or_default();
+            let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
+            windows::Win32::System::Com::CoTaskMemFree(Some(path.as_ptr() as _));
         }
     }
 }
@@ -707,6 +724,13 @@ unsafe fn browse_local(hwnd: HWND) {
 unsafe fn do_connect(hwnd: HWND) {
     let st = stmut(hwnd);
     read_ctrls(hwnd, st);
+    // Save creds first
+    match secret::encrypt(&st.password_plain) {
+        Ok(enc) => st.config.password_enc = enc,
+        Err(e)  => { msgbox(hwnd, &format!("Encrypt error: {e}"), "Error"); return; }
+    }
+    let _ = crate::config::save(&st.config);
+    apply_startup(&st.config);
     let cfg = st.config.clone(); let pass = st.password_plain.clone();
     EnableWindow(GetDlgItem(hwnd, IDC_CONNECT as i32), FALSE);
     set_status(hwnd, "\u{25cf}  Connecting\u{2026}");
