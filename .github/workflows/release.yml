@@ -1,0 +1,65 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+# Skip if this is the auto-commit pushed by this workflow itself
+# to avoid an infinite trigger loop.
+jobs:
+  build:
+    if: "!startsWith(github.event.head_commit.message, 'release:')"
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need full history so we can push the release commit + tag back
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump patch version in Cargo.toml
+        id: version
+        run: |
+          $toml = Get-Content "Cargo.toml" -Raw
+          $current = [regex]::Match($toml, 'version\s*=\s*"(\d+)\.(\d+)\.(\d+)"').Groups
+          $major = $current[1].Value
+          $minor = $current[2].Value
+          $patch = [int]$current[3].Value + 1
+          $newVersion = "$major.$minor.$patch"
+          $toml = $toml -replace '(?m)^version\s*=\s*"\d+\.\d+\.\d+"', "version = `"$newVersion`""
+          Set-Content "Cargo.toml" $toml -NoNewline
+          echo "value=v$newVersion" >> $env:GITHUB_OUTPUTª
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Copy binary to repo root
+        run: Copy-Item "target\release\backupsynctool.exe" "backupsynctool.exe" -Force
+
+      - name: Commit and tag release
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock backupsynctool.exe
+          git commit -m "release: ${{ steps.version.outputs.value }}"
+          git tag -f ${{ steps.version.outputs.value }}
+          git push origin main --follow-tags --force-with-lease
