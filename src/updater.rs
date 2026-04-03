@@ -22,26 +22,47 @@ pub struct UpdateInfo {
     pub url: String,
 }
 
-pub fn check(current_version: &str) -> Option<UpdateInfo> {
-    let body = ureq::get(RELEASES_API)
+pub enum CheckResult {
+    UpdateAvailable(UpdateInfo),
+    UpToDate,
+    Error(String),
+}
+
+pub fn check(current_version: &str) -> CheckResult {
+    let resp = match ureq::get(RELEASES_API)
         .set("User-Agent", "backup-sync-tool-updater")
         .timeout(std::time::Duration::from_secs(10))
         .call()
-        .ok()?
-        .into_string()
-        .ok()?;
-    let release: GhRelease = serde_json::from_str(&body).ok()?;
+    {
+        Ok(resp) => resp,
+        Err(err) => return CheckResult::Error(err.to_string()),
+    };
+
+    let body = match resp.into_string() {
+        Ok(body) => body,
+        Err(err) => return CheckResult::Error(err.to_string()),
+    };
+
+    let release: GhRelease = match serde_json::from_str(&body) {
+        Ok(release) => release,
+        Err(err) => return CheckResult::Error(format!("Invalid release JSON: {err}")),
+    };
 
     let version = release.tag_name.trim_start_matches('v').to_string();
 
     if !is_newer(&version, current_version) {
-        return None;
+        return CheckResult::UpToDate;
     }
 
     // Find the .exe asset
-    let asset = release.assets.iter().find(|a| a.name.ends_with(".exe"))?;
+    let asset = match release.assets.iter().find(|a| a.name.ends_with(".exe")) {
+        Some(asset) => asset,
+        None => {
+            return CheckResult::Error(format!("Release {version} has no .exe asset attached"));
+        }
+    };
 
-    Some(UpdateInfo {
+    CheckResult::UpdateAvailable(UpdateInfo {
         version,
         url: asset.browser_download_url.clone(),
     })
