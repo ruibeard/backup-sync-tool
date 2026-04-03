@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/ruibeard/code/db-sync-tool/build-mingw/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

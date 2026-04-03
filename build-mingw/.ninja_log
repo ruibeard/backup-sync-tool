@@ -1,0 +1,19 @@
+# ninja log v7
+3	102	1775255412443358892	CMakeFiles/WebDavSync.dir/src/resource.rc.res	c70b087b54fcc84e
+2	495	1775255412442689016	CMakeFiles/WebDavSync.dir/src/dpapi.cpp.obj	bb344c7d178a5a99
+3	596	1775255412443128892	CMakeFiles/WebDavSync.dir/src/file_scanner.cpp.obj	64ef74ccb0372d69
+5	650	1775255412445386688	CMakeFiles/WebDavSync.dir/src/webdav_folder_dialog.cpp.obj	3ae0b058ec76d3a8
+1	672	1775255412441568180	CMakeFiles/WebDavSync.dir/src/main.cpp.obj	8c9667ff897ed5b2
+4	910	1775255412444204727	CMakeFiles/WebDavSync.dir/src/webdav_client.cpp.obj	4623b93762a98ab6
+2	1163	1775255412442004098	CMakeFiles/WebDavSync.dir/src/app.cpp.obj	a83c7460c5b23343
+3	1230	1775255412443699518	CMakeFiles/WebDavSync.dir/src/sync_engine.cpp.obj	212c888b99355d47
+2	1606	1775255412442384349	CMakeFiles/WebDavSync.dir/src/config.cpp.obj	6a8f282e175df2d6
+2	446	1775255427364821566	CMakeFiles/WebDavSync.dir/src/file_scanner.cpp.obj	cb86acb97025ba9f
+2	483	1775255427364653649	CMakeFiles/WebDavSync.dir/src/dpapi.cpp.obj	6de86c69162e57c2
+2	508	1775255427363995981	CMakeFiles/WebDavSync.dir/src/main.cpp.obj	1d57bfc0662c1e90
+4	522	1775255427365946026	CMakeFiles/WebDavSync.dir/src/webdav_folder_dialog.cpp.obj	fda5199955c9f0b8
+3	770	1775255427365472692	CMakeFiles/WebDavSync.dir/src/webdav_client.cpp.obj	b11dfa22480c2d09
+2	986	1775255427364297023	CMakeFiles/WebDavSync.dir/src/app.cpp.obj	c9ff6846bd8d8680
+3	1075	1775255427364987275	CMakeFiles/WebDavSync.dir/src/sync_engine.cpp.obj	13cc01186aeda78
+2	1438	1775255427364482065	CMakeFiles/WebDavSync.dir/src/config.cpp.obj	aad75d588c97553a
+1438	1501	1775255428800729476	WebDavSync.exe	e0640ceba6972b0c

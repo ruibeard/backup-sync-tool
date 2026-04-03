@@ -1,0 +1,3 @@
+/Users/ruibeard/code/db-sync-tool/build-mingw/CMakeFiles/WebDavSync.dir
+/Users/ruibeard/code/db-sync-tool/build-mingw/CMakeFiles/edit_cache.dir
+/Users/ruibeard/code/db-sync-tool/build-mingw/CMakeFiles/rebuild_cache.dir
