@@ -86,19 +86,74 @@ pub fn mkcol(cfg: &Config, password: &str, remote_url: &str) -> Result<(), Strin
 
 fn parse_propfind_folders(xml: &str, base_url: &str) -> Vec<String> {
     let mut folders = Vec::new();
-    for block in xml.split("<D:response>").skip(1) {
-        if !block.contains("<D:collection") {
+    let xml_lower = xml.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    while let Some(rel_start) = find_response_start(&xml_lower[search_from..]) {
+        let start = search_from + rel_start;
+        let next_search = start + 1;
+        let end = match find_response_start(&xml_lower[next_search..]) {
+            Some(rel_end) => next_search + rel_end,
+            None => xml.len(),
+        };
+        let block = &xml[start..end];
+        let block_lower = &xml_lower[start..end];
+
+        if !block_lower.contains("<d:collection") && !block_lower.contains("<collection") {
+            search_from = end;
             continue;
         }
-        if let Some(start) = block.find("<D:href>") {
-            let rest = &block[start + 8..];
-            if let Some(end) = rest.find("</D:href>") {
-                let href = rest[..end].trim().to_string();
-                if href.trim_end_matches('/') != base_url.trim_end_matches('/') {
-                    folders.push(href);
-                }
+
+        if let Some(href) = extract_href(block, block_lower) {
+            let href = decode_href(&href);
+            if href.trim_end_matches('/') != base_url.trim_end_matches('/') {
+                folders.push(href);
+            }
+        }
+
+        search_from = end;
+    }
+    folders
+}
+
+fn find_response_start(xml_lower: &str) -> Option<usize> {
+    let a = xml_lower.find("<d:response");
+    let b = xml_lower.find("<response");
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
+fn extract_href(block: &str, block_lower: &str) -> Option<String> {
+    for (open, close) in [("<d:href>", "</d:href>"), ("<href>", "</href>")] {
+        if let Some(start) = block_lower.find(open) {
+            let rest = &block[start + open.len()..];
+            let rest_lower = &block_lower[start + open.len()..];
+            if let Some(end) = rest_lower.find(close) {
+                return Some(rest[..end].trim().to_string());
             }
         }
     }
-    folders
+    None
+}
+
+fn decode_href(href: &str) -> String {
+    let bytes = href.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &href[i + 1..i + 3];
+            if let Ok(value) = u8::from_str_radix(hex, 16) {
+                out.push(value);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
 }

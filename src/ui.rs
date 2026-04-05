@@ -88,6 +88,8 @@ const SS_LEFT: u32 = 0x0000;
 pub const CLASS_NAME: PCWSTR = w!("BackupSyncToolWnd");
 const REPO_URL: &str = "https://github.com/ruibeard/backup-sync-tool";
 const PICKER_CLASS_NAME: PCWSTR = w!("BackupSyncToolRemotePickerWnd");
+const PICKER_CLIENT_W: i32 = 430;
+const PICKER_CLIENT_H: i32 = 430;
 
 // ── Layout — 8/12/20 rhythm ──────────────────────────────────────────────────
 const WIN_W: i32 = 460; // client width (slightly narrower, cleaner)
@@ -143,6 +145,7 @@ struct PickerResult {
 struct PickerLoadResult {
     entries: Vec<String>,
     error: Option<String>,
+    resolved_folder: String,
 }
 
 struct PickerState {
@@ -862,7 +865,7 @@ unsafe fn build_ui(
             ver_label,
             M + 34,
             version_y,
-            42,
+            68,
             LBL_H,
             hf_small,
         );
@@ -871,7 +874,7 @@ unsafe fn build_ui(
             hi,
             IDC_START_WINDOWS,
             "Startup w/ Windows",
-            M + 82,
+            M + 108,
             check_y,
             128,
             18,
@@ -883,7 +886,7 @@ unsafe fn build_ui(
             hi,
             IDC_SYNC_REMOTE,
             "Sync",
-            M + 214,
+            M + 240,
             check_y,
             56,
             18,
@@ -893,9 +896,10 @@ unsafe fn build_ui(
 
         let save_w = 90i32;
         let bx_save = M + INNER_W - save_w;
-        let update_x = bx_save - GAP - 80;
+        let update_w = 30i32;
+        let update_x = bx_save - GAP - update_w;
         mkbtn_grey(
-            hwnd, hi, IDC_UPDATE, "UPDATE", update_x, row_y, 80, BTN_H, hf,
+            hwnd, hi, IDC_UPDATE, "↓", update_x, row_y, update_w, BTN_H, hf,
         );
         ShowWindow(GetDlgItem(hwnd, IDC_UPDATE as i32), SW_HIDE);
         mkbtn_blue(
@@ -1127,6 +1131,36 @@ unsafe fn mkbtn_grey(
     hf: HFONT,
 ) -> HWND {
     mkbtn(hwnd, hi, id, text, x, y, w, h, hf)
+}
+
+unsafe fn mkbtn_std(
+    hwnd: HWND,
+    hi: HINSTANCE,
+    id: u16,
+    text: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    hf: HFONT,
+) -> HWND {
+    let hs = hstring(text);
+    let c = CreateWindowExW(
+        WINDOW_EX_STYLE::default(),
+        w!("BUTTON"),
+        &hs,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        x,
+        y,
+        w,
+        h,
+        hwnd,
+        HMENU(id as isize),
+        hi,
+        None,
+    );
+    SendMessageW(c, WM_SETFONT, WPARAM(hf.0 as usize), LPARAM(1));
+    c
 }
 
 unsafe fn mkcheck(
@@ -1735,8 +1769,8 @@ unsafe fn remote_folder_picker(hwnd: HWND, cfg: Config, password: String) -> Opt
         WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        430,
-        380,
+        100,
+        100,
         hwnd,
         None,
         hinstance,
@@ -1747,6 +1781,30 @@ unsafe fn remote_folder_picker(hwnd: HWND, cfg: Config, password: String) -> Opt
         let _ = Box::from_raw(result_ptr);
         return None;
     }
+
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: PICKER_CLIENT_W,
+        bottom: PICKER_CLIENT_H,
+    };
+    AdjustWindowRectEx(
+        &mut rc,
+        WS_CAPTION | WS_SYSMENU | WS_POPUP,
+        false,
+        WS_EX_DLGMODALFRAME,
+    )
+    .ok();
+    SetWindowPos(
+        picker,
+        None,
+        0,
+        0,
+        rc.right - rc.left,
+        rc.bottom - rc.top,
+        SWP_NOMOVE | SWP_NOZORDER,
+    )
+    .ok();
 
     EnableWindow(hwnd, FALSE);
     ShowWindow(picker, SW_SHOW);
@@ -1783,6 +1841,12 @@ unsafe extern "system" fn remote_picker_wnd_proc(
             picker_on_create(hwnd);
             LRESULT(0)
         }
+        WM_CTLCOLORSTATIC => {
+            let hdc = HDC(wp.0 as isize);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COLORREF(C_LABEL));
+            LRESULT(GetSysColorBrush(COLOR_WINDOW).0 as isize)
+        }
         WM_COMMAND => picker_on_command(hwnd, wp),
         WM_APP_PICKER_LOADED => picker_on_loaded(hwnd, lp),
         WM_CLOSE => {
@@ -1799,18 +1863,31 @@ unsafe extern "system" fn remote_picker_wnd_proc(
 
 unsafe fn picker_on_create(hwnd: HWND) {
     let st = picker_state(hwnd);
+    let hi: HINSTANCE = GetModuleHandleW(None).unwrap().into();
     let margin = 12;
     let width = 430 - margin * 2;
-    let path_y = 12;
-    let list_y = 44;
-    let list_h = 230;
-    let button_y = 286;
+    let path_label_y = 12;
+    let path_y = 32;
+    let list_label_y = 68;
+    let list_y = 88;
+    let list_h = 228;
+    let button_y = 332;
+
+    mkfield_label(
+        hwnd,
+        hi,
+        "Current folder",
+        margin,
+        path_label_y,
+        width,
+        st.hfont,
+    );
 
     let path = mkedit_raw(
         hwnd,
-        GetModuleHandleW(None).unwrap().into(),
+        hi,
         IDC_PICKER_PATH,
-        &st.current_folder,
+        &display_picker_folder(&st.current_folder),
         margin,
         path_y,
         width,
@@ -1818,9 +1895,11 @@ unsafe fn picker_on_create(hwnd: HWND) {
     );
     SendMessageW(path, EM_SETREADONLY, WPARAM(1), LPARAM(0));
 
+    mkfield_label(hwnd, hi, "Folders", margin, list_label_y, width, st.hfont);
+
     mklb(
         hwnd,
-        GetModuleHandleW(None).unwrap().into(),
+        hi,
         IDC_PICKER_LIST,
         margin,
         list_y,
@@ -1829,9 +1908,9 @@ unsafe fn picker_on_create(hwnd: HWND) {
         st.hfont,
     );
 
-    mkbtn_grey(
+    mkbtn_std(
         hwnd,
-        GetModuleHandleW(None).unwrap().into(),
+        hi,
         IDC_PICKER_UP,
         "Up",
         margin,
@@ -1840,9 +1919,9 @@ unsafe fn picker_on_create(hwnd: HWND) {
         BTN_H,
         st.hfont,
     );
-    mkbtn_grey(
+    mkbtn_std(
         hwnd,
-        GetModuleHandleW(None).unwrap().into(),
+        hi,
         IDC_PICKER_CANCEL,
         "Cancel",
         margin + width - 170,
@@ -1851,9 +1930,9 @@ unsafe fn picker_on_create(hwnd: HWND) {
         BTN_H,
         st.hfont,
     );
-    mkbtn_blue(
+    mkbtn_std(
         hwnd,
-        GetModuleHandleW(None).unwrap().into(),
+        hi,
         IDC_PICKER_SELECT,
         "Select",
         margin + width - 82,
@@ -1896,6 +1975,14 @@ unsafe fn picker_on_loaded(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let result = Box::from_raw(lp.0 as *mut PickerLoadResult);
     let st = picker_state(hwnd);
     st.busy = false;
+    st.current_folder = result.resolved_folder.clone();
+    if st.selected_folder.is_none() {
+        st.selected_folder = Some(st.current_folder.clone());
+    }
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_PICKER_PATH as i32),
+        &hstring(&display_picker_folder(&st.current_folder)),
+    );
 
     let list = GetDlgItem(hwnd, IDC_PICKER_LIST as i32);
     SendMessageW(list, LB_RESETCONTENT, WPARAM(0), LPARAM(0));
@@ -1966,24 +2053,39 @@ unsafe fn picker_load_current(hwnd: HWND) {
     let password = st.password.clone();
     let folder = st.current_folder.clone();
     let raw = hwnd.0 as isize;
-    let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_PICKER_PATH as i32), &hstring(&folder));
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_PICKER_PATH as i32),
+        &hstring(&display_picker_folder(&folder)),
+    );
     EnableWindow(GetDlgItem(hwnd, IDC_PICKER_SELECT as i32), FALSE);
 
     std::thread::spawn(move || {
-        let url = join_remote_url(&cfg.webdav_url, &folder);
-        let load = match webdav::list_folders(&cfg, &password, &url) {
-            Ok(entries) => PickerLoadResult {
-                entries: entries
-                    .into_iter()
-                    .map(|href| relative_folder_from_href(&cfg.webdav_url, &href))
-                    .filter(|p| !p.is_empty())
-                    .collect(),
-                error: None,
-            },
-            Err(error) => PickerLoadResult {
-                entries: Vec::new(),
-                error: Some(error),
-            },
+        let mut resolved_folder = folder.clone();
+        let load = loop {
+            let url = join_remote_url(&cfg.webdav_url, &resolved_folder);
+            match webdav::list_folders(&cfg, &password, &url) {
+                Ok(entries) => {
+                    break PickerLoadResult {
+                        entries: entries
+                            .into_iter()
+                            .map(|href| relative_folder_from_href(&cfg.webdav_url, &href))
+                            .filter(|p| !p.is_empty())
+                            .collect(),
+                        error: None,
+                        resolved_folder: resolved_folder.clone(),
+                    }
+                }
+                Err(error) => {
+                    if resolved_folder.is_empty() {
+                        break PickerLoadResult {
+                            entries: Vec::new(),
+                            error: Some(error),
+                            resolved_folder: String::new(),
+                        };
+                    }
+                    resolved_folder = parent_folder(&resolved_folder);
+                }
+            }
         };
 
         let boxed = Box::new(load);
@@ -2098,6 +2200,15 @@ fn display_folder_name(folder: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("/")
         .to_string()
+}
+
+fn display_picker_folder(folder: &str) -> String {
+    let folder = normalize_remote_folder(folder);
+    if folder.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{folder}")
+    }
 }
 
 unsafe fn picker_list_entries(hwnd: HWND) -> Vec<String> {
