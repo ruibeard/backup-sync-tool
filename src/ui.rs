@@ -604,6 +604,39 @@ unsafe fn on_create(hwnd: HWND) {
     tray::add_tray_icon(hwnd, hicon);
 
     let raw = hwnd.0 as isize;
+    let log: crate::sync::LogFn = Arc::new(move |m: String| {
+        let s = Box::new(m);
+        unsafe {
+            PostMessageW(
+                HWND(raw),
+                WM_APP_LOG,
+                WPARAM(0),
+                LPARAM(Box::into_raw(s) as isize),
+            )
+            .ok();
+        }
+    });
+
+    if !cfg.watch_folder.is_empty()
+        && !cfg.webdav_url.is_empty()
+        && !cfg.username.is_empty()
+        && !pass.is_empty()
+        && !cfg.remote_folder.is_empty()
+    {
+        match crate::sync::SyncEngine::start(cfg.clone(), pass.clone(), log.clone()) {
+            Ok(engine) => stmut(hwnd).sync_engine = Some(engine),
+            Err(err) => {
+                let msg = Box::new(format!("Sync start failed: {err}"));
+                PostMessageW(
+                    HWND(raw),
+                    WM_APP_LOG,
+                    WPARAM(0),
+                    LPARAM(Box::into_raw(msg) as isize),
+                )
+                .ok();
+            }
+        }
+    }
 
     if !cfg.webdav_url.is_empty() && !cfg.username.is_empty() && !pass.is_empty() {
         let cfg2 = cfg.clone();
@@ -844,9 +877,8 @@ unsafe fn build_ui(
         mklabel_hdr(hwnd, hi, "RECENT ACTIVITY", M, y, INNER_W, hf_hdr);
         y += HDR_H + PAD;
 
-        // Reduced height — 72px (3 rows approx) instead of 120px
-        let lb_h = 72i32;
-        mklb(hwnd, hi, IDC_ACTIVITY_LIST, M, y, INNER_W, lb_h, hf);
+        let lb_h = 140i32;
+        mklb(hwnd, hi, IDC_ACTIVITY_LIST, M, y, INNER_W, lb_h, hf_small);
         y += lb_h + SECT;
     }
 
@@ -1390,6 +1422,18 @@ unsafe fn do_connect(hwnd: HWND) {
 unsafe fn do_save(hwnd: HWND) {
     let st = stmut(hwnd);
     read_ctrls(hwnd, st);
+    if st.config.watch_folder.trim().is_empty() {
+        msgbox(hwnd, "Origin folder is required.", "Save");
+        return;
+    }
+    if st.config.webdav_url.trim().is_empty() {
+        msgbox(hwnd, "Server URL is required.", "Save");
+        return;
+    }
+    if st.config.remote_folder.trim().is_empty() {
+        msgbox(hwnd, "Destination folder is required.", "Save");
+        return;
+    }
     match secret::encrypt(&st.password_plain) {
         Ok(enc) => st.config.password_enc = enc,
         Err(e) => {
@@ -1417,8 +1461,23 @@ unsafe fn do_save(hwnd: HWND) {
             .ok();
         }
     });
+    if st.sync_engine.is_some() {
+        st.sync_engine = None;
+    }
     match crate::sync::SyncEngine::start(cfg.clone(), pass.clone(), log) {
-        Ok(e) => stmut(hwnd).sync_engine = Some(e),
+        Ok(e) => {
+            let st = stmut(hwnd);
+            st.sync_engine = Some(e);
+            let msg = Box::new("Settings saved. File watching is active.".to_string());
+            PostMessageW(
+                HWND(raw),
+                WM_APP_LOG,
+                WPARAM(0),
+                LPARAM(Box::into_raw(msg) as isize),
+            )
+            .ok();
+            msgbox(hwnd, "Settings saved. Sync is now active.", "Save");
+        }
         Err(e) => {
             msgbox(hwnd, &format!("Sync error: {e}"), "Error");
         }

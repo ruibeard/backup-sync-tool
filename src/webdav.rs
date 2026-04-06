@@ -3,6 +3,14 @@
 #![allow(dead_code)]
 
 use crate::config::Config;
+use std::collections::{HashSet, VecDeque};
+use std::io::Read;
+
+#[derive(Debug, Clone)]
+pub struct RemoteFile {
+    pub href: String,
+    pub is_collection: bool,
+}
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
@@ -35,22 +43,53 @@ pub fn test_connection(cfg: &Config, password: &str) -> Result<(), String> {
 }
 
 pub fn list_folders(cfg: &Config, password: &str, folder_url: &str) -> Result<Vec<String>, String> {
-    let auth = basic_auth(&cfg.username, password);
-    let body = r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>"#;
-    let response = agent()
-        .request("PROPFIND", folder_url)
-        .set("Authorization", &auth)
-        .set("Depth", "1")
-        .set("Content-Type", "application/xml")
-        .send_string(body)
-        .map_err(|e| e.to_string())?;
+    let entries = list_entries(cfg, password, folder_url, 1)?;
+    Ok(entries
+        .into_iter()
+        .filter(|entry| entry.is_collection)
+        .map(|entry| entry.href)
+        .collect())
+}
 
-    if response.status() >= 400 {
-        return Err(format!("PROPFIND returned HTTP {}", response.status()));
+pub fn list_entries_recursive(
+    cfg: &Config,
+    password: &str,
+    folder_url: &str,
+) -> Result<Vec<RemoteFile>, String> {
+    let mut queue = VecDeque::from([folder_url.trim_end_matches('/').to_string() + "/"]);
+    let mut seen_dirs = HashSet::new();
+    let mut all = Vec::new();
+
+    while let Some(current) = queue.pop_front() {
+        let current_key = current.trim_end_matches('/').to_string();
+        if !seen_dirs.insert(current_key) {
+            continue;
+        }
+
+        let entries = list_entries(cfg, password, &current, 1)?;
+        for entry in entries {
+            if entry.is_collection {
+                let next = entry.href.trim_end_matches('/').to_string() + "/";
+                queue.push_back(next);
+            }
+            all.push(entry);
+        }
     }
 
-    let xml = response.into_string().map_err(|e| e.to_string())?;
-    Ok(parse_propfind_folders(&xml, folder_url))
+    Ok(all)
+}
+
+pub fn get_file(cfg: &Config, password: &str, remote_url: &str) -> Result<Vec<u8>, String> {
+    let auth = basic_auth(&cfg.username, password);
+    let mut reader = agent()
+        .request("GET", remote_url)
+        .set("Authorization", &auth)
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_reader();
+    let mut data = Vec::new();
+    reader.read_to_end(&mut data).map_err(|e| e.to_string())?;
+    Ok(data)
 }
 
 pub fn put_file(cfg: &Config, password: &str, remote_url: &str, data: &[u8]) -> Result<(), String> {
@@ -71,21 +110,58 @@ pub fn put_file(cfg: &Config, password: &str, remote_url: &str, data: &[u8]) -> 
 
 pub fn mkcol(cfg: &Config, password: &str, remote_url: &str) -> Result<(), String> {
     let auth = basic_auth(&cfg.username, password);
-    let status = agent()
+    match agent()
         .request("MKCOL", remote_url)
         .set("Authorization", &auth)
         .call()
-        .map_err(|e| e.to_string())?
-        .status();
-    if status < 400 || status == 405 {
-        Ok(())
-    } else {
-        Err(format!("MKCOL returned HTTP {}", status))
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if status < 400 || status == 405 {
+                Ok(())
+            } else {
+                Err(format!("MKCOL returned HTTP {}", status))
+            }
+        }
+        Err(ureq::Error::Status(405, _)) => Ok(()),
+        Err(err) => Err(err.to_string()),
     }
 }
 
 fn parse_propfind_folders(xml: &str, base_url: &str) -> Vec<String> {
-    let mut folders = Vec::new();
+    parse_propfind_entries(xml, base_url)
+        .into_iter()
+        .filter(|entry| entry.is_collection)
+        .map(|entry| entry.href)
+        .collect()
+}
+
+fn list_entries(
+    cfg: &Config,
+    password: &str,
+    folder_url: &str,
+    depth: u32,
+) -> Result<Vec<RemoteFile>, String> {
+    let auth = basic_auth(&cfg.username, password);
+    let body = r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>"#;
+    let response = agent()
+        .request("PROPFIND", folder_url)
+        .set("Authorization", &auth)
+        .set("Depth", if depth == 0 { "0" } else { "1" })
+        .set("Content-Type", "application/xml")
+        .send_string(body)
+        .map_err(|e| e.to_string())?;
+
+    if response.status() >= 400 {
+        return Err(format!("PROPFIND returned HTTP {}", response.status()));
+    }
+
+    let xml = response.into_string().map_err(|e| e.to_string())?;
+    Ok(parse_propfind_entries(&xml, folder_url))
+}
+
+fn parse_propfind_entries(xml: &str, base_url: &str) -> Vec<RemoteFile> {
+    let mut entries = Vec::new();
     let xml_lower = xml.to_ascii_lowercase();
     let mut search_from = 0usize;
     while let Some(rel_start) = find_response_start(&xml_lower[search_from..]) {
@@ -98,21 +174,41 @@ fn parse_propfind_folders(xml: &str, base_url: &str) -> Vec<String> {
         let block = &xml[start..end];
         let block_lower = &xml_lower[start..end];
 
-        if !block_lower.contains("<d:collection") && !block_lower.contains("<collection") {
-            search_from = end;
-            continue;
-        }
-
         if let Some(href) = extract_href(block, block_lower) {
-            let href = decode_href(&href);
+            let href = absolutize_href(base_url, &decode_href(&href));
+            let is_collection =
+                block_lower.contains("<d:collection") || block_lower.contains("<collection");
             if href.trim_end_matches('/') != base_url.trim_end_matches('/') {
-                folders.push(href);
+                entries.push(RemoteFile {
+                    href,
+                    is_collection,
+                });
             }
         }
 
         search_from = end;
     }
-    folders
+    entries
+}
+
+fn absolutize_href(base_url: &str, href: &str) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+
+    let trimmed = href.trim();
+    if trimmed.starts_with('/') {
+        if let Some(idx) = base_url.find("//") {
+            let after_scheme = idx + 2;
+            if let Some(path_idx) = base_url[after_scheme..].find('/') {
+                let origin = &base_url[..after_scheme + path_idx];
+                return format!("{origin}{trimmed}");
+            }
+        }
+    }
+
+    let prefix = base_url.trim_end_matches('/');
+    format!("{prefix}/{}", trimmed.trim_start_matches('/'))
 }
 
 fn find_response_start(xml_lower: &str) -> Option<usize> {

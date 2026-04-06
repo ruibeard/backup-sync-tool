@@ -2,8 +2,8 @@
   "watch_folder": "C:\\XDSoftware\\backups",
   "webdav_url": "https://u561272-sub1.your-storagebox.de",
   "username": "u561272-sub1",
-  "password_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAKAtvQrn/30qyyTANxKS/4gAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAACCUwiCL8GLidBMXB/6DGQAQxIPgs+T4FA5z/ES7OfJoAAAAAA6AAAAAAgAAIAAAABEAEk7dNOpOQCBMqqDZOBI+J538A/FNnMdUY5iMqIxxIAAAANnVlRVa9U+635M446ogUj1nQm+Y26wFyDWxwPkhVt5CQAAAAABXVDUqkhi3U4q1YA8qhdCYyZ8BEvAGVtP+baG3YY9fFD4QBc7C0rSIhURUmOwmWJU3Aflt+NOflZ8AwOhMseQ=",
-  "remote_folder": "",
+  "password_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAKAtvQrn/30qyyTANxKS/4gAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAFOqiNz2goQx/FEtN4Qxywpy/zvdPJg//AeOal7ny/+WAAAAAA6AAAAAAgAAIAAAAMcFp3J88rFCp/8bxdxPepcKortY9PnYx6dYAdZYeHjWIAAAAEsOv/7cWax0ZKCjy/pLlYg8yETpOld4j2jLPBAJ7wTZQAAAAPAixMtVUr0fAw5shSBIncbksD4UBrfd9FzqwNWhqyzOuQm8ahf8G20zJGfzco4HWgsYQWz+LcEQtc07YFatR/0=",
+  "remote_folder": "XDPT.59655_Palmeira-Minimercado",
   "start_with_windows": true,
-  "sync_remote_changes": false
+  "sync_remote_changes": true
 }
