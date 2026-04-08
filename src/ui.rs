@@ -14,6 +14,7 @@
 //   Spacing:         PAD=8, GAP=12, SECT=20 rhythm
 
 use crate::config::Config;
+use crate::logs;
 use crate::secret;
 use crate::tray;
 use crate::webdav;
@@ -33,7 +34,6 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 // ── Colours  0x00BBGGRR ──────────────────────────────────────────────────────
 const C_WIN_BG: u32 = 0x00F0F0F0;
-const C_SECT_BG: u32 = 0x00F0F0F0; // no card box — same as window bg
 const C_LABEL: u32 = 0x00333333;
 const C_HDR: u32 = 0x00888888;
 const C_INPUT_BG: u32 = 0x00FFFFFF;
@@ -62,6 +62,7 @@ const IDC_BROWSE_REMOTE: u16 = 107;
 const IDC_CONNECT: u16 = 108;
 const IDC_STATUS_TEXT: u16 = 109;
 const IDC_SAVE: u16 = 110;
+const IDC_SYNC_STATUS: u16 = 117;
 const IDC_UPDATE: u16 = 112;
 const IDC_VERSION: u16 = 113;
 const IDC_ACTIVITY_LIST: u16 = 114;
@@ -82,8 +83,12 @@ const WM_APP_UPDATE: u32 = WM_APP + 12;
 const WM_APP_REMOTE_FOLDER: u32 = WM_APP + 13;
 const WM_APP_PICKER_LOADED: u32 = WM_APP + 14;
 const WM_APP_DEST_READY: u32 = WM_APP + 15;
+const WM_APP_SYNC_ACTIVITY: u32 = WM_APP + 16;
+const IDT_SYNC_ANIM: usize = 1;
+const SYNC_ANIM_MS: u32 = 120;
 
 const SS_LEFT: u32 = 0x0000;
+const SS_RIGHT: u32 = 0x0002;
 
 pub const CLASS_NAME: PCWSTR = w!("BackupSyncToolWnd");
 const REPO_URL: &str = "https://github.com/ruibeard/backup-sync-tool";
@@ -114,6 +119,11 @@ struct WndState {
     sync_engine: Option<crate::sync::SyncEngine>,
     update_url: Option<String>,
     connected: bool,
+    sync_status_text: String,
+    sync_status_state: usize,
+    sync_anim_frame: usize,
+    sync_icon: HICON,
+    sync_icon_rect: RECT,
     remote_folder_from_xd: bool,
     remote_folder_created: bool,
     /// True when URL/username/password have been edited since the last save/connect
@@ -259,6 +269,15 @@ unsafe extern "system" fn wnd_proc(
                 SetTextColor(hdc, COLORREF(clr));
                 return LRESULT((*st).br_win.0 as isize);
             }
+            if id == IDC_SYNC_STATUS {
+                let clr = if (*st).sync_status_state == crate::sync::ActivityState::Idle as usize {
+                    C_GREEN
+                } else {
+                    C_LABEL
+                };
+                SetTextColor(hdc, COLORREF(clr));
+                return LRESULT((*st).br_win.0 as isize);
+            }
             let text_clr = match id {
                 IDC_VERSION => C_HDR,
                 IDC_DEST_CREATED => C_GREEN,
@@ -298,6 +317,8 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_UPDATE => on_app_update(hwnd, wparam, lparam),
         WM_APP_REMOTE_FOLDER => on_app_remote_folder(hwnd, lparam),
         WM_APP_DEST_READY => on_app_dest_ready(hwnd, wparam),
+        WM_APP_SYNC_ACTIVITY => on_app_sync_activity(hwnd, wparam),
+        WM_TIMER => on_timer(hwnd, wparam),
 
         WM_CLOSE => {
             ShowWindow(hwnd, SW_HIDE);
@@ -333,6 +354,21 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
     let st = state_ptr(hwnd);
     if st.is_null() {
         return;
+    }
+
+    if (*st).sync_icon.0 != 0 {
+        let r = (*st).sync_icon_rect;
+        let _ = DrawIconEx(
+            hdc,
+            r.left,
+            r.top,
+            (*st).sync_icon,
+            r.right - r.left,
+            r.bottom - r.top,
+            0,
+            HBRUSH(0),
+            DI_NORMAL,
+        );
     }
 
     // Subtle divider lines between sections
@@ -564,6 +600,11 @@ unsafe fn on_create(hwnd: HWND) {
         sync_engine: None,
         update_url: None,
         connected: false,
+        sync_status_text: "Checking local files...".to_string(),
+        sync_status_state: crate::sync::ActivityState::Checking as usize,
+        sync_anim_frame: 0,
+        sync_icon: HICON(0),
+        sync_icon_rect: RECT::default(),
         remote_folder_from_xd,
         remote_folder_created: false,
         creds_dirty: false,
@@ -605,6 +646,7 @@ unsafe fn on_create(hwnd: HWND) {
 
     let raw = hwnd.0 as isize;
     let log: crate::sync::LogFn = Arc::new(move |m: String| {
+        logs::append(&m);
         let s = Box::new(m);
         unsafe {
             PostMessageW(
@@ -616,6 +658,15 @@ unsafe fn on_create(hwnd: HWND) {
             .ok();
         }
     });
+    let activity: crate::sync::ActivityFn = Arc::new(move |state| unsafe {
+        PostMessageW(
+            HWND(raw),
+            WM_APP_SYNC_ACTIVITY,
+            WPARAM(state as usize),
+            LPARAM(0),
+        )
+        .ok();
+    });
 
     if !cfg.watch_folder.is_empty()
         && !cfg.webdav_url.is_empty()
@@ -623,7 +674,12 @@ unsafe fn on_create(hwnd: HWND) {
         && !pass.is_empty()
         && !cfg.remote_folder.is_empty()
     {
-        match crate::sync::SyncEngine::start(cfg.clone(), pass.clone(), log.clone()) {
+        match crate::sync::SyncEngine::start(
+            cfg.clone(),
+            pass.clone(),
+            log.clone(),
+            activity.clone(),
+        ) {
             Ok(engine) => stmut(hwnd).sync_engine = Some(engine),
             Err(err) => {
                 let msg = Box::new(format!("Sync start failed: {err}"));
@@ -664,39 +720,9 @@ unsafe fn on_create(hwnd: HWND) {
                     LPARAM(Box::into_raw(url) as isize),
                 )
                 .ok();
-
-                let msg = Box::new(format!("Update available: v{}", info.version));
-                PostMessageW(
-                    HWND(raw),
-                    WM_APP_LOG,
-                    WPARAM(0),
-                    LPARAM(Box::into_raw(msg) as isize),
-                )
-                .ok();
             }
-            crate::updater::CheckResult::UpToDate => {
-                let msg = Box::new(format!(
-                    "Update check: already on latest version ({})",
-                    env!("CARGO_PKG_VERSION")
-                ));
-                PostMessageW(
-                    HWND(raw),
-                    WM_APP_LOG,
-                    WPARAM(0),
-                    LPARAM(Box::into_raw(msg) as isize),
-                )
-                .ok();
-            }
-            crate::updater::CheckResult::Error(err) => {
-                let msg = Box::new(format!("Update check failed: {err}"));
-                PostMessageW(
-                    HWND(raw),
-                    WM_APP_LOG,
-                    WPARAM(0),
-                    LPARAM(Box::into_raw(msg) as isize),
-                )
-                .ok();
-            }
+            crate::updater::CheckResult::UpToDate => {}
+            crate::updater::CheckResult::Error(_) => {}
         },
     );
 }
@@ -722,7 +748,12 @@ unsafe fn build_ui(
         mklabel_hdr(hwnd, hi, "SERVER", M, y, 58, hf_hdr);
 
         let status_x = M + 62;
-        let status_w = conn_x - status_x - PAD;
+        let sync_icon_w = 16i32;
+        let sync_gap = 6i32;
+        let sync_w = 150i32;
+        let sync_icon_x = M + INNER_W - sync_icon_w;
+        let sync_text_x = sync_icon_x - sync_gap - sync_w;
+        let status_w = sync_text_x - sync_gap - status_x;
         mkstatic(
             hwnd,
             hi,
@@ -740,6 +771,27 @@ unsafe fn build_ui(
             right: status_x + status_w,
             bottom: y + 1 + LBL_H,
         };
+
+        let idle_icon = LoadIconW(hi, w!("APP_ICON_IDLE")).unwrap_or_default();
+        st.sync_icon = idle_icon;
+        st.sync_icon_rect = RECT {
+            left: sync_icon_x,
+            top: y + 1,
+            right: sync_icon_x + sync_icon_w,
+            bottom: y + 1 + 16,
+        };
+        mkstatic_align(
+            hwnd,
+            hi,
+            IDC_SYNC_STATUS,
+            &st.sync_status_text,
+            sync_text_x,
+            y + 1,
+            sync_w,
+            LBL_H,
+            hf_small,
+            SS_RIGHT,
+        );
 
         mkbtn_blue(
             hwnd,
@@ -905,10 +957,10 @@ unsafe fn build_ui(
             hwnd,
             hi,
             IDC_START_WINDOWS,
-            "Startup w/ Windows",
+            "Start with Windows",
             M + 108,
             check_y,
-            128,
+            136,
             18,
             hf_small,
             cfg.start_with_windows,
@@ -1017,6 +1069,37 @@ unsafe fn mkstatic(
         w!("STATIC"),
         &hs,
         WS_CHILD | WS_VISIBLE | WINDOW_STYLE(SS_LEFT),
+        x,
+        y,
+        w,
+        h,
+        hwnd,
+        HMENU(id as isize),
+        hi,
+        None,
+    );
+    SendMessageW(c, WM_SETFONT, WPARAM(hf.0 as usize), LPARAM(1));
+    c
+}
+
+unsafe fn mkstatic_align(
+    hwnd: HWND,
+    hi: HINSTANCE,
+    id: u16,
+    text: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    hf: HFONT,
+    align: u32,
+) -> HWND {
+    let hs = hstring(text);
+    let c = CreateWindowExW(
+        WINDOW_EX_STYLE::default(),
+        w!("STATIC"),
+        &hs,
+        WS_CHILD | WS_VISIBLE | WINDOW_STYLE(align),
         x,
         y,
         w,
@@ -1362,6 +1445,9 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
             ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
         }
+        x if x == tray::ID_TRAY_LOGS as u16 => {
+            do_open_logs(hwnd);
+        }
         x if x == tray::ID_TRAY_EXIT as u16 => {
             DestroyWindow(hwnd).ok();
         }
@@ -1403,6 +1489,10 @@ unsafe fn do_connect(hwnd: HWND) {
     let st = stmut(hwnd);
     read_ctrls(hwnd, st);
     let cfg = st.config.clone();
+    if let Err(err) = validate_webdav_url(&cfg.webdav_url) {
+        msgbox(hwnd, &err, "Connect");
+        return;
+    }
     let pass = st.password_plain.clone();
     EnableWindow(GetDlgItem(hwnd, IDC_CONNECT as i32), FALSE);
     set_status(hwnd, "\u{25cf}  Connecting\u{2026}");
@@ -1430,6 +1520,10 @@ unsafe fn do_save(hwnd: HWND) {
         msgbox(hwnd, "Server URL is required.", "Save");
         return;
     }
+    if let Err(err) = validate_webdav_url(&st.config.webdav_url) {
+        msgbox(hwnd, &err, "Save");
+        return;
+    }
     if st.config.remote_folder.trim().is_empty() {
         msgbox(hwnd, "Destination folder is required.", "Save");
         return;
@@ -1450,6 +1544,7 @@ unsafe fn do_save(hwnd: HWND) {
     let pass = st.password_plain.clone();
     let raw = hwnd.0 as isize;
     let log: crate::sync::LogFn = Arc::new(move |m: String| {
+        logs::append(&m);
         let s = Box::new(m);
         unsafe {
             PostMessageW(
@@ -1461,10 +1556,19 @@ unsafe fn do_save(hwnd: HWND) {
             .ok();
         }
     });
+    let activity: crate::sync::ActivityFn = Arc::new(move |state| unsafe {
+        PostMessageW(
+            HWND(raw),
+            WM_APP_SYNC_ACTIVITY,
+            WPARAM(state as usize),
+            LPARAM(0),
+        )
+        .ok();
+    });
     if st.sync_engine.is_some() {
         st.sync_engine = None;
     }
-    match crate::sync::SyncEngine::start(cfg.clone(), pass.clone(), log) {
+    match crate::sync::SyncEngine::start(cfg.clone(), pass.clone(), log, activity) {
         Ok(e) => {
             let st = stmut(hwnd);
             st.sync_engine = Some(e);
@@ -1508,6 +1612,14 @@ unsafe fn do_update(hwnd: HWND) {
         "A new version is available.\nDownload and install now? The app will restart.",
         "Update Available",
     ) {
+        let msg = Box::new("Update started.".to_string());
+        PostMessageW(
+            hwnd,
+            WM_APP_LOG,
+            WPARAM(0),
+            LPARAM(Box::into_raw(msg) as isize),
+        )
+        .ok();
         ShowWindow(GetDlgItem(hwnd, IDC_UPDATE as i32), SW_HIDE);
         let raw = hwnd.0 as isize;
         std::thread::spawn(move || {
@@ -1538,6 +1650,12 @@ unsafe fn do_open_repo(hwnd: HWND) {
     );
 }
 
+unsafe fn do_open_logs(hwnd: HWND) {
+    let dir = logs::ensure_logs_dir();
+    let dir_w = hstring(&dir.to_string_lossy());
+    let _ = ShellExecuteW(hwnd, w!("open"), &dir_w, None, None, SW_SHOWNORMAL);
+}
+
 // ── App messages ──────────────────────────────────────────────────────────────
 unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let msg = Box::from_raw(lp.0 as *mut String);
@@ -1551,6 +1669,72 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
     );
     if SendMessageW(hlb, LB_GETCOUNT, WPARAM(0), LPARAM(0)).0 > 200 {
         SendMessageW(hlb, LB_DELETESTRING, WPARAM(200), LPARAM(0));
+    }
+    LRESULT(0)
+}
+
+unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM) -> LRESULT {
+    let (icon_name, status_text) = match wp.0 {
+        x if x == crate::sync::ActivityState::Checking as usize => {
+            (w!("APP_ICON_IDLE"), "Checking...")
+        }
+        x if x == crate::sync::ActivityState::Syncing as usize => {
+            (w!("APP_ICON_SYNCING"), "Syncing...")
+        }
+        _ => (w!("APP_ICON_COMPLETE"), "All synced"),
+    };
+
+    let st = stmut(hwnd);
+    st.sync_status_state = wp.0;
+    if wp.0 == crate::sync::ActivityState::Syncing as usize {
+        st.sync_anim_frame = 0;
+        let _ = SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
+    } else {
+        let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
+        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
+        let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
+        if hicon.0 != 0 {
+            tray::set_tray_icon(hwnd, hicon);
+            st.sync_icon = hicon;
+            InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
+        }
+    }
+    st.sync_status_text = status_text.to_string();
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
+        &hstring(status_text),
+    );
+    InvalidateRect(GetDlgItem(hwnd, IDC_SYNC_STATUS as i32), None, TRUE);
+    LRESULT(0)
+}
+
+unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
+    if wp.0 != IDT_SYNC_ANIM {
+        return DefWindowProcW(hwnd, WM_TIMER, wp, LPARAM(0));
+    }
+
+    let st = stmut(hwnd);
+    if st.sync_status_state != crate::sync::ActivityState::Syncing as usize {
+        let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
+        return LRESULT(0);
+    }
+
+    let names = [
+        w!("APP_ICON_SYNC_1"),
+        w!("APP_ICON_SYNC_2"),
+        w!("APP_ICON_SYNC_3"),
+        w!("APP_ICON_SYNC_4"),
+        w!("APP_ICON_SYNC_5"),
+        w!("APP_ICON_SYNC_6"),
+    ];
+    let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
+    let icon_name = names[st.sync_anim_frame % names.len()];
+    st.sync_anim_frame = (st.sync_anim_frame + 1) % names.len();
+    let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
+    if hicon.0 != 0 {
+        tray::set_tray_icon(hwnd, hicon);
+        st.sync_icon = hicon;
+        InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
     }
     LRESULT(0)
 }
@@ -1800,6 +1984,14 @@ fn ts() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("{:02}:{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60, s % 60)
+}
+
+fn validate_webdav_url(url: &str) -> std::result::Result<(), String> {
+    if url.trim().to_ascii_lowercase().starts_with("https://") {
+        Ok(())
+    } else {
+        Err("Server URL must start with https://".to_string())
+    }
 }
 
 unsafe fn remote_folder_picker(hwnd: HWND, cfg: Config, password: String) -> Option<String> {

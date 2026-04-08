@@ -23,7 +23,16 @@ fn basic_auth(user: &str, pass: &str) -> String {
     format!("Basic {}", B64.encode(format!("{user}:{pass}").as_bytes()))
 }
 
+fn validate_https(url: &str) -> Result<(), String> {
+    if url.trim().to_ascii_lowercase().starts_with("https://") {
+        Ok(())
+    } else {
+        Err("Server URL must use https://".to_string())
+    }
+}
+
 pub fn test_connection(cfg: &Config, password: &str) -> Result<(), String> {
+    validate_https(&cfg.webdav_url)?;
     let url = format!("{}/", cfg.webdav_url.trim_end_matches('/'));
     let auth = basic_auth(&cfg.username, password);
     let body = r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/></D:prop></D:propfind>"#;
@@ -43,6 +52,7 @@ pub fn test_connection(cfg: &Config, password: &str) -> Result<(), String> {
 }
 
 pub fn list_folders(cfg: &Config, password: &str, folder_url: &str) -> Result<Vec<String>, String> {
+    validate_https(&cfg.webdav_url)?;
     let entries = list_entries(cfg, password, folder_url, 1)?;
     Ok(entries
         .into_iter()
@@ -56,6 +66,7 @@ pub fn list_entries_recursive(
     password: &str,
     folder_url: &str,
 ) -> Result<Vec<RemoteFile>, String> {
+    validate_https(&cfg.webdav_url)?;
     let mut queue = VecDeque::from([folder_url.trim_end_matches('/').to_string() + "/"]);
     let mut seen_dirs = HashSet::new();
     let mut all = Vec::new();
@@ -80,6 +91,7 @@ pub fn list_entries_recursive(
 }
 
 pub fn get_file(cfg: &Config, password: &str, remote_url: &str) -> Result<Vec<u8>, String> {
+    validate_https(&cfg.webdav_url)?;
     let auth = basic_auth(&cfg.username, password);
     let mut reader = agent()
         .request("GET", remote_url)
@@ -93,6 +105,7 @@ pub fn get_file(cfg: &Config, password: &str, remote_url: &str) -> Result<Vec<u8
 }
 
 pub fn put_file(cfg: &Config, password: &str, remote_url: &str, data: &[u8]) -> Result<(), String> {
+    validate_https(&cfg.webdav_url)?;
     let auth = basic_auth(&cfg.username, password);
     agent()
         .request("PUT", remote_url)
@@ -109,6 +122,7 @@ pub fn put_file(cfg: &Config, password: &str, remote_url: &str, data: &[u8]) -> 
 }
 
 pub fn mkcol(cfg: &Config, password: &str, remote_url: &str) -> Result<(), String> {
+    validate_https(&cfg.webdav_url)?;
     let auth = basic_auth(&cfg.username, password);
     match agent()
         .request("MKCOL", remote_url)
@@ -142,6 +156,7 @@ fn list_entries(
     folder_url: &str,
     depth: u32,
 ) -> Result<Vec<RemoteFile>, String> {
+    validate_https(&cfg.webdav_url)?;
     let auth = basic_auth(&cfg.username, password);
     let body = r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>"#;
     let response = agent()

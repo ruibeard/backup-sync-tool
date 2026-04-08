@@ -5,7 +5,14 @@ fn main() {
 
         // Primary icon (also used as the default APP_ICON resource by set_icon)
         res.set_icon_with_id("assets/app-idle.ico", "APP_ICON_IDLE");
-        res.set_icon_with_id("assets/app-syncing.ico", "APP_ICON_SYNCING");
+        res.set_icon_with_id("assets/syncing.ico", "APP_ICON_SYNCING");
+        res.set_icon_with_id("assets/complete.ico", "APP_ICON_COMPLETE");
+        res.set_icon_with_id("assets/syncing1.ico", "APP_ICON_SYNC_1");
+        res.set_icon_with_id("assets/syncing2.ico", "APP_ICON_SYNC_2");
+        res.set_icon_with_id("assets/syncing3.ico", "APP_ICON_SYNC_3");
+        res.set_icon_with_id("assets/syncing4.ico", "APP_ICON_SYNC_4");
+        res.set_icon_with_id("assets/syncing 5.ico", "APP_ICON_SYNC_5");
+        res.set_icon_with_id("assets/syncing 6.ico", "APP_ICON_SYNC_6");
         // set_icon sets the first ICON resource (ID 1), which Windows uses for
         // the file/taskbar thumbnail automatically.
         res.set_icon("assets/app-idle.ico");
@@ -13,7 +20,7 @@ fn main() {
         // Application manifest (enables visual styles + DPI awareness)
         res.set_manifest(r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.0.0.0" name="webdavsync"/>
+  <assemblyIdentity version="1.0.0.0" name="backupsynctool"/>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"

@@ -19,8 +19,24 @@ pub struct SyncEngine {
 /// Callback type for status/log messages sent back to the UI
 pub type LogFn = Arc<dyn Fn(String) + Send + Sync>;
 
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum ActivityState {
+    Checking,
+    Syncing,
+    Idle,
+}
+
+/// Callback for sync activity state changes.
+pub type ActivityFn = Arc<dyn Fn(ActivityState) + Send + Sync>;
+
 impl SyncEngine {
-    pub fn start(cfg: Config, password: String, log: LogFn) -> Result<Self, String> {
+    pub fn start(
+        cfg: Config,
+        password: String,
+        log: LogFn,
+        activity: ActivityFn,
+    ) -> Result<Self, String> {
         // Pending paths and the time they were last touched (for debounce)
         let pending: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
         let suppressed: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -29,12 +45,25 @@ impl SyncEngine {
         let cfg_arc = Arc::new(cfg);
         let pass_arc = Arc::new(password);
         let log_clone = log.clone();
+        let activity_clone = activity.clone();
         let cfg_watcher = cfg_arc.clone();
         let pass_watcher = pass_arc.clone();
 
+        activity_clone(ActivityState::Checking);
         let remote_existing = fetch_remote_existing(&cfg_arc, &pass_arc, &log_clone);
 
-        sync_initial_local_to_remote(&cfg_arc, &pass_arc, &remote_existing, &log_clone);
+        let initial_uploads = sync_initial_local_to_remote(
+            &cfg_arc,
+            &pass_arc,
+            &remote_existing,
+            &log_clone,
+            &activity_clone,
+        );
+        if initial_uploads == 0 {
+            activity_clone(ActivityState::Idle);
+        } else {
+            activity_clone(ActivityState::Idle);
+        }
 
         if cfg_arc.sync_remote_changes {
             sync_remote_to_local(&cfg_arc, &pass_arc, &suppressed, &log_clone);
@@ -61,8 +90,24 @@ impl SyncEngine {
                         .collect()
                 };
 
+                if !due.is_empty() {
+                    activity_clone(ActivityState::Syncing);
+                }
+
+                let had_due = !due.is_empty();
+
                 for path in due {
-                    upload_path(&cfg_watcher, &pass_watcher, &path, &log_clone);
+                    upload_path(
+                        &cfg_watcher,
+                        &pass_watcher,
+                        &path,
+                        &log_clone,
+                        Some(&activity_clone),
+                    );
+                }
+
+                if had_due {
+                    activity_clone(ActivityState::Idle);
                 }
 
                 if cfg_watcher.sync_remote_changes
@@ -149,15 +194,28 @@ fn ensure_remote_dirs(
     Ok(())
 }
 
-fn upload_path(cfg: &Config, password: &str, path: &PathBuf, log: &LogFn) {
+fn upload_path(
+    cfg: &Config,
+    password: &str,
+    path: &PathBuf,
+    log: &LogFn,
+    activity: Option<&ActivityFn>,
+) {
     if !path.is_file() {
         return;
+    }
+
+    if let Some(activity) = activity {
+        activity(ActivityState::Syncing);
     }
 
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(e) => {
             log(format!("Read error {}: {}", path.display(), e));
+            if let Some(activity) = activity {
+                activity(ActivityState::Idle);
+            }
             return;
         }
     };
@@ -176,6 +234,9 @@ fn upload_path(cfg: &Config, password: &str, path: &PathBuf, log: &LogFn) {
             ensure_remote_dirs(cfg, password, cfg.webdav_url.trim_end_matches('/'), &parent)
         {
             log(format!("Create folder failed {}: {}", relative, e));
+            if let Some(activity) = activity {
+                activity(ActivityState::Idle);
+            }
             return;
         }
     }
@@ -183,6 +244,10 @@ fn upload_path(cfg: &Config, password: &str, path: &PathBuf, log: &LogFn) {
     match webdav::put_file(cfg, password, &remote_url, &data) {
         Ok(_) => log(format!("Uploaded: {}", relative)),
         Err(e) => log(format!("Upload failed {}: {}", relative, e)),
+    }
+
+    if let Some(activity) = activity {
+        activity(ActivityState::Idle);
     }
 }
 
@@ -206,8 +271,10 @@ fn sync_initial_local_to_remote(
     password: &str,
     remote_existing: &HashSet<String>,
     log: &LogFn,
-) {
+    activity: &ActivityFn,
+) -> usize {
     let local_files = collect_local_files(&cfg.watch_folder);
+    let mut uploaded = 0usize;
     for path in local_files {
         let relative = match path.strip_prefix(&cfg.watch_folder) {
             Ok(r) => r.to_string_lossy().replace('\\', "/"),
@@ -218,8 +285,10 @@ fn sync_initial_local_to_remote(
             continue;
         }
 
-        upload_path(cfg, password, &path, log);
+        upload_path(cfg, password, &path, log, Some(activity));
+        uploaded += 1;
     }
+    uploaded
 }
 
 fn collect_local_files(root: &str) -> Vec<PathBuf> {

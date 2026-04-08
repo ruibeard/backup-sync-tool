@@ -11,13 +11,16 @@ pub const ID_TRAY_OPEN: usize = 1001;
 pub const ID_TRAY_LOGS: usize = 1002;
 pub const ID_TRAY_EXIT: usize = 1003;
 
+unsafe fn fill_tip(dst: &mut [u16; 128], text: PCWSTR) {
+    let src = text.as_wide();
+    let len = src.len().min(127);
+    dst[..len].copy_from_slice(&src[..len]);
+}
+
 // Add tray icon to the notification area
 pub unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) {
     let mut tip = [0u16; 128];
-    let text = w!("WebDavSync");
-    let src = text.as_wide();
-    let len = src.len().min(127);
-    tip[..len].copy_from_slice(&src[..len]);
+    fill_tip(&mut tip, w!("Backup Sync Tool"));
 
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -30,6 +33,22 @@ pub unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) {
         ..Default::default()
     };
     let _ = Shell_NotifyIconW(NIM_ADD, &mut nid);
+}
+
+pub unsafe fn set_tray_icon(hwnd: HWND, hicon: HICON) {
+    let mut tip = [0u16; 128];
+    fill_tip(&mut tip, w!("Backup Sync Tool"));
+
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_TIP,
+        hIcon: hicon,
+        szTip: tip,
+        ..Default::default()
+    };
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &mut nid);
 }
 
 // Remove tray icon (call on exit)
