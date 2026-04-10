@@ -11,8 +11,9 @@ pub const ID_TRAY_OPEN: usize = 1001;
 pub const ID_TRAY_LOGS: usize = 1002;
 pub const ID_TRAY_EXIT: usize = 1003;
 
-unsafe fn fill_tip(dst: &mut [u16; 128], text: PCWSTR) {
-    let src = text.as_wide();
+unsafe fn fill_tip(dst: &mut [u16; 128], text: &str) {
+    let wide = HSTRING::from(text);
+    let src = wide.as_wide();
     let len = src.len().min(127);
     dst[..len].copy_from_slice(&src[..len]);
 }
@@ -20,7 +21,7 @@ unsafe fn fill_tip(dst: &mut [u16; 128], text: PCWSTR) {
 // Add tray icon to the notification area
 pub unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) {
     let mut tip = [0u16; 128];
-    fill_tip(&mut tip, w!("Backup Sync Tool"));
+    fill_tip(&mut tip, "Backup Sync Tool");
 
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -35,9 +36,9 @@ pub unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) {
     let _ = Shell_NotifyIconW(NIM_ADD, &mut nid);
 }
 
-pub unsafe fn set_tray_icon(hwnd: HWND, hicon: HICON) {
+pub unsafe fn set_tray_icon_and_tip(hwnd: HWND, hicon: HICON, text: &str) {
     let mut tip = [0u16; 128];
-    fill_tip(&mut tip, w!("Backup Sync Tool"));
+    fill_tip(&mut tip, text);
 
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,

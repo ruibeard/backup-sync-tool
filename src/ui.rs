@@ -69,6 +69,7 @@ const IDC_ACTIVITY_LIST: u16 = 114;
 const IDC_START_WINDOWS: u16 = 115;
 const IDC_SYNC_REMOTE: u16 = 116;
 // IDC_SHOW_PASSWORD (117) removed — eye icon is now drawn inside the edit subclass
+const IDC_SYNC_PROGRESS: u16 = 118;
 const IDC_REPO: u16 = 120;
 const IDC_DEST_CREATED: u16 = 121;
 const IDC_PICKER_PATH: u16 = 201;
@@ -121,6 +122,8 @@ struct WndState {
     connected: bool,
     sync_status_text: String,
     sync_status_state: usize,
+    sync_progress_done: usize,
+    sync_progress_total: usize,
     sync_anim_frame: usize,
     sync_icon: HICON,
     sync_icon_rect: RECT,
@@ -317,7 +320,7 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_UPDATE => on_app_update(hwnd, wparam, lparam),
         WM_APP_REMOTE_FOLDER => on_app_remote_folder(hwnd, lparam),
         WM_APP_DEST_READY => on_app_dest_ready(hwnd, wparam),
-        WM_APP_SYNC_ACTIVITY => on_app_sync_activity(hwnd, wparam),
+        WM_APP_SYNC_ACTIVITY => on_app_sync_activity(hwnd, wparam, lparam),
         WM_TIMER => on_timer(hwnd, wparam),
 
         WM_CLOSE => {
@@ -602,6 +605,8 @@ unsafe fn on_create(hwnd: HWND) {
         connected: false,
         sync_status_text: "Checking local files...".to_string(),
         sync_status_state: crate::sync::ActivityState::Checking as usize,
+        sync_progress_done: 0,
+        sync_progress_total: 0,
         sync_anim_frame: 0,
         sync_icon: HICON(0),
         sync_icon_rect: RECT::default(),
@@ -658,12 +663,12 @@ unsafe fn on_create(hwnd: HWND) {
             .ok();
         }
     });
-    let activity: crate::sync::ActivityFn = Arc::new(move |state| unsafe {
+    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
         PostMessageW(
             HWND(raw),
             WM_APP_SYNC_ACTIVITY,
-            WPARAM(state as usize),
-            LPARAM(0),
+            WPARAM(info.state as usize),
+            LPARAM(Box::into_raw(Box::new((info.completed, info.total))) as isize),
         )
         .ok();
     });
@@ -722,7 +727,9 @@ unsafe fn on_create(hwnd: HWND) {
                 .ok();
             }
             crate::updater::CheckResult::UpToDate => {}
-            crate::updater::CheckResult::Error(_) => {}
+            crate::updater::CheckResult::Error(e) => {
+                crate::logs::append(&format!("Update check error: {e}"));
+            }
         },
     );
 }
@@ -792,6 +799,18 @@ unsafe fn build_ui(
             hf_small,
             SS_RIGHT,
         );
+        let progress_y = y + LBL_H + 3;
+        let progress_h = 10;
+        mkprogress(
+            hwnd,
+            hi,
+            IDC_SYNC_PROGRESS,
+            sync_text_x,
+            progress_y,
+            sync_icon_x - sync_gap - sync_text_x,
+            progress_h,
+        );
+        ShowWindow(GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32), SW_HIDE);
 
         mkbtn_blue(
             hwnd,
@@ -806,7 +825,7 @@ unsafe fn build_ui(
         );
         ShowWindow(GetDlgItem(hwnd, IDC_CONNECT as i32), SW_HIDE);
 
-        y += HDR_H + PAD;
+        y += HDR_H + PAD + progress_h + 4;
 
         mkedit_cue(
             hwnd,
@@ -1346,6 +1365,25 @@ unsafe fn mklb(
     c
 }
 
+unsafe fn mkprogress(hwnd: HWND, hi: HINSTANCE, id: u16, x: i32, y: i32, w: i32, h: i32) -> HWND {
+    let c = CreateWindowExW(
+        WINDOW_EX_STYLE::default(),
+        w!("msctls_progress32"),
+        w!(""),
+        WS_CHILD | WS_VISIBLE,
+        x,
+        y,
+        w,
+        h,
+        hwnd,
+        HMENU(id as isize),
+        hi,
+        None,
+    );
+    SendMessageW(c, PBM_SETRANGE32, WPARAM(0), LPARAM(100));
+    c
+}
+
 // ── WM_DRAWITEM ───────────────────────────────────────────────────────────────
 const BLUE_IDS: &[u16] = &[IDC_CONNECT, IDC_SAVE];
 
@@ -1556,12 +1594,12 @@ unsafe fn do_save(hwnd: HWND) {
             .ok();
         }
     });
-    let activity: crate::sync::ActivityFn = Arc::new(move |state| unsafe {
+    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
         PostMessageW(
             HWND(raw),
             WM_APP_SYNC_ACTIVITY,
-            WPARAM(state as usize),
-            LPARAM(0),
+            WPARAM(info.state as usize),
+            LPARAM(Box::into_raw(Box::new((info.completed, info.total))) as isize),
         )
         .ok();
     });
@@ -1659,8 +1697,11 @@ unsafe fn do_open_logs(hwnd: HWND) {
 // ── App messages ──────────────────────────────────────────────────────────────
 unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let msg = Box::from_raw(lp.0 as *mut String);
+    let Some(entry) = activity_entry(&msg) else {
+        return LRESULT(0);
+    };
     let hlb = GetDlgItem(hwnd, IDC_ACTIVITY_LIST as i32);
-    let ws = hstring(&format!("{}  {}", ts(), msg));
+    let ws = hstring(&entry);
     SendMessageW(
         hlb,
         LB_INSERTSTRING,
@@ -1673,8 +1714,13 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM) -> LRESULT {
-    let (icon_name, status_text) = match wp.0 {
+unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let progress = if lp.0 != 0 {
+        *Box::from_raw(lp.0 as *mut (usize, usize))
+    } else {
+        (0, 0)
+    };
+    let (icon_name, mut status_text) = match wp.0 {
         x if x == crate::sync::ActivityState::Checking as usize => {
             (w!("APP_ICON_IDLE"), "Checking...")
         }
@@ -1685,25 +1731,58 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM) -> LRESULT {
     };
 
     let st = stmut(hwnd);
+    let was_syncing = st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
     st.sync_status_state = wp.0;
+    st.sync_progress_done = progress.0;
+    st.sync_progress_total = progress.1;
     if wp.0 == crate::sync::ActivityState::Syncing as usize {
-        st.sync_anim_frame = 0;
-        let _ = SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
+        if progress.1 > 0 {
+            st.sync_status_text = format!("Syncing {}/{}", progress.0.min(progress.1), progress.1);
+            status_text = &st.sync_status_text;
+        }
+        if !was_syncing {
+            st.sync_anim_frame = 0;
+            let _ = SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
+        }
     } else {
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
         let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
         let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
         if hicon.0 != 0 {
-            tray::set_tray_icon(hwnd, hicon);
+            tray::set_tray_icon_and_tip(hwnd, hicon, "Backup Sync Tool");
             st.sync_icon = hicon;
             InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
         }
     }
-    st.sync_status_text = status_text.to_string();
+    if wp.0 != crate::sync::ActivityState::Syncing as usize {
+        st.sync_status_text = status_text.to_string();
+    }
     let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
-        &hstring(status_text),
+        &hstring(&st.sync_status_text),
     );
+    let progress_hwnd = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
+    if wp.0 == crate::sync::ActivityState::Syncing as usize && progress.1 > 0 {
+        let pct = ((progress.0.min(progress.1) * 100) / progress.1) as isize;
+        SendMessageW(progress_hwnd, PBM_SETPOS, WPARAM(pct as usize), LPARAM(0));
+        ShowWindow(progress_hwnd, SW_SHOW);
+        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
+        let tip_icon = LoadIconW(hi, w!("APP_ICON_SYNCING")).unwrap_or_default();
+        if tip_icon.0 != 0 {
+            tray::set_tray_icon_and_tip(
+                hwnd,
+                tip_icon,
+                &format!(
+                    "Backup Sync Tool - Syncing {}/{}",
+                    progress.0.min(progress.1),
+                    progress.1
+                ),
+            );
+        }
+    } else {
+        SendMessageW(progress_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
+        ShowWindow(progress_hwnd, SW_HIDE);
+    }
     InvalidateRect(GetDlgItem(hwnd, IDC_SYNC_STATUS as i32), None, TRUE);
     LRESULT(0)
 }
@@ -1732,7 +1811,16 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
     st.sync_anim_frame = (st.sync_anim_frame + 1) % names.len();
     let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
     if hicon.0 != 0 {
-        tray::set_tray_icon(hwnd, hicon);
+        let tip = if st.sync_progress_total > 0 {
+            format!(
+                "Backup Sync Tool - Syncing {}/{}",
+                st.sync_progress_done.min(st.sync_progress_total),
+                st.sync_progress_total
+            )
+        } else {
+            "Backup Sync Tool - Syncing".to_string()
+        };
+        tray::set_tray_icon_and_tip(hwnd, hicon, &tip);
         st.sync_icon = hicon;
         InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
     }
@@ -1977,13 +2065,18 @@ unsafe fn msgbox_yn(hwnd: HWND, text: &str, title: &str) -> bool {
     .0 == IDYES.0 as i32
 }
 
-fn ts() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let s = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    format!("{:02}:{:02}:{:02}", (s / 3600) % 24, (s / 60) % 60, s % 60)
+fn activity_entry(message: &str) -> Option<String> {
+    if let Some(name) = message.strip_prefix("Uploaded: ") {
+        return Some(format!("↑ {}", display_activity_name(name)));
+    }
+    if let Some(name) = message.strip_prefix("Downloaded: ") {
+        return Some(format!("↓ {}", display_activity_name(name)));
+    }
+    None
+}
+
+fn display_activity_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 fn validate_webdav_url(url: &str) -> std::result::Result<(), String> {

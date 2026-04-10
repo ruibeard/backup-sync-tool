@@ -24,7 +24,8 @@
 - [x] App closes to tray instead of exiting
 - [x] Tray double-click reopens the window
 - [x] Tray menu supports exit
-- [x] Tray icon has at least idle and syncing states
+- [x] Tray icon has idle, syncing, and complete states
+- [x] Animated tray icon cycles through 6 syncing frames without resetting between sync activity events
 - [x] App keeps running in the background while UI is hidden
 
 ### Core Sync
@@ -32,8 +33,10 @@
 - [x] Monitors exactly one local folder
 - [x] Syncs local changes to a WebDAV destination
 - [x] After startup or after saving valid settings, the app checks the configured local folder and uploads existing local files to the remote destination
+- [x] Initial startup scan runs in the background so the window opens immediately
 - [x] Uploads new files
 - [x] Uploads changed files
+- [x] Uploads can run in parallel with a bounded concurrency limit
 - [x] Automatically uploads newly created files in the local folder without any user action
 - [x] Uses a file watcher / continuous watch mechanism so local changes are detected automatically
 - [x] Creates remote folders as needed
@@ -80,6 +83,10 @@
 - [x] Connect and Save are primary buttons
 - [x] Browse and Show are secondary controls
 - [x] Password field has adjacent Show/Hide control
+- [x] Sync progress bar is shown during active upload batches
+- [x] Tray tooltip shows sync progress while uploads are active
+- [x] Recent Activity is a compact transfer feed (`↑ filename` / `↓ filename`)
+- [x] Recent Activity does not show timestamps
 
 ### Security Requirements
 
@@ -96,3 +103,4 @@
 ### Logging
 
 - [x] Tray menu item: `Open Logs`
+- [x] Recent Activity shows only compact transfer entries (`↑ filename` / `↓ filename`) with no timestamps

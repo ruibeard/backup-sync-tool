@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const REMOTE_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_PARALLEL_UPLOADS: usize = 2;
 
 pub struct SyncEngine {
     _watcher: RecommendedWatcher,
@@ -27,8 +28,15 @@ pub enum ActivityState {
     Idle,
 }
 
+#[derive(Clone, Copy)]
+pub struct ActivityInfo {
+    pub state: ActivityState,
+    pub completed: usize,
+    pub total: usize,
+}
+
 /// Callback for sync activity state changes.
-pub type ActivityFn = Arc<dyn Fn(ActivityState) + Send + Sync>;
+pub type ActivityFn = Arc<dyn Fn(ActivityInfo) + Send + Sync>;
 
 impl SyncEngine {
     pub fn start(
@@ -49,28 +57,33 @@ impl SyncEngine {
         let cfg_watcher = cfg_arc.clone();
         let pass_watcher = pass_arc.clone();
 
-        activity_clone(ActivityState::Checking);
-        let remote_existing = fetch_remote_existing(&cfg_arc, &pass_arc, &log_clone);
-
-        let initial_uploads = sync_initial_local_to_remote(
-            &cfg_arc,
-            &pass_arc,
-            &remote_existing,
-            &log_clone,
-            &activity_clone,
-        );
-        if initial_uploads == 0 {
-            activity_clone(ActivityState::Idle);
-        } else {
-            activity_clone(ActivityState::Idle);
-        }
-
-        if cfg_arc.sync_remote_changes {
-            sync_remote_to_local(&cfg_arc, &pass_arc, &suppressed, &log_clone);
-        }
-
         // Spawn upload worker thread
         std::thread::spawn(move || {
+            activity_clone(ActivityInfo {
+                state: ActivityState::Checking,
+                completed: 0,
+                total: 0,
+            });
+            let remote_existing = fetch_remote_existing(&cfg_watcher, &pass_watcher, &log_clone);
+
+            let _initial_uploads = sync_initial_local_to_remote(
+                &cfg_watcher,
+                &pass_watcher,
+                &remote_existing,
+                &log_clone,
+                &activity_clone,
+            );
+
+            if cfg_watcher.sync_remote_changes {
+                sync_remote_to_local(&cfg_watcher, &pass_watcher, &suppressed_clone, &log_clone);
+            }
+
+            activity_clone(ActivityInfo {
+                state: ActivityState::Idle,
+                completed: 0,
+                total: 0,
+            });
+
             let mut last_remote_sync = Instant::now();
             loop {
                 std::thread::sleep(Duration::from_millis(500));
@@ -91,23 +104,30 @@ impl SyncEngine {
                 };
 
                 if !due.is_empty() {
-                    activity_clone(ActivityState::Syncing);
+                    activity_clone(ActivityInfo {
+                        state: ActivityState::Syncing,
+                        completed: 0,
+                        total: due.len(),
+                    });
                 }
 
                 let had_due = !due.is_empty();
 
-                for path in due {
-                    upload_path(
-                        &cfg_watcher,
-                        &pass_watcher,
-                        &path,
-                        &log_clone,
-                        Some(&activity_clone),
-                    );
-                }
+                let completed = upload_paths_parallel(
+                    &cfg_watcher,
+                    &pass_watcher,
+                    &due,
+                    &log_clone,
+                    MAX_PARALLEL_UPLOADS,
+                    Some(&activity_clone),
+                );
 
                 if had_due {
-                    activity_clone(ActivityState::Idle);
+                    activity_clone(ActivityInfo {
+                        state: ActivityState::Idle,
+                        completed,
+                        total: due.len(),
+                    });
                 }
 
                 if cfg_watcher.sync_remote_changes
@@ -194,28 +214,15 @@ fn ensure_remote_dirs(
     Ok(())
 }
 
-fn upload_path(
-    cfg: &Config,
-    password: &str,
-    path: &PathBuf,
-    log: &LogFn,
-    activity: Option<&ActivityFn>,
-) {
+fn upload_path(cfg: &Config, password: &str, path: &PathBuf, log: &LogFn) {
     if !path.is_file() {
         return;
-    }
-
-    if let Some(activity) = activity {
-        activity(ActivityState::Syncing);
     }
 
     let data = match std::fs::read(path) {
         Ok(d) => d,
         Err(e) => {
             log(format!("Read error {}: {}", path.display(), e));
-            if let Some(activity) = activity {
-                activity(ActivityState::Idle);
-            }
             return;
         }
     };
@@ -234,9 +241,6 @@ fn upload_path(
             ensure_remote_dirs(cfg, password, cfg.webdav_url.trim_end_matches('/'), &parent)
         {
             log(format!("Create folder failed {}: {}", relative, e));
-            if let Some(activity) = activity {
-                activity(ActivityState::Idle);
-            }
             return;
         }
     }
@@ -245,10 +249,38 @@ fn upload_path(
         Ok(_) => log(format!("Uploaded: {}", relative)),
         Err(e) => log(format!("Upload failed {}: {}", relative, e)),
     }
+}
 
-    if let Some(activity) = activity {
-        activity(ActivityState::Idle);
+fn upload_paths_parallel(
+    cfg: &Config,
+    password: &str,
+    paths: &[PathBuf],
+    log: &LogFn,
+    max_parallel: usize,
+    activity: Option<&ActivityFn>,
+) -> usize {
+    let width = max_parallel.max(1);
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let total = paths.len();
+    for chunk in paths.chunks(width) {
+        std::thread::scope(|scope| {
+            for path in chunk {
+                let completed = completed.clone();
+                scope.spawn(move || {
+                    upload_path(cfg, password, path, log);
+                    let done = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if let Some(activity) = activity {
+                        activity(ActivityInfo {
+                            state: ActivityState::Syncing,
+                            completed: done,
+                            total,
+                        });
+                    }
+                });
+            }
+        });
     }
+    completed.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn fetch_remote_existing(cfg: &Config, password: &str, log: &LogFn) -> HashSet<String> {
@@ -274,7 +306,8 @@ fn sync_initial_local_to_remote(
     activity: &ActivityFn,
 ) -> usize {
     let local_files = collect_local_files(&cfg.watch_folder);
-    let mut uploaded = 0usize;
+    let mut pending_uploads = Vec::new();
+
     for path in local_files {
         let relative = match path.strip_prefix(&cfg.watch_folder) {
             Ok(r) => r.to_string_lossy().replace('\\', "/"),
@@ -285,9 +318,27 @@ fn sync_initial_local_to_remote(
             continue;
         }
 
-        upload_path(cfg, password, &path, log, Some(activity));
-        uploaded += 1;
+        pending_uploads.push(path);
     }
+
+    if pending_uploads.is_empty() {
+        return 0;
+    }
+
+    activity(ActivityInfo {
+        state: ActivityState::Syncing,
+        completed: 0,
+        total: pending_uploads.len(),
+    });
+    let uploaded = pending_uploads.len();
+    upload_paths_parallel(
+        cfg,
+        password,
+        &pending_uploads,
+        log,
+        MAX_PARALLEL_UPLOADS,
+        Some(activity),
+    );
     uploaded
 }
 

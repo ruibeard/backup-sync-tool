@@ -11,8 +11,8 @@ fn main() {
         res.set_icon_with_id("assets/syncing2.ico", "APP_ICON_SYNC_2");
         res.set_icon_with_id("assets/syncing3.ico", "APP_ICON_SYNC_3");
         res.set_icon_with_id("assets/syncing4.ico", "APP_ICON_SYNC_4");
-        res.set_icon_with_id("assets/syncing 5.ico", "APP_ICON_SYNC_5");
-        res.set_icon_with_id("assets/syncing 6.ico", "APP_ICON_SYNC_6");
+        res.set_icon_with_id("assets/syncing5.ico", "APP_ICON_SYNC_5");
+        res.set_icon_with_id("assets/syncing6.ico", "APP_ICON_SYNC_6");
         // set_icon sets the first ICON resource (ID 1), which Windows uses for
         // the file/taskbar thumbnail automatically.
         res.set_icon("assets/app-idle.ico");
