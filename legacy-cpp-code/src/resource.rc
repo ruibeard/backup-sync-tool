@@ -1,4 +1,0 @@
-#include "resource.h"
-
-IDI_APP_IDLE ICON "../assets/app-idle.ico"
-IDI_APP_SYNCING ICON "../assets/app-syncing.ico"
