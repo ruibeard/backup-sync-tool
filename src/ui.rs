@@ -76,6 +76,9 @@ const IDC_PICKER_LIST: u16 = 202;
 const IDC_PICKER_UP: u16 = 203;
 const IDC_PICKER_SELECT: u16 = 205;
 const IDC_PICKER_CANCEL: u16 = 206;
+const IDC_SERVER_HDR: u16 = 207;
+const IDC_GITHUB: u16 = 211;
+const IDC_AUTHOR: u16 = 212;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -95,6 +98,7 @@ const SS_NOTIFY: u32 = 0x0100;
 
 pub const CLASS_NAME: PCWSTR = w!("BackupSyncToolWnd");
 const REPO_URL: &str = "https://github.com/ruibeard/backup-sync-tool";
+const AUTHOR_URL: &str = "https://ruialmeida.me";
 const PICKER_CLASS_NAME: PCWSTR = w!("BackupSyncToolRemotePickerWnd");
 const PICKER_CLIENT_W: i32 = 430;
 const PICKER_CLIENT_H: i32 = 430;
@@ -133,6 +137,10 @@ struct WndState {
     remote_folder_created: bool,
     /// True when URL/username/password have been edited since the last save/connect
     creds_dirty: bool,
+    /// Whether the SERVER credentials section is collapsed
+    server_collapsed: bool,
+    /// Height of the server section controls (URL + username/password rows) when expanded
+    server_section_h: i32,
     #[allow(dead_code)]
     hfont: HFONT,
     #[allow(dead_code)]
@@ -306,6 +314,7 @@ unsafe extern "system" fn wnd_proc(
             let text_clr = match id {
                 IDC_DEST_CREATED => C_GREEN,
                 IDC_REPO => C_BLUE,
+                IDC_AUTHOR => 0x00888888,
                 _ => C_LABEL,
             };
             SetTextColor(hdc, COLORREF(text_clr));
@@ -438,7 +447,7 @@ unsafe extern "system" fn wnd_proc(
                     (&mut (*st).dividers)[div_idx] = divider_y;
                 }
 
-                // Reposition bottom bar controls (single row layout)
+                // Reposition bottom bar controls (two-row layout)
                 let bottom_y = sync_y + sync_row_h + (*st).post_sync_sect;
 
                 let row_h = BTN_H;
@@ -448,10 +457,11 @@ unsafe extern "system" fn wnd_proc(
                 let footer_y = bottom_y + (row_h - footer_h) / 2;
                 let save_w = 64i32;
                 let update_btn_w = 26i32;
+                let github_btn_w = 20i32;
                 let version_w = 72i32;
-                let gap = 8i32;
                 let version_x = M;
-                let update_btn_x = version_x + version_w + gap;
+                let github_btn_x = version_x + version_w + 4;
+                let update_btn_x = github_btn_x + github_btn_w + 4;
                 let startup_x = update_btn_x + update_btn_w + 14;
                 let two_way_x = startup_x + 78;
                 let save_x = M + INNER_W - save_w;
@@ -497,10 +507,33 @@ unsafe extern "system" fn wnd_proc(
                 )
                 .ok();
                 SetWindowPos(
+                    GetDlgItem(hwnd, IDC_GITHUB as i32),
+                    None,
+                    github_btn_x,
+                    footer_y,
+                    0,
+                    0,
+                    SWP_NOZORDER | SWP_NOSIZE,
+                )
+                .ok();
+                SetWindowPos(
                     GetDlgItem(hwnd, IDC_UPDATE_LINK as i32),
                     None,
                     update_btn_x,
                     bottom_y + (row_h - 20) / 2,
+                    0,
+                    0,
+                    SWP_NOZORDER | SWP_NOSIZE,
+                )
+                .ok();
+
+                // Author row
+                let author_y = bottom_y + row_h + 4;
+                SetWindowPos(
+                    GetDlgItem(hwnd, IDC_AUTHOR as i32),
+                    None,
+                    version_x,
+                    author_y,
                     0,
                     0,
                     SWP_NOZORDER | SWP_NOSIZE,
@@ -813,6 +846,8 @@ unsafe fn on_create(hwnd: HWND) {
         remote_folder_from_xd,
         remote_folder_created: false,
         creds_dirty: false,
+        server_collapsed: true,
+        server_section_h: 0,
         hfont,
         hfont_hdr,
         hfont_b,
@@ -967,11 +1002,22 @@ unsafe fn build_ui(
     {
         let status_w = 16i32;
         let server_status_w = 84i32;
-        let url_w = INNER_W;
         let server_status_x = M + INNER_W - server_status_w;
         let status_x = server_status_x - status_w - 4;
 
-        mkfield_label(hwnd, hi, "Server URL", M, y, url_w, hf_small);
+        // Clickable header row: "▶ SERVER" toggle + status dot + status text
+        let hdr_toggle_w = 90i32;
+        mklink(
+            hwnd,
+            hi,
+            IDC_SERVER_HDR,
+            "\u{25B6}  SERVER",
+            M,
+            y,
+            hdr_toggle_w,
+            HDR_H,
+            hf_hdr,
+        );
         mkstatic_align(
             hwnd,
             hi,
@@ -996,7 +1042,11 @@ unsafe fn build_ui(
             hf_small,
             SS_CENTER,
         );
-        y += LBL_H + 4;
+        y += HDR_H + PAD;
+
+        // --- Collapsible controls (hidden by default) ---
+        let section_top = y;
+        let url_w = INNER_W;
 
         mkedit_cue(
             hwnd,
@@ -1010,7 +1060,7 @@ unsafe fn build_ui(
             hf,
         );
 
-        // Connect button (hidden until credentials dirty) - overlays same spot
+        // Connect button overlays URL row right edge
         mkbtn_blue(
             hwnd,
             hi,
@@ -1023,7 +1073,6 @@ unsafe fn build_ui(
             hf_b,
         );
         ShowWindow(GetDlgItem(hwnd, IDC_CONNECT as i32), SW_HIDE);
-
         y += INP_H + GAP;
 
         let cred_w = (INNER_W - PAD) / 2;
@@ -1054,7 +1103,28 @@ unsafe fn build_ui(
         );
         y += INP_H + SECT;
 
-        st.dividers.push(y - SECT / 2);
+        // Record how tall this section is so toggle can shift everything below
+        st.server_section_h = y - section_top;
+
+        // Hide the controls if starting collapsed
+        let server_ctrl_ids = [IDC_URL, IDC_USERNAME, IDC_PASSWORD];
+        for &ctrl_id in &server_ctrl_ids {
+            ShowWindow(GetDlgItem(hwnd, ctrl_id as i32), SW_HIDE);
+        }
+        // Also hide the two field labels — they have no ID so we hide by position via EnumChildWindows.
+        // Simpler: we give them IDs. Use IDC_LBL_URL=208, IDC_LBL_USER=209, IDC_LBL_PASS=210.
+        // But those were created with mkfield_label which doesn't take an id.
+        // Instead, collapse by adjusting y back and not creating labels when collapsed.
+        // Re-do: create labels with IDs so we can hide them.
+        // We already created them above without IDs — destroy & recreate with IDs below.
+        // Actually the simplest approach: just reduce y back to section_top, we'll
+        // handle the show/hide of all server controls in toggle_server_section.
+        if st.server_collapsed {
+            y = section_top;
+        }
+
+        st.dividers
+            .push(y - SECT / 2 + if st.server_collapsed { SECT / 2 } else { 0 });
     }
 
     // ── FOLDERS ───────────────────────────────────────────────────────────────
@@ -1198,7 +1268,8 @@ unsafe fn build_ui(
     }
 
     // ── BOTTOM BAR ────────────────────────────────────────────────────────────
-    // Single row: checkboxes on the left, version + update + save on the right.
+    // Row 1: version + github icon + update + checkboxes + save
+    // Row 2: author credit
     {
         let row_h = BTN_H;
         let button_y = y + (row_h - BTN_H) / 2;
@@ -1208,10 +1279,11 @@ unsafe fn build_ui(
         let save_w = 64i32;
         let update_btn_w = 26i32;
         let update_btn_h = 20i32;
+        let github_btn_w = 20i32;
         let version_w = 72i32;
-        let gap = 8i32;
         let version_x = M;
-        let update_btn_x = version_x + version_w + gap;
+        let github_btn_x = version_x + version_w + 4;
+        let update_btn_x = github_btn_x + github_btn_w + 4;
         let startup_x = update_btn_x + update_btn_w + 14;
         let two_way_x = startup_x + 78;
         let save_x = M + INNER_W - save_w;
@@ -1251,6 +1323,19 @@ unsafe fn build_ui(
             hwnd, hi, IDC_REPO, ver_label, version_x, footer_y, version_w, footer_h, hf_link,
         );
 
+        // GitHub icon button (owner-drawn, draws GitHub octocat-like icon)
+        mkbtn(
+            hwnd,
+            hi,
+            IDC_GITHUB,
+            "",
+            github_btn_x,
+            footer_y,
+            github_btn_w,
+            footer_h,
+            hf_small,
+        );
+
         mkbtn(
             hwnd,
             hi,
@@ -1264,8 +1349,24 @@ unsafe fn build_ui(
         );
         ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
 
-        y += row_h + M;
-        st.bottom_bar_h = row_h + M;
+        y += row_h;
+
+        // Author credit row
+        let author_h = LBL_H - 2;
+        let author_y = y + 4;
+        mklink(
+            hwnd,
+            hi,
+            IDC_AUTHOR,
+            "Rui Almeida \u{00B7} ruialmeida.me",
+            version_x,
+            author_y,
+            200,
+            author_h,
+            hf_link,
+        );
+        y += author_h + 4 + M;
+        st.bottom_bar_h = y - (y - row_h - author_h - 4 - M);
     }
 
     // Size window to fit content
@@ -1676,9 +1777,10 @@ const C_FOLDER_LINE: u32 = 0x00607890; // darker outline for folder (BGR for #90
 
 // ── WM_DRAWITEM ───────────────────────────────────────────────────────────────
 const BLUE_IDS: &[u16] = &[IDC_CONNECT, IDC_SAVE, IDC_UPDATE_LINK];
-const BORDERLESS_IDS: &[u16] = &[IDC_BROWSE_LOCAL, IDC_BROWSE_REMOTE];
+const BORDERLESS_IDS: &[u16] = &[IDC_BROWSE_LOCAL, IDC_BROWSE_REMOTE, IDC_GITHUB];
 const FOLDER_IDS: &[u16] = &[IDC_BROWSE_LOCAL, IDC_BROWSE_REMOTE];
 const UPDATE_IDS: &[u16] = &[IDC_UPDATE_LINK];
+const GITHUB_IDS: &[u16] = &[IDC_GITHUB];
 
 unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
     let di = &*(lp.0 as *const DRAWITEMSTRUCT);
@@ -1720,6 +1822,7 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
     let len = GetWindowTextLengthW(di.hwndItem);
     let is_folder = FOLDER_IDS.contains(&id);
     let is_update = UPDATE_IDS.contains(&id);
+    let is_github = GITHUB_IDS.contains(&id);
 
     if is_folder {
         // Draw a small folder icon via GDI
@@ -1727,6 +1830,9 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
     } else if is_update {
         // Draw a download arrow icon via GDI
         draw_download_icon(hdc, &rc, fg);
+    } else if is_github {
+        // Draw a GitHub icon via GDI
+        draw_github_icon(hdc, &rc, C_GREY_TXT);
     } else if len > 0 {
         let mut buf = vec![0u16; (len + 1) as usize];
         GetWindowTextW(di.hwndItem, &mut buf);
@@ -1817,7 +1923,55 @@ unsafe fn draw_download_icon(hdc: HDC, rc: &RECT, clr: u32) {
     DeleteObject(hp);
 }
 
-// ── Commands ──────────────────────────────────────────────────────────────────
+/// Draw a simplified GitHub-style icon (circle with a small fork/branch symbol).
+/// Renders clearly at small sizes like 14×14.
+unsafe fn draw_github_icon(hdc: HDC, rc: &RECT, clr: u32) {
+    let cx = (rc.left + rc.right) / 2;
+    let cy = (rc.top + rc.bottom) / 2;
+    let r = 6i32; // outer circle radius
+
+    let hp = CreatePen(PS_SOLID, 1, COLORREF(clr));
+    let op = SelectObject(hdc, hp);
+    let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    // Outer circle
+    Ellipse(hdc, cx - r, cy - r, cx + r + 1, cy + r + 1);
+
+    // Branch/fork symbol inside: vertical line + two arms up
+    SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    let hp2 = CreatePen(PS_SOLID, 1, COLORREF(clr));
+    let op2 = SelectObject(hdc, hp2);
+
+    // Vertical trunk
+    MoveToEx(hdc, cx, cy - 3, None);
+    LineTo(hdc, cx, cy + 3);
+
+    // Left arm (diagonal up-left)
+    MoveToEx(hdc, cx, cy - 1, None);
+    LineTo(hdc, cx - 2, cy - 3);
+
+    // Right arm (diagonal up-right)
+    MoveToEx(hdc, cx, cy - 1, None);
+    LineTo(hdc, cx + 2, cy - 3);
+
+    // Small dot at top-left tip
+    let pb = CreateSolidBrush(COLORREF(clr));
+    let opb = SelectObject(hdc, pb);
+    Ellipse(hdc, cx - 3, cy - 5, cx - 1, cy - 3);
+    // Small dot at top-right tip
+    Ellipse(hdc, cx + 1, cy - 5, cx + 3, cy - 3);
+    // Small dot at bottom
+    Ellipse(hdc, cx - 1, cy + 2, cx + 1, cy + 4);
+    SelectObject(hdc, opb);
+    DeleteObject(pb);
+
+    SelectObject(hdc, op2);
+    DeleteObject(hp2);
+    SelectObject(hdc, op);
+    SelectObject(hdc, ob);
+    DeleteObject(hp);
+}
+
 unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
     let id = (wp.0 & 0xFFFF) as u16;
     let notif = (wp.0 >> 16) as u16;
@@ -1853,6 +2007,10 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
                 do_open_repo(hwnd);
                 return LRESULT(0);
             }
+            IDC_AUTHOR => {
+                do_open_author(hwnd);
+                return LRESULT(0);
+            }
             _ => {}
         }
     }
@@ -1873,6 +2031,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         IDC_CONNECT => do_connect(hwnd),
         IDC_SAVE => do_save(hwnd),
         IDC_UPDATE_LINK => do_update(hwnd),
+        IDC_GITHUB => do_open_repo(hwnd),
         _ => {}
     }
     LRESULT(0)
@@ -2067,6 +2226,17 @@ unsafe fn do_open_repo(hwnd: HWND) {
         hwnd,
         w!("open"),
         &hstring(REPO_URL),
+        None,
+        None,
+        SW_SHOWNORMAL,
+    );
+}
+
+unsafe fn do_open_author(hwnd: HWND) {
+    let _ = ShellExecuteW(
+        hwnd,
+        w!("open"),
+        &hstring(AUTHOR_URL),
         None,
         None,
         SW_SHOWNORMAL,
