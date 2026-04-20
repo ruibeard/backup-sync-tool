@@ -19,6 +19,7 @@ use crate::secret;
 use crate::tray;
 use crate::webdav;
 use std::ffi::c_void;
+use std::path::Path;
 use std::sync::Arc;
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -28,7 +29,8 @@ use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::Shell::{
     DefSubclassProc, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW, SetWindowSubclass,
-    ShellExecuteW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
+    ShellExecuteW, BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS,
+    BROWSEINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -77,8 +79,15 @@ const IDC_PICKER_UP: u16 = 203;
 const IDC_PICKER_SELECT: u16 = 205;
 const IDC_PICKER_CANCEL: u16 = 206;
 const IDC_SERVER_HDR: u16 = 207;
+const IDC_SERVER_URL_LABEL: u16 = 208;
+const IDC_SERVER_USERNAME_LABEL: u16 = 209;
+const IDC_SERVER_PASSWORD_LABEL: u16 = 210;
 const IDC_GITHUB: u16 = 211;
 const IDC_AUTHOR: u16 = 212;
+const IDC_ORIGIN_LABEL: u16 = 213;
+const IDC_DEST_LABEL: u16 = 214;
+const IDC_ACTIVITY_HDR: u16 = 215;
+const IDC_SERVER_EDIT: u16 = 216;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -111,9 +120,12 @@ const GAP: i32 = 12; // medium gap (between rows)
 const SECT: i32 = 20; // section separator gap
 const INP_H: i32 = 26; // input height
 const BTN_H: i32 = 30; // bottom-bar primary button height
+const SMALL_BTN_H: i32 = 24; // compact secondary button height
 const HDR_H: i32 = 20; // section heading height
 const LBL_H: i32 = 18; // label text height
 const BROWSE_W: i32 = 34; // folder icon button width
+const SERVER_EDIT_W: i32 = 54;
+const MIN_ACTIVITY_LIST_H: i32 = 96;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
                                     // Eye icon toggle zone inside the password edit right padding
 const EYE_ZONE_W: i32 = 26; // pixels from right edge of edit that count as eye click
@@ -314,7 +326,7 @@ unsafe extern "system" fn wnd_proc(
             let text_clr = match id {
                 IDC_DEST_CREATED => C_GREEN,
                 IDC_REPO => C_BLUE,
-                IDC_AUTHOR => 0x00888888,
+                IDC_AUTHOR => C_LABEL,
                 _ => C_LABEL,
             };
             SetTextColor(hdc, COLORREF(text_clr));
@@ -377,170 +389,7 @@ unsafe extern "system" fn wnd_proc(
         WM_SIZE => {
             let st = state_ptr(hwnd);
             if !st.is_null() && (*st).min_client_h > 0 {
-                let mut cr = RECT::default();
-                GetClientRect(hwnd, &mut cr).ok();
-                let client_h = cr.bottom - cr.top;
-                let extra_h = client_h - (*st).min_client_h;
-                let extra = if extra_h > 0 { extra_h } else { 0 };
-
-                // Stretch the activity listbox
-                let new_lb_h = (*st).activity_list_h + extra;
-                let hlb = GetDlgItem(hwnd, IDC_ACTIVITY_LIST as i32);
-                SetWindowPos(
-                    hlb,
-                    None,
-                    M,
-                    (*st).activity_list_top,
-                    INNER_W,
-                    new_lb_h,
-                    SWP_NOZORDER,
-                )
-                .ok();
-
-                // Reposition sync status row
-                let sync_y = (*st).activity_list_top + new_lb_h + (*st).post_list_gap;
-                let sync_icon_w = 16i32;
-                let sync_gap = 8i32;
-                let progress_h = 10i32;
-                let sync_row_h = (*st).sync_row_h;
-
-                // Update sync icon rect for WM_PAINT
-                (*st).sync_icon_rect = RECT {
-                    left: M,
-                    top: sync_y + (sync_row_h - sync_icon_w) / 2,
-                    right: M + sync_icon_w,
-                    bottom: sync_y + (sync_row_h - sync_icon_w) / 2 + sync_icon_w,
-                };
-
-                let status_x = M + sync_icon_w + sync_gap;
-                let status_w = 180i32;
-                let h_status = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
-                SetWindowPos(
-                    h_status,
-                    None,
-                    status_x,
-                    sync_y + (sync_row_h - LBL_H) / 2,
-                    status_w,
-                    LBL_H,
-                    SWP_NOZORDER,
-                )
-                .ok();
-
-                let progress_x = status_x + status_w + sync_gap;
-                let progress_w = INNER_W - (progress_x - M);
-                let h_prog = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
-                SetWindowPos(
-                    h_prog,
-                    None,
-                    progress_x,
-                    sync_y + (sync_row_h - progress_h) / 2,
-                    progress_w,
-                    progress_h,
-                    SWP_NOZORDER,
-                )
-                .ok();
-
-                // Update divider between activity and bottom bar
-                let divider_y = sync_y + sync_row_h + (*st).post_sync_sect / 2;
-                let div_idx = (*st).divider_activity_idx;
-                if div_idx < (&(*st).dividers).len() {
-                    (&mut (*st).dividers)[div_idx] = divider_y;
-                }
-
-                // Reposition bottom bar controls (two-row layout)
-                let bottom_y = sync_y + sync_row_h + (*st).post_sync_sect;
-
-                let row_h = BTN_H;
-                let button_y = bottom_y + (row_h - BTN_H) / 2;
-                let check_y = bottom_y + (row_h - 18) / 2;
-                let footer_h = LBL_H;
-                let footer_y = bottom_y + (row_h - footer_h) / 2;
-                let save_w = 64i32;
-                let update_btn_w = 26i32;
-                let github_btn_w = 20i32;
-                let version_w = 72i32;
-                let version_x = M;
-                let github_btn_x = version_x + version_w + 4;
-                let update_btn_x = github_btn_x + github_btn_w + 4;
-                let startup_x = update_btn_x + update_btn_w + 14;
-                let two_way_x = startup_x + 78;
-                let save_x = M + INNER_W - save_w;
-
-                SetWindowPos(
-                    GetDlgItem(hwnd, IDC_START_WINDOWS as i32),
-                    None,
-                    startup_x,
-                    check_y,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOSIZE,
-                )
-                .ok();
-                SetWindowPos(
-                    GetDlgItem(hwnd, IDC_SYNC_REMOTE as i32),
-                    None,
-                    two_way_x,
-                    check_y,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOSIZE,
-                )
-                .ok();
-                SetWindowPos(
-                    GetDlgItem(hwnd, IDC_SAVE as i32),
-                    None,
-                    save_x,
-                    button_y,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOSIZE,
-                )
-                .ok();
-                SetWindowPos(
-                    GetDlgItem(hwnd, IDC_REPO as i32),
-                    None,
-                    version_x,
-                    footer_y,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOSIZE,
-                )
-                .ok();
-                SetWindowPos(
-                    GetDlgItem(hwnd, IDC_GITHUB as i32),
-                    None,
-                    github_btn_x,
-                    footer_y,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOSIZE,
-                )
-                .ok();
-                SetWindowPos(
-                    GetDlgItem(hwnd, IDC_UPDATE_LINK as i32),
-                    None,
-                    update_btn_x,
-                    bottom_y + (row_h - 20) / 2,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOSIZE,
-                )
-                .ok();
-
-                // Author row
-                let author_y = bottom_y + row_h + 4;
-                SetWindowPos(
-                    GetDlgItem(hwnd, IDC_AUTHOR as i32),
-                    None,
-                    version_x,
-                    author_y,
-                    0,
-                    0,
-                    SWP_NOZORDER | SWP_NOSIZE,
-                )
-                .ok();
-
-                InvalidateRect(hwnd, None, TRUE);
+                layout_main(hwnd);
             }
             LRESULT(0)
         }
@@ -1002,16 +851,16 @@ unsafe fn build_ui(
     {
         let status_w = 16i32;
         let server_status_w = 84i32;
-        let server_status_x = M + INNER_W - server_status_w;
+        let server_edit_x = M + INNER_W - SERVER_EDIT_W;
+        let server_status_x = server_edit_x - PAD - server_status_w;
         let status_x = server_status_x - status_w - 4;
 
-        // Clickable header row: "▶ SERVER" toggle + status dot + status text
         let hdr_toggle_w = 90i32;
-        mklink(
+        mkstatic(
             hwnd,
             hi,
             IDC_SERVER_HDR,
-            "\u{25B6}  SERVER",
+            "SERVER",
             M,
             y,
             hdr_toggle_w,
@@ -1042,11 +891,35 @@ unsafe fn build_ui(
             hf_small,
             SS_CENTER,
         );
+        mkbtn_grey(
+            hwnd,
+            hi,
+            IDC_SERVER_EDIT,
+            "Edit",
+            server_edit_x,
+            y + (HDR_H - SMALL_BTN_H) / 2,
+            SERVER_EDIT_W,
+            SMALL_BTN_H,
+            hf_small,
+        );
         y += HDR_H + PAD;
 
         // --- Collapsible controls (hidden by default) ---
         let section_top = y;
         let url_w = INNER_W;
+
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_SERVER_URL_LABEL,
+            "Server URL",
+            M,
+            y,
+            url_w,
+            LBL_H,
+            hf_small,
+        );
+        y += LBL_H + 4;
 
         mkedit_cue(
             hwnd,
@@ -1076,8 +949,28 @@ unsafe fn build_ui(
         y += INP_H + GAP;
 
         let cred_w = (INNER_W - PAD) / 2;
-        mkfield_label(hwnd, hi, "Username", M, y, cred_w, hf_small);
-        mkfield_label(hwnd, hi, "Password", M + cred_w + PAD, y, cred_w, hf_small);
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_SERVER_USERNAME_LABEL,
+            "Username",
+            M,
+            y,
+            cred_w,
+            LBL_H,
+            hf_small,
+        );
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_SERVER_PASSWORD_LABEL,
+            "Password",
+            M + cred_w + PAD,
+            y,
+            cred_w,
+            LBL_H,
+            hf_small,
+        );
         y += LBL_H + 4;
 
         mkedit_cue(
@@ -1106,19 +999,6 @@ unsafe fn build_ui(
         // Record how tall this section is so toggle can shift everything below
         st.server_section_h = y - section_top;
 
-        // Hide the controls if starting collapsed
-        let server_ctrl_ids = [IDC_URL, IDC_USERNAME, IDC_PASSWORD];
-        for &ctrl_id in &server_ctrl_ids {
-            ShowWindow(GetDlgItem(hwnd, ctrl_id as i32), SW_HIDE);
-        }
-        // Also hide the two field labels — they have no ID so we hide by position via EnumChildWindows.
-        // Simpler: we give them IDs. Use IDC_LBL_URL=208, IDC_LBL_USER=209, IDC_LBL_PASS=210.
-        // But those were created with mkfield_label which doesn't take an id.
-        // Instead, collapse by adjusting y back and not creating labels when collapsed.
-        // Re-do: create labels with IDs so we can hide them.
-        // We already created them above without IDs — destroy & recreate with IDs below.
-        // Actually the simplest approach: just reduce y back to section_top, we'll
-        // handle the show/hide of all server controls in toggle_server_section.
         if st.server_collapsed {
             y = section_top;
         }
@@ -1132,7 +1012,17 @@ unsafe fn build_ui(
         let browse_x = M + INNER_W - BROWSE_W;
         let inp_w = INNER_W - BROWSE_W - PAD;
 
-        mkfield_label(hwnd, hi, "Origin folder", M, y, INNER_W, hf_small);
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_ORIGIN_LABEL,
+            "Origin folder",
+            M,
+            y,
+            INNER_W,
+            LBL_H,
+            hf_small,
+        );
         y += LBL_H + 4;
         mkedit_cue(
             hwnd,
@@ -1158,7 +1048,17 @@ unsafe fn build_ui(
         );
         y += INP_H + GAP;
 
-        mkfield_label(hwnd, hi, "Destination folder", M, y, 112, hf_small);
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_DEST_LABEL,
+            "Destination folder",
+            M,
+            y,
+            112,
+            LBL_H,
+            hf_small,
+        );
         mkstatic(
             hwnd,
             hi,
@@ -1201,7 +1101,17 @@ unsafe fn build_ui(
 
     // ── RECENT ACTIVITY ───────────────────────────────────────────────────────
     {
-        mklabel_hdr(hwnd, hi, "RECENT ACTIVITY", M, y, INNER_W, hf_hdr);
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_ACTIVITY_HDR,
+            "RECENT ACTIVITY",
+            M,
+            y,
+            INNER_W,
+            HDR_H,
+            hf_hdr,
+        );
         y += HDR_H + PAD;
 
         let lb_h = 140i32;
@@ -1358,7 +1268,7 @@ unsafe fn build_ui(
             hwnd,
             hi,
             IDC_AUTHOR,
-            "Rui Almeida \u{00B7} ruialmeida.me",
+            "Rui Almeida · ruialmeida.me",
             version_x,
             author_y,
             200,
@@ -1366,11 +1276,11 @@ unsafe fn build_ui(
             hf_link,
         );
         y += author_h + 4 + M;
-        st.bottom_bar_h = y - (y - row_h - author_h - 4 - M);
+        st.bottom_bar_h = row_h + author_h + 4 + M;
     }
 
     // Size window to fit content
-    st.min_client_h = y;
+    st.min_client_h = required_client_height(st);
     let mut wr = RECT::default();
     GetWindowRect(hwnd, &mut wr).ok();
     let mut cr = RECT::default();
@@ -1383,15 +1293,25 @@ unsafe fn build_ui(
         0,
         0,
         WIN_W + dw,
-        y + dh,
+        st.min_client_h + dh,
         SWP_NOMOVE | SWP_NOZORDER,
     )
     .ok();
+
+    layout_main(hwnd);
 }
 
 // ── Control helpers ───────────────────────────────────────────────────────────
 
-unsafe fn mklabel_hdr(hwnd: HWND, hi: HINSTANCE, text: &str, x: i32, y: i32, w: i32, hf: HFONT) {
+unsafe fn mklabel_hdr(
+    hwnd: HWND,
+    hi: HINSTANCE,
+    text: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    hf: HFONT,
+) -> HWND {
     let hs = hstring(text);
     let c = CreateWindowExW(
         WINDOW_EX_STYLE::default(),
@@ -1408,6 +1328,7 @@ unsafe fn mklabel_hdr(hwnd: HWND, hi: HINSTANCE, text: &str, x: i32, y: i32, w: 
         None,
     );
     SendMessageW(c, WM_SETFONT, WPARAM(hf.0 as usize), LPARAM(1));
+    c
 }
 
 unsafe fn mkfield_label(hwnd: HWND, hi: HINSTANCE, text: &str, x: i32, y: i32, w: i32, hf: HFONT) {
@@ -1831,8 +1752,7 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
         // Draw a download arrow icon via GDI
         draw_download_icon(hdc, &rc, fg);
     } else if is_github {
-        // Draw a GitHub icon via GDI
-        draw_github_icon(hdc, &rc, C_GREY_TXT);
+        draw_github_icon(hdc, &rc, di.hwndItem);
     } else if len > 0 {
         let mut buf = vec![0u16; (len + 1) as usize];
         GetWindowTextW(di.hwndItem, &mut buf);
@@ -1923,53 +1843,17 @@ unsafe fn draw_download_icon(hdc: HDC, rc: &RECT, clr: u32) {
     DeleteObject(hp);
 }
 
-/// Draw a simplified GitHub-style icon (circle with a small fork/branch symbol).
-/// Renders clearly at small sizes like 14×14.
-unsafe fn draw_github_icon(hdc: HDC, rc: &RECT, clr: u32) {
-    let cx = (rc.left + rc.right) / 2;
-    let cy = (rc.top + rc.bottom) / 2;
-    let r = 6i32; // outer circle radius
+unsafe fn draw_github_icon(hdc: HDC, rc: &RECT, hwnd_item: HWND) {
+    let hi = HINSTANCE(GetWindowLongPtrW(GetParent(hwnd_item), GWLP_HINSTANCE) as isize);
+    let icon = LoadIconW(hi, w!("APP_ICON_GITHUB")).unwrap_or_default();
+    if icon.0 == 0 {
+        return;
+    }
 
-    let hp = CreatePen(PS_SOLID, 1, COLORREF(clr));
-    let op = SelectObject(hdc, hp);
-    let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-
-    // Outer circle
-    Ellipse(hdc, cx - r, cy - r, cx + r + 1, cy + r + 1);
-
-    // Branch/fork symbol inside: vertical line + two arms up
-    SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    let hp2 = CreatePen(PS_SOLID, 1, COLORREF(clr));
-    let op2 = SelectObject(hdc, hp2);
-
-    // Vertical trunk
-    MoveToEx(hdc, cx, cy - 3, None);
-    LineTo(hdc, cx, cy + 3);
-
-    // Left arm (diagonal up-left)
-    MoveToEx(hdc, cx, cy - 1, None);
-    LineTo(hdc, cx - 2, cy - 3);
-
-    // Right arm (diagonal up-right)
-    MoveToEx(hdc, cx, cy - 1, None);
-    LineTo(hdc, cx + 2, cy - 3);
-
-    // Small dot at top-left tip
-    let pb = CreateSolidBrush(COLORREF(clr));
-    let opb = SelectObject(hdc, pb);
-    Ellipse(hdc, cx - 3, cy - 5, cx - 1, cy - 3);
-    // Small dot at top-right tip
-    Ellipse(hdc, cx + 1, cy - 5, cx + 3, cy - 3);
-    // Small dot at bottom
-    Ellipse(hdc, cx - 1, cy + 2, cx + 1, cy + 4);
-    SelectObject(hdc, opb);
-    DeleteObject(pb);
-
-    SelectObject(hdc, op2);
-    DeleteObject(hp2);
-    SelectObject(hdc, op);
-    SelectObject(hdc, ob);
-    DeleteObject(hp);
+    let size = 16;
+    let x = rc.left + ((rc.right - rc.left - size) / 2);
+    let y = rc.top + ((rc.bottom - rc.top - size) / 2);
+    let _ = DrawIconEx(hdc, x, y, icon, size, size, 0, HBRUSH(0), DI_NORMAL);
 }
 
 unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
@@ -2003,6 +1887,10 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
 
     if notif == STN_CLICKED as u16 {
         match id {
+            IDC_SERVER_EDIT => {
+                toggle_server_section(hwnd);
+                return LRESULT(0);
+            }
             IDC_REPO => {
                 do_open_repo(hwnd);
                 return LRESULT(0);
@@ -2039,12 +1927,31 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
 
 unsafe fn browse_local(hwnd: HWND) {
     let title: Vec<u16> = "Select local folder\0".encode_utf16().collect();
+    let current_folder = gettext(hwnd, IDC_WATCH_FOLDER);
+    let initial_folder = if !current_folder.trim().is_empty() && Path::new(&current_folder).is_dir()
+    {
+        Some(
+            current_folder
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>(),
+        )
+    } else {
+        None
+    };
     let mut display = [0u16; 260];
     let mut bi = BROWSEINFOW {
         hwndOwner: hwnd,
         lpszTitle: PCWSTR(title.as_ptr()),
         pszDisplayName: PWSTR(display.as_mut_ptr()),
         ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        lpfn: Some(browse_local_init_cb),
+        lParam: LPARAM(
+            initial_folder
+                .as_ref()
+                .map(|path| path.as_ptr() as isize)
+                .unwrap_or(0),
+        ),
         ..Default::default()
     };
     let pidl = SHBrowseForFolderW(&mut bi);
@@ -2058,6 +1965,18 @@ unsafe fn browse_local(hwnd: HWND) {
         let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
     }
     ILFree(Some(pidl));
+}
+
+unsafe extern "system" fn browse_local_init_cb(
+    hwnd: HWND,
+    msg: u32,
+    _lparam: LPARAM,
+    data: LPARAM,
+) -> i32 {
+    if msg == BFFM_INITIALIZED && data.0 != 0 {
+        SendMessageW(hwnd, BFFM_SETSELECTIONW, WPARAM(1), data);
+    }
+    0
 }
 
 unsafe fn do_connect(hwnd: HWND) {
@@ -2153,6 +2072,12 @@ unsafe fn do_save(hwnd: HWND) {
         Ok(e) => {
             let st = stmut(hwnd);
             st.sync_engine = Some(e);
+            if !st.server_collapsed {
+                st.server_collapsed = true;
+                update_server_header(hwnd);
+                set_server_controls_visible(hwnd, false);
+                layout_main(hwnd);
+            }
             let msg = Box::new("Settings saved. File watching is active.".to_string());
             PostMessageW(
                 HWND(raw),
@@ -2247,6 +2172,483 @@ unsafe fn do_open_logs(hwnd: HWND) {
     let dir = logs::ensure_logs_dir();
     let dir_w = hstring(&dir.to_string_lossy());
     let _ = ShellExecuteW(hwnd, w!("open"), &dir_w, None, None, SW_SHOWNORMAL);
+}
+
+unsafe fn set_server_controls_visible(hwnd: HWND, visible: bool) {
+    let cmd = if visible { SW_SHOW } else { SW_HIDE };
+    for id in [
+        IDC_SERVER_URL_LABEL,
+        IDC_URL,
+        IDC_SERVER_USERNAME_LABEL,
+        IDC_SERVER_PASSWORD_LABEL,
+        IDC_USERNAME,
+        IDC_PASSWORD,
+    ] {
+        ShowWindow(GetDlgItem(hwnd, id as i32), cmd);
+    }
+
+    let show_connect = visible && stmut(hwnd).creds_dirty;
+    ShowWindow(
+        GetDlgItem(hwnd, IDC_CONNECT as i32),
+        if show_connect { SW_SHOW } else { SW_HIDE },
+    );
+}
+
+unsafe fn update_server_header(hwnd: HWND) {
+    let button = if stmut(hwnd).server_collapsed {
+        "Edit"
+    } else {
+        "Done"
+    };
+    let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_SERVER_EDIT as i32), &hstring(button));
+}
+
+unsafe fn toggle_server_section(hwnd: HWND) {
+    let st = stmut(hwnd);
+    st.server_collapsed = !st.server_collapsed;
+    st.min_client_h = required_client_height(st);
+    update_server_header(hwnd);
+    set_server_controls_visible(hwnd, !st.server_collapsed);
+    ensure_window_min_height(hwnd);
+    layout_main(hwnd);
+}
+
+fn required_client_height(st: &WndState) -> i32 {
+    let server_h = if st.server_collapsed {
+        0
+    } else {
+        st.server_section_h
+    };
+    let folders_h = (LBL_H + 4) + INP_H + GAP + (LBL_H + 4) + INP_H + SECT;
+    let activity_h =
+        HDR_H + PAD + MIN_ACTIVITY_LIST_H + st.post_list_gap + st.sync_row_h + st.post_sync_sect;
+    M + 4 + HDR_H + PAD + server_h + folders_h + activity_h + st.bottom_bar_h
+}
+
+unsafe fn ensure_window_min_height(hwnd: HWND) {
+    let st = state_ptr(hwnd);
+    if st.is_null() {
+        return;
+    }
+
+    let mut cr = RECT::default();
+    GetClientRect(hwnd, &mut cr).ok();
+    let client_h = cr.bottom - cr.top;
+    if client_h >= (*st).min_client_h {
+        return;
+    }
+
+    let mut wr = RECT::default();
+    GetWindowRect(hwnd, &mut wr).ok();
+    let frame_h = (wr.bottom - wr.top) - client_h;
+    SetWindowPos(
+        hwnd,
+        None,
+        0,
+        0,
+        WIN_W,
+        (*st).min_client_h + frame_h,
+        SWP_NOMOVE | SWP_NOZORDER,
+    )
+    .ok();
+}
+
+unsafe fn layout_main(hwnd: HWND) {
+    let st = state_ptr(hwnd);
+    if st.is_null() {
+        return;
+    }
+
+    let mut cr = RECT::default();
+    GetClientRect(hwnd, &mut cr).ok();
+    let client_h = cr.bottom - cr.top;
+
+    let mut y = M + 4;
+
+    let status_w = 16i32;
+    let server_status_w = 84i32;
+    let server_edit_x = M + INNER_W - SERVER_EDIT_W;
+    let server_status_x = server_edit_x - PAD - server_status_w;
+    let status_x = server_status_x - status_w - 4;
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SERVER_HDR as i32),
+        None,
+        M,
+        y,
+        90,
+        HDR_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
+        None,
+        server_status_x,
+        y,
+        server_status_w,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_STATUS_TEXT as i32),
+        None,
+        status_x,
+        y,
+        status_w,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SERVER_EDIT as i32),
+        None,
+        server_edit_x,
+        y + (HDR_H - SMALL_BTN_H) / 2,
+        SERVER_EDIT_W,
+        SMALL_BTN_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += HDR_H + PAD;
+
+    let cred_w = (INNER_W - PAD) / 2;
+    if !(*st).server_collapsed {
+        SetWindowPos(
+            GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
+            None,
+            M,
+            y,
+            INNER_W,
+            LBL_H,
+            SWP_NOZORDER,
+        )
+        .ok();
+        y += LBL_H + 4;
+        SetWindowPos(
+            GetDlgItem(hwnd, IDC_URL as i32),
+            None,
+            M,
+            y,
+            INNER_W,
+            INP_H,
+            SWP_NOZORDER,
+        )
+        .ok();
+        if (*st).creds_dirty {
+            SetWindowPos(
+                GetDlgItem(hwnd, IDC_CONNECT as i32),
+                None,
+                M + INNER_W - 54,
+                y,
+                54,
+                INP_H,
+                SWP_NOZORDER,
+            )
+            .ok();
+        }
+        y += INP_H + GAP;
+
+        SetWindowPos(
+            GetDlgItem(hwnd, IDC_SERVER_USERNAME_LABEL as i32),
+            None,
+            M,
+            y,
+            cred_w,
+            LBL_H,
+            SWP_NOZORDER,
+        )
+        .ok();
+        SetWindowPos(
+            GetDlgItem(hwnd, IDC_SERVER_PASSWORD_LABEL as i32),
+            None,
+            M + cred_w + PAD,
+            y,
+            cred_w,
+            LBL_H,
+            SWP_NOZORDER,
+        )
+        .ok();
+        y += LBL_H + 4;
+
+        SetWindowPos(
+            GetDlgItem(hwnd, IDC_USERNAME as i32),
+            None,
+            M,
+            y,
+            cred_w,
+            INP_H,
+            SWP_NOZORDER,
+        )
+        .ok();
+        SetWindowPos(
+            GetDlgItem(hwnd, IDC_PASSWORD as i32),
+            None,
+            M + cred_w + PAD,
+            y,
+            cred_w,
+            INP_H,
+            SWP_NOZORDER,
+        )
+        .ok();
+        y += INP_H + SECT;
+    }
+
+    if !(*st).dividers.is_empty() {
+        (&mut (*st).dividers)[0] = y - SECT / 2;
+    }
+
+    let browse_x = M + INNER_W - BROWSE_W;
+    let inp_w = INNER_W - BROWSE_W - PAD;
+
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_ORIGIN_LABEL as i32),
+        None,
+        M,
+        y,
+        INNER_W,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += LBL_H + 4;
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32),
+        None,
+        M,
+        y,
+        inp_w,
+        INP_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_BROWSE_LOCAL as i32),
+        None,
+        browse_x,
+        y,
+        34,
+        INP_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += INP_H + GAP;
+
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_DEST_LABEL as i32),
+        None,
+        M,
+        y,
+        112,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_DEST_CREATED as i32),
+        None,
+        M + 118,
+        y,
+        120,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += LBL_H + 4;
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
+        None,
+        M,
+        y,
+        inp_w,
+        INP_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_BROWSE_REMOTE as i32),
+        None,
+        browse_x,
+        y,
+        34,
+        INP_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += INP_H + SECT;
+
+    if (&(*st).dividers).len() > 1 {
+        (&mut (*st).dividers)[1] = y - SECT / 2;
+    }
+
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_ACTIVITY_HDR as i32),
+        None,
+        M,
+        y,
+        INNER_W,
+        HDR_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += HDR_H + PAD;
+    (*st).activity_list_top = y;
+
+    let footer_top = client_h - (*st).bottom_bar_h;
+    let activity_fixed_h = (*st).post_list_gap + (*st).sync_row_h + (*st).post_sync_sect;
+    let new_lb_h = (footer_top - y - activity_fixed_h).max(MIN_ACTIVITY_LIST_H);
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_ACTIVITY_LIST as i32),
+        None,
+        M,
+        y,
+        INNER_W,
+        new_lb_h,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += new_lb_h + (*st).post_list_gap;
+
+    let sync_icon_w = 16i32;
+    let sync_gap = 8i32;
+    let progress_h = 10i32;
+    let sync_row_h = (*st).sync_row_h;
+    (*st).sync_icon_rect = RECT {
+        left: M,
+        top: y + (sync_row_h - sync_icon_w) / 2,
+        right: M + sync_icon_w,
+        bottom: y + (sync_row_h - sync_icon_w) / 2 + sync_icon_w,
+    };
+
+    let status_x = M + sync_icon_w + sync_gap;
+    let status_w = 180i32;
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
+        None,
+        status_x,
+        y + (sync_row_h - LBL_H) / 2,
+        status_w,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+
+    let progress_x = status_x + status_w + sync_gap;
+    let progress_w = INNER_W - (progress_x - M);
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32),
+        None,
+        progress_x,
+        y + (sync_row_h - progress_h) / 2,
+        progress_w,
+        progress_h,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += sync_row_h + (*st).post_sync_sect;
+
+    let div_idx = (*st).divider_activity_idx;
+    if div_idx < (&(*st).dividers).len() {
+        (&mut (*st).dividers)[div_idx] = y - (*st).post_sync_sect / 2;
+    }
+
+    y = footer_top;
+    let row_h = BTN_H;
+    let button_y = y + (row_h - BTN_H) / 2;
+    let check_y = y + (row_h - 18) / 2;
+    let footer_h = LBL_H;
+    let footer_y = y + (row_h - footer_h) / 2;
+    let save_w = 64i32;
+    let update_btn_w = 26i32;
+    let update_btn_h = 20i32;
+    let github_btn_w = 20i32;
+    let version_w = 72i32;
+    let version_x = M;
+    let github_btn_x = version_x + version_w + 4;
+    let update_btn_x = github_btn_x + github_btn_w + 4;
+    let startup_x = update_btn_x + update_btn_w + 14;
+    let two_way_x = startup_x + 78;
+    let save_x = M + INNER_W - save_w;
+
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_START_WINDOWS as i32),
+        None,
+        startup_x,
+        check_y,
+        70,
+        18,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SYNC_REMOTE as i32),
+        None,
+        two_way_x,
+        check_y,
+        100,
+        18,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SAVE as i32),
+        None,
+        save_x,
+        button_y,
+        save_w,
+        BTN_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_REPO as i32),
+        None,
+        version_x,
+        footer_y,
+        version_w,
+        footer_h,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_GITHUB as i32),
+        None,
+        github_btn_x,
+        footer_y,
+        github_btn_w,
+        footer_h,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_UPDATE_LINK as i32),
+        None,
+        update_btn_x,
+        y + (row_h - update_btn_h) / 2,
+        update_btn_w,
+        update_btn_h,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += row_h;
+
+    let author_h = 14i32;
+    let author_y = y + 2;
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_AUTHOR as i32),
+        None,
+        version_x,
+        author_y,
+        200,
+        author_h,
+        SWP_NOZORDER,
+    )
+    .ok();
+
+    update_server_header(hwnd);
+    set_server_controls_visible(hwnd, !(*st).server_collapsed);
+
+    InvalidateRect(hwnd, None, TRUE);
 }
 
 // ── App messages ──────────────────────────────────────────────────────────────

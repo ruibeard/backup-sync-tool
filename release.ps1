@@ -29,5 +29,18 @@ $v = "v$newVersion"
 git add -A
 git commit -m "release: $v"
 git tag -f $v
-git push origin main --follow-tags --force-with-lease
-Write-Host "Done. Pushed $v — GitHub Actions will create the release."
+git push origin main
+if ($LASTEXITCODE -ne 0) { Write-Error "git push origin main failed"; exit 1 }
+
+# The workflow triggers on tag pushes, so push the tag explicitly and verify it exists remotely.
+git push origin $v
+if ($LASTEXITCODE -ne 0) { Write-Error "git push origin $v failed"; exit 1 }
+
+$remoteTag = git ls-remote --tags origin "refs/tags/$v"
+if (-not $remoteTag) {
+    Write-Error "Remote tag $v was not found after push; GitHub Actions will not create the release."
+    exit 1
+}
+
+Write-Host "Done. Pushed main and tag $v"
+Write-Host "GitHub Actions should create the release at: https://github.com/ruibeard/backup-sync-tool/releases/tag/$v"
