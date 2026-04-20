@@ -1,18 +1,21 @@
 // build.rs — embed app icons and manifest into the .exe
 fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
+        println!("cargo:rerun-if-changed=assets");
+
         let mut res = winres::WindowsResource::new();
 
         // Primary icon (also used as the default APP_ICON resource by set_icon)
         res.set_icon_with_id("assets/app-idle.ico", "APP_ICON_IDLE");
         res.set_icon_with_id("assets/syncing.ico", "APP_ICON_SYNCING");
         res.set_icon_with_id("assets/complete.ico", "APP_ICON_COMPLETE");
-        res.set_icon_with_id("assets/syncing1.ico", "APP_ICON_SYNC_1");
-        res.set_icon_with_id("assets/syncing2.ico", "APP_ICON_SYNC_2");
-        res.set_icon_with_id("assets/syncing3.ico", "APP_ICON_SYNC_3");
-        res.set_icon_with_id("assets/syncing4.ico", "APP_ICON_SYNC_4");
-        res.set_icon_with_id("assets/syncing5.ico", "APP_ICON_SYNC_5");
-        res.set_icon_with_id("assets/syncing6.ico", "APP_ICON_SYNC_6");
+        res.set_icon_with_id("assets/syncing2.ico", "APP_ICON_SYNC_1");
+        res.set_icon_with_id("assets/syncing3.ico", "APP_ICON_SYNC_2");
+        res.set_icon_with_id("assets/syncing4.ico", "APP_ICON_SYNC_3");
+        res.set_icon_with_id("assets/syncing5.ico", "APP_ICON_SYNC_4");
+        res.set_icon_with_id("assets/syncing6.ico", "APP_ICON_SYNC_5");
+        res.set_icon_with_id("assets/syncing7.ico", "APP_ICON_SYNC_6");
+        res.set_icon_with_id("assets/github.ico", "APP_ICON_GITHUB");
         // set_icon sets the first ICON resource (ID 1), which Windows uses for
         // the file/taskbar thumbnail automatically.
         res.set_icon("assets/app-idle.ico");

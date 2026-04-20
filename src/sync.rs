@@ -445,12 +445,16 @@ fn upload_path(
 
     match webdav::put_file(cfg, password, &remote_url, file, size) {
         Ok(_) => {
+            let mtime = file_mtime_epoch(path);
+            if let Err(err) = webdav::set_sar_last_modified(cfg, password, &remote_url, mtime) {
+                log(format!("Timestamp preserve failed {}: {}", relative, err));
+            }
             let mut guard = manifest.lock().unwrap();
             guard.files.insert(
                 relative.clone(),
                 FileState {
                     size: file_size(path),
-                    mtime: file_mtime_epoch(path),
+                    mtime,
                 },
             );
             save_local_manifest(cfg, &guard);

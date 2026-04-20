@@ -1,6 +1,6 @@
 [package]
 name = "backupsynctool"
-version = "2026.0.2"
+version = "2026.0.3"
 edition = "2021"
 
 [[bin]]
@@ -34,7 +34,7 @@ serde_json = "1"
 ureq = { version = "2", features = ["tls"] }
 
 # File watching
-notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "6", default-features = false }
 
 # Base64 for DPAPI blob serialisation
 base64 = "0.22"

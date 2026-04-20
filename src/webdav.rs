@@ -5,6 +5,7 @@
 use crate::config::Config;
 use std::collections::{HashSet, VecDeque};
 use std::io::Read;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub struct RemoteFile {
@@ -126,6 +127,38 @@ pub fn put_file<R: Read>(
                 Err(format!("PUT returned HTTP {}", r.status()))
             }
         })
+}
+
+pub fn set_sar_last_modified(
+    cfg: &Config,
+    password: &str,
+    remote_url: &str,
+    modified_epoch: u64,
+) -> Result<(), String> {
+    validate_https(&cfg.webdav_url)?;
+    let auth = basic_auth(&cfg.username, password);
+    let modified = UNIX_EPOCH + Duration::from_secs(modified_epoch);
+    let modified = sar_http_date(modified);
+    let body = format!(
+        "<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:S=\"SAR:\"><D:set><D:prop><S:lastmodified>{modified}</S:lastmodified></D:prop></D:set></D:propertyupdate>"
+    );
+    let response = agent()
+        .request("PROPPATCH", remote_url)
+        .set("Authorization", &auth)
+        .set("Content-Type", "application/xml")
+        .send_string(&body)
+        .map_err(|e| e.to_string())?;
+
+    if response.status() >= 400 {
+        return Err(format!("PROPPATCH returned HTTP {}", response.status()));
+    }
+
+    let xml = response.into_string().map_err(|e| e.to_string())?;
+    if xml.contains("<ns1:lastmodified/>") && xml.contains("200 OK") {
+        Ok(())
+    } else {
+        Err("PROPPATCH did not confirm SAR:lastmodified".to_string())
+    }
 }
 
 pub fn mkcol(cfg: &Config, password: &str, remote_url: &str) -> Result<(), String> {
@@ -274,4 +307,40 @@ fn decode_href(href: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
+}
+
+fn sar_http_date(time: std::time::SystemTime) -> String {
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let hour = sod / 3_600;
+    let minute = (sod % 3_600) / 60;
+    let second = sod % 60;
+    let (year, month, day) = civil_from_days(days);
+    let weekday = ((days + 4).rem_euclid(7)) as usize;
+    let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][weekday];
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
+        "Dec",
+    ][(month - 1) as usize];
+    format!(
+        "{weekday}, {day:02} {month} {year:04} {hour:02}:{minute:02}:{second:02} UTC"
+    )
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
 }
