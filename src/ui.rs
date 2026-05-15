@@ -88,6 +88,7 @@ const IDC_ORIGIN_LABEL: u16 = 213;
 const IDC_DEST_LABEL: u16 = 214;
 const IDC_ACTIVITY_HDR: u16 = 215;
 const IDC_SERVER_EDIT: u16 = 216;
+const IDC_PAIR_DEVICE: u16 = 217;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -96,6 +97,7 @@ const WM_APP_REMOTE_FOLDER: u32 = WM_APP + 13;
 const WM_APP_PICKER_LOADED: u32 = WM_APP + 14;
 const WM_APP_DEST_READY: u32 = WM_APP + 15;
 const WM_APP_SYNC_ACTIVITY: u32 = WM_APP + 16;
+const WM_APP_PAIR_RESULT: u32 = WM_APP + 17;
 const IDT_SYNC_ANIM: usize = 1;
 const SYNC_ANIM_MS: u32 = 120;
 
@@ -125,6 +127,7 @@ const HDR_H: i32 = 20; // section heading height
 const LBL_H: i32 = 18; // label text height
 const BROWSE_W: i32 = 34; // folder icon button width
 const SERVER_EDIT_W: i32 = 54;
+const PAIR_BTN_W: i32 = 46;
 const MIN_ACTIVITY_LIST_H: i32 = 96;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
                                     // Eye icon toggle zone inside the password edit right padding
@@ -197,6 +200,13 @@ struct PickerLoadResult {
     entries: Vec<String>,
     error: Option<String>,
     resolved_folder: String,
+}
+
+struct PairResult {
+    device_token: String,
+    webdav_url: Option<String>,
+    username: Option<String>,
+    remote_folder: Option<String>,
 }
 
 struct PickerState {
@@ -401,6 +411,7 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_REMOTE_FOLDER => on_app_remote_folder(hwnd, lparam),
         WM_APP_DEST_READY => on_app_dest_ready(hwnd, wparam),
         WM_APP_SYNC_ACTIVITY => on_app_sync_activity(hwnd, wparam, lparam),
+        WM_APP_PAIR_RESULT => on_app_pair_result(hwnd, wparam, lparam),
         WM_TIMER => on_timer(hwnd, wparam),
 
         WM_CLOSE => {
@@ -850,9 +861,10 @@ unsafe fn build_ui(
     // ── SERVER ────────────────────────────────────────────────────────────────
     {
         let status_w = 16i32;
-        let server_status_w = 84i32;
         let server_edit_x = M + INNER_W - SERVER_EDIT_W;
-        let server_status_x = server_edit_x - PAD - server_status_w;
+        let pair_x = server_edit_x - PAD - PAIR_BTN_W;
+        let server_status_w = 84i32;
+        let server_status_x = pair_x - PAD - server_status_w;
         let status_x = server_status_x - status_w - 4;
 
         let hdr_toggle_w = 90i32;
@@ -899,6 +911,17 @@ unsafe fn build_ui(
             server_edit_x,
             y + (HDR_H - SMALL_BTN_H) / 2,
             SERVER_EDIT_W,
+            SMALL_BTN_H,
+            hf_small,
+        );
+        mkbtn_grey(
+            hwnd,
+            hi,
+            IDC_PAIR_DEVICE,
+            "Pair",
+            pair_x,
+            y + (HDR_H - SMALL_BTN_H) / 2,
+            PAIR_BTN_W,
             SMALL_BTN_H,
             hf_small,
         );
@@ -1917,6 +1940,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         IDC_BROWSE_LOCAL => browse_local(hwnd),
         IDC_BROWSE_REMOTE => browse_remote(hwnd),
         IDC_CONNECT => do_connect(hwnd),
+        IDC_PAIR_DEVICE => do_pair_device(hwnd),
         IDC_SAVE => do_save(hwnd),
         IDC_UPDATE_LINK => do_update(hwnd),
         IDC_GITHUB => do_open_repo(hwnd),
@@ -2006,6 +2030,81 @@ unsafe fn do_connect(hwnd: HWND) {
             LPARAM(0),
         )
         .ok();
+    });
+}
+
+unsafe fn do_pair_device(hwnd: HWND) {
+    let st = stmut(hwnd);
+    read_ctrls(hwnd, st);
+    let api_base = st.config.pair_api_base.clone();
+    let raw = hwnd.0 as isize;
+
+    EnableWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), FALSE);
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
+        &hstring("Pairing"),
+    );
+
+    std::thread::spawn(move || {
+        let machine = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_string());
+        let version = env!("CARGO_PKG_VERSION");
+        let result = match crate::pairing::start_pairing(&api_base, &machine, version) {
+            Some(start) => {
+                let qr_url = format!(
+                    "https://api.qrserver.com/v1/create-qr-code/?size=320x320&data={}",
+                    url_encode(&start.approve_url)
+                );
+                unsafe {
+                    let _ = ShellExecuteW(
+                        HWND(raw),
+                        w!("open"),
+                        &hstring(&qr_url),
+                        None,
+                        None,
+                        SW_SHOWNORMAL,
+                    );
+                }
+
+                let started = std::time::Instant::now();
+                let sleep_ms = start.poll_interval_ms.clamp(1000, 10_000);
+                loop {
+                    if started.elapsed() > std::time::Duration::from_secs(300) {
+                        break Err(format!(
+                            "Pairing timed out.\nCode: {}\nApprove URL: {}",
+                            start.code, start.approve_url
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+                    if let Some(status) = crate::pairing::poll_pairing(&api_base, &start.poll_token)
+                    {
+                        match status.status.as_str() {
+                            "approved" => {
+                                if let Some(device_token) = status.device_token {
+                                    break Ok(PairResult {
+                                        device_token,
+                                        webdav_url: status.webdav_url,
+                                        username: status.username,
+                                        remote_folder: status.remote_folder,
+                                    });
+                                }
+                                break Err("Pairing approved but no device token was returned.".to_string());
+                            }
+                            "rejected" => break Err("Pairing was rejected.".to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            None => Err(format!("Could not start pairing at {api_base}.")),
+        };
+
+        let (ok, payload): (usize, isize) = match result {
+            Ok(pair) => (1, Box::into_raw(Box::new(pair)) as isize),
+            Err(err) => (0, Box::into_raw(Box::new(err)) as isize),
+        };
+        unsafe {
+            PostMessageW(HWND(raw), WM_APP_PAIR_RESULT, WPARAM(ok), LPARAM(payload)).ok();
+        }
     });
 }
 
@@ -2168,6 +2267,19 @@ unsafe fn do_open_author(hwnd: HWND) {
     );
 }
 
+fn url_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 unsafe fn do_open_logs(hwnd: HWND) {
     let dir = logs::ensure_logs_dir();
     let dir_w = hstring(&dir.to_string_lossy());
@@ -2266,9 +2378,10 @@ unsafe fn layout_main(hwnd: HWND) {
     let mut y = M + 4;
 
     let status_w = 16i32;
-    let server_status_w = 84i32;
     let server_edit_x = M + INNER_W - SERVER_EDIT_W;
-    let server_status_x = server_edit_x - PAD - server_status_w;
+    let pair_x = server_edit_x - PAD - PAIR_BTN_W;
+    let server_status_w = 84i32;
+    let server_status_x = pair_x - PAD - server_status_w;
     let status_x = server_status_x - status_w - 4;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SERVER_HDR as i32),
@@ -2306,6 +2419,16 @@ unsafe fn layout_main(hwnd: HWND) {
         server_edit_x,
         y + (HDR_H - SMALL_BTN_H) / 2,
         SERVER_EDIT_W,
+        SMALL_BTN_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32),
+        None,
+        pair_x,
+        y + (HDR_H - SMALL_BTN_H) / 2,
+        PAIR_BTN_W,
         SMALL_BTN_H,
         SWP_NOZORDER,
     )
@@ -2822,6 +2945,55 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
         ShowWindow(status_hwnd, SW_SHOW);
     }
     InvalidateRect(status_hwnd, None, TRUE);
+    LRESULT(0)
+}
+
+unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    EnableWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), TRUE);
+    if wp.0 != 1 {
+        let err = Box::from_raw(lp.0 as *mut String);
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
+            &hstring("Pair failed"),
+        );
+        msgbox(hwnd, &err, "Pair Device");
+        return LRESULT(0);
+    }
+
+    let pair = Box::from_raw(lp.0 as *mut PairResult);
+    let st = stmut(hwnd);
+    match secret::encrypt(&pair.device_token) {
+        Ok(enc) => st.config.device_token_enc = enc,
+        Err(e) => {
+            msgbox(hwnd, &format!("Device token encrypt error: {e}"), "Pair Device");
+            return LRESULT(0);
+        }
+    }
+    if let Some(webdav_url) = &pair.webdav_url {
+        st.config.webdav_url = webdav_url.clone();
+        let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_URL as i32), &hstring(webdav_url));
+    }
+    if let Some(username) = &pair.username {
+        st.config.username = username.clone();
+        let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_USERNAME as i32), &hstring(username));
+    }
+    if let Some(remote_folder) = &pair.remote_folder {
+        st.config.remote_folder = remote_folder.clone();
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
+            &hstring(remote_folder),
+        );
+    }
+    if let Err(e) = crate::config::save(&st.config) {
+        msgbox(hwnd, &format!("Pairing succeeded but save failed: {e}"), "Pair Device");
+        return LRESULT(0);
+    }
+    st.creds_dirty = true;
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
+        &hstring("Paired"),
+    );
+    msgbox(hwnd, "Device paired and saved.", "Pair Device");
     LRESULT(0)
 }
 
