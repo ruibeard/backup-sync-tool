@@ -13,6 +13,10 @@ pub struct Config {
     #[serde(default)]
     pub password_enc: String,
     pub remote_folder: String,
+    #[serde(default = "default_pair_api_base")]
+    pub pair_api_base: String,
+    #[serde(default)]
+    pub device_token_enc: String,
     #[serde(default = "default_true")]
     pub start_with_windows: bool,
     #[serde(default)]
@@ -29,6 +33,8 @@ impl Default for Config {
             username: String::new(),
             password_enc: String::new(),
             remote_folder: String::new(),
+            pair_api_base: default_pair_api_base(),
+            device_token_enc: String::new(),
             start_with_windows: true, // on by default
             sync_remote_changes: false,
             parallel_uploads: default_parallel_uploads(),
@@ -49,6 +55,10 @@ fn default_true() -> bool {
 
 fn default_parallel_uploads() -> usize {
     10
+}
+
+fn default_pair_api_base() -> String {
+    "https://box.rui.cam".to_string()
 }
 
 pub fn load() -> Config {

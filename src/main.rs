@@ -4,6 +4,7 @@
 
 mod config;
 mod logs;
+mod pairing;
 mod secret;
 mod sync;
 mod tray;
