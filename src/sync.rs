@@ -488,6 +488,7 @@ fn upload_path(
         }
     }
 
+    log(format!("Uploading: {}", relative));
     match webdav::put_file(cfg, password, &remote_url, file, size) {
         Ok(_) => {
             let mtime = file_mtime_epoch(path);

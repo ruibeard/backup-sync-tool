@@ -295,13 +295,28 @@ Implemented behavior:
 - Tray double-click reopens.
 - Tray menu can open app/logs or exit.
 - Pair button starts QR/code flow.
+- While pairing is pending, the server status shows an amber dot, `Waiting for approval`, and the Pair button changes to `Waiting...`.
+- The pairing QR window shows the approval code, expiry text, waiting-for-admin message, and a Cancel button.
+- Pairing approval saves the returned device token, WebDAV credentials, and approved folder automatically. The user does not need to click Save to complete pairing.
+- Save is for local settings such as the local backup folder, startup preference, and remote-download preference; it is hidden while pairing is pending.
 - UPDATE button is hidden until a newer GitHub release is found.
 - Server credentials are not editable in the UI; `backupsynctool.json` is the source for stored WebDAV settings.
 - Server status keeps the connected/paired/offline indicator; hovering it shows the configured server URL and approved destination folder.
 - Destination folder is server-owned. Before pairing, the UI may show the XD-detected customer name/licence slug as a hint, but Laravel approval returns the final folder.
+- Before approval the folder label is `Destination folder`; after approval it is `Approved folder`.
 - Password field has show/hide behavior.
-- Recent Activity displays compact sync/log messages.
+- Recent Activity displays compact sync/log messages such as `Uploading backup.zip`, `Uploaded backup.zip`, and `Downloaded backup.zip`.
 - Sync progress is shown in the window and tray tooltip.
+- The remote-to-local checkbox is labeled `Download from server` and maps to `sync_remote_changes`; this is a label-only wording choice and does not remove the existing behavior.
+
+Visible pairing states:
+
+| State | Status text | Pair button | Folder label |
+| --- | --- | --- | --- |
+| Unpaired | `Not paired` / connection status | `Pair` | `Destination folder` |
+| Pairing | `Waiting for approval` | `Waiting...` | `Destination folder` |
+| Paired | `Paired` / `All synced` | `Pair` | `Approved folder` |
+| Credential failure | `Pair again required` | `Pair again` | `Approved folder` |
 
 Visual rules:
 
