@@ -1,34 +1,58 @@
-# Check Licence
+# Licence Inspector
 
-This repo now uses a small helper EXE to read the local XD licence and derive the default remote folder name.
+Small helper EXE that reads the local XD licence and derives the default remote folder name.
 
-Current helper:
+## Source
 
-```text
-C:\Users\rui.almeida\Code\backup-sync-tool\license-inspector.exe
-```
-
-Example usage:
+The C# project lives in `tools/license-inspector/` and is built to `license-inspector.exe` in the repo root.
 
 ```powershell
-& 'C:\Users\rui.almeida\Code\backup-sync-tool\license-inspector.exe' --remote-folder
+cd tools/license-inspector
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -o ..\..
 ```
 
-Expected output on this machine:
+## Modes
+
+### 1. Machine-readable (used by the Rust app)
+
+```powershell
+& 'license-inspector.exe' --remote-folder
+```
+
+Output:
 
 ```text
 XDPT.59655-Palmeira-Minimercado
 ```
 
-What the helper is doing:
+### 2. Human-readable summary (default)
 
-- It loads `C:\XDSoftware\bin\xd\XDPeople.NET.dll`
-- It calls the XD method `XDPeople.Utils.XDLicence.LoadToPreview("C:\XDSoftware\cfg\xd.lic")`
-- It reads the returned licence data
-- It builds the default remote folder as:
-  `LicenceNumber + "-" + ComercialName`
+Running without arguments prints the most useful fields first.
 
-Relevant local XD paths:
+```powershell
+& 'license-inspector.exe'
+```
+
+### 3. All fields
+
+```powershell
+& 'license-inspector.exe' --all
+```
+
+### 4. JSON output
+
+```powershell
+& 'license-inspector.exe' --json
+```
+
+## What it does
+
+1. Loads `C:\XDSoftware\bin\xd\XDPeople.NET.dll`
+2. Calls `XDPeople.Utils.XDLicence.LoadToPreview("C:\XDSoftware\cfg\xd.lic")`
+3. Reflects over the returned object to read every property
+4. Builds the default remote folder as `Number + "-" + slugified(ComercialName)`
+
+## Relevant local XD paths
 
 ```text
 C:\XDSoftware\cfg\xd.lic
@@ -36,26 +60,13 @@ C:\XDSoftware\bin\xd\XDPeople.NET.dll
 C:\XDSoftware\backups
 ```
 
-What was used before:
-
-- During investigation, the decrypt step was first proven with a temporary C# inspector.
-- The actual call inside that temporary tool was:
-
-```csharp
-var asm = loadContext.LoadFromAssemblyPath(@"C:\XDSoftware\bin\xd\XDPeople.NET.dll");
-var xdLicenceType = asm.GetType("XDPeople.Utils.XDLicence", throwOnError: true)!;
-var loadToPreview = xdLicenceType.GetMethod("LoadToPreview", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
-var licenceData = loadToPreview.Invoke(null, new object?[] { @"C:\XDSoftware\cfg\xd.lic" });
-```
-
-Current app behavior:
+## App integration
 
 - The Rust app checks for `C:\XDSoftware\backups` and uses it as the local watch folder if it exists and no folder is saved yet.
 - The Rust app invokes `license-inspector.exe --remote-folder` when `remote_folder` is empty.
 - If detection succeeds, it prefills the remote folder automatically.
 
-Notes:
+## Notes
 
-- The helper EXE is intentionally kept as a standalone binary.
-- There is no C# project kept in the repo anymore.
-- This tiny EXE is framework-dependent, so it needs the .NET runtime on the target machine.
+- The helper EXE is framework-dependent (.NET 8) and needs the .NET runtime on the target machine.
+- `XdLoadContext` is used so transitive XD dependencies are loaded from `C:\XDSoftware\bin\xd\`, while framework assemblies are resolved from the local .NET runtime.
