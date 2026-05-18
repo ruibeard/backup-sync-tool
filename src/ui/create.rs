@@ -1,6 +1,6 @@
 // ── on_create ─────────────────────────────────────────────────────────────────
 unsafe fn on_create(hwnd: HWND) {
-    let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
+    let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
 
     let hfont = mkfont("Segoe UI", 12, FW_NORMAL.0 as i32);
     let hfont_hdr = mkfont("Segoe UI", 10, FW_SEMIBOLD.0 as i32);
@@ -99,7 +99,7 @@ unsafe fn on_create(hwnd: HWND) {
     );
     tray::add_tray_icon(hwnd, hicon);
 
-    let raw = hwnd.0 as isize;
+    let raw = hwnd.0;
     let log: crate::sync::LogFn = Arc::new(move |m: String| {
         logs::append(&m);
         let s = Box::new(m);
@@ -189,6 +189,7 @@ unsafe fn on_create(hwnd: HWND) {
     std::thread::spawn(
         move || match crate::updater::check(env!("CARGO_PKG_VERSION")) {
             crate::updater::CheckResult::UpdateAvailable(info) => {
+                crate::logs::append(&format!("Update available: v{}", info.version));
                 let url = Box::new(info.url);
                 PostMessageW(
                     HWND(raw),
@@ -211,7 +212,7 @@ unsafe fn build_ui(
     hwnd: HWND,
     hi: HINSTANCE,
     cfg: &Config,
-    _pass: &str,
+    pass: &str,
     hf: HFONT,
     hf_hdr: HFONT,
     hf_b: HFONT,
@@ -410,8 +411,17 @@ unsafe fn build_ui(
             bottom: y + (sync_row_h - sync_icon_w) / 2 + sync_icon_w,
         };
 
-        let idle_icon = LoadIconW(hi, w!("APP_ICON_IDLE")).unwrap_or_default();
-        st.sync_icon = idle_icon;
+        let initial_sync_configured = !cfg.watch_folder.is_empty()
+            && !cfg.webdav_url.is_empty()
+            && !cfg.username.is_empty()
+            && !pass.is_empty()
+            && !cfg.remote_folder.is_empty();
+        let initial_icon = if initial_sync_configured {
+            LoadIconW(hi, w!("APP_ICON_SYNCING")).unwrap_or_default()
+        } else {
+            LoadIconW(hi, w!("APP_ICON_IDLE")).unwrap_or_default()
+        };
+        st.sync_icon = initial_icon;
 
         let status_x = M + sync_icon_w + sync_gap;
         let status_w = 180i32;

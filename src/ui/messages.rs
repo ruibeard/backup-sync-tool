@@ -5,6 +5,18 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
         return LRESULT(0);
     };
     let hlb = GetDlgItem(hwnd, IDC_ACTIVITY_LIST as i32);
+    if let Some(previous) = activity_replaces(&msg) {
+        let previous = hstring(&previous);
+        let idx = SendMessageW(
+            hlb,
+            LB_FINDSTRINGEXACT,
+            WPARAM(usize::MAX),
+            LPARAM(previous.as_ptr() as isize),
+        );
+        if idx.0 >= 0 {
+            SendMessageW(hlb, LB_DELETESTRING, WPARAM(idx.0 as usize), LPARAM(0));
+        }
+    }
     let ws = hstring(&entry);
     SendMessageW(
         hlb,
@@ -26,7 +38,7 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     };
     let (icon_name, mut status_text) = match wp.0 {
         x if x == crate::sync::ActivityState::Checking as usize => {
-            (w!("APP_ICON_IDLE"), "Checking...")
+            (w!("APP_ICON_SYNCING"), "Checking...")
         }
         x if x == crate::sync::ActivityState::Syncing as usize => {
             (w!("APP_ICON_SYNCING"), "Syncing...")
@@ -35,15 +47,19 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     };
 
     let st = stmut(hwnd);
+    let was_busy = st.sync_status_state == crate::sync::ActivityState::Checking as usize
+        || st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
     let was_syncing = st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
+    let is_syncing = wp.0 == crate::sync::ActivityState::Syncing as usize;
+    let is_busy = wp.0 == crate::sync::ActivityState::Checking as usize || is_syncing;
     st.sync_status_state = wp.0;
     st.sync_progress_done = progress.0;
     st.sync_progress_total = progress.1;
-    if wp.0 == crate::sync::ActivityState::Syncing as usize {
-        if !was_syncing {
+    if is_busy {
+        if is_syncing && !was_syncing {
             st.sync_started_at = Some(std::time::Instant::now());
         }
-        if progress.1 > 0 {
+        if is_syncing && progress.1 > 0 {
             let done = progress.0.min(progress.1);
             let pct = (done * 100) / progress.1;
             let eta = if done > 0 {
@@ -67,14 +83,25 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             };
             status_text = &st.sync_status_text;
         }
-        if !was_syncing {
+        if !was_busy {
             st.sync_anim_frame = 0;
             let _ = SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
+        }
+        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+        let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
+        if hicon.0 != 0 {
+            tray::set_tray_icon_and_tip(
+                hwnd,
+                hicon,
+                &format!("Backup Sync Tool - {}", status_text),
+            );
+            st.sync_icon = hicon;
+            InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
         }
     } else {
         st.sync_started_at = None;
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
-        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
+        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
         let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
         if hicon.0 != 0 {
             tray::set_tray_icon_and_tip(hwnd, hicon, "Backup Sync Tool");
@@ -82,7 +109,7 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
         }
     }
-    if wp.0 != crate::sync::ActivityState::Syncing as usize {
+    if !is_syncing {
         st.sync_status_text = status_text.to_string();
     }
     let _ = SetWindowTextW(
@@ -90,11 +117,11 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         &hstring(&st.sync_status_text),
     );
     let progress_hwnd = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
-    if wp.0 == crate::sync::ActivityState::Syncing as usize && progress.1 > 0 {
+    if is_syncing && progress.1 > 0 {
         let pct = ((progress.0.min(progress.1) * 100) / progress.1) as isize;
         SendMessageW(progress_hwnd, PBM_SETPOS, WPARAM(pct as usize), LPARAM(0));
         ShowWindow(progress_hwnd, SW_SHOW);
-        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
+        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
         let tip_icon = LoadIconW(hi, w!("APP_ICON_SYNCING")).unwrap_or_default();
         if tip_icon.0 != 0 {
             tray::set_tray_icon_and_tip(
@@ -117,7 +144,9 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
     }
 
     let st = stmut(hwnd);
-    if st.sync_status_state != crate::sync::ActivityState::Syncing as usize {
+    if st.sync_status_state != crate::sync::ActivityState::Checking as usize
+        && st.sync_status_state != crate::sync::ActivityState::Syncing as usize
+    {
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
         return LRESULT(0);
     }
@@ -130,7 +159,7 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
         w!("APP_ICON_SYNC_5"),
         w!("APP_ICON_SYNC_6"),
     ];
-    let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as isize);
+    let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
     let icon_name = names[st.sync_anim_frame % names.len()];
     st.sync_anim_frame = (st.sync_anim_frame + 1) % names.len();
     let hicon = LoadIconW(hi, icon_name).unwrap_or_default();

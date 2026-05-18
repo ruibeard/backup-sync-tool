@@ -16,16 +16,16 @@ pub fn encrypt(plaintext: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     let bytes = plaintext.as_bytes();
-    let mut entropy_copy = ENTROPY.to_vec();
+    let entropy_copy = ENTROPY.to_vec();
 
     unsafe {
         let input = CRYPT_INTEGER_BLOB {
             cbData: bytes.len() as u32,
             pbData: bytes.as_ptr() as *mut u8,
         };
-        let mut entropy = CRYPT_INTEGER_BLOB {
+        let entropy = CRYPT_INTEGER_BLOB {
             cbData: entropy_copy.len() as u32,
-            pbData: entropy_copy.as_mut_ptr(),
+            pbData: entropy_copy.as_ptr() as *mut u8,
         };
         let mut output = CRYPT_INTEGER_BLOB {
             cbData: 0,
@@ -36,7 +36,7 @@ pub fn encrypt(plaintext: &str) -> Result<String, String> {
         let ok = CryptProtectData(
             &input,
             windows::core::w!("webdavsync"),
-            Some(&mut entropy),
+            Some(&entropy),
             None,
             None,
             CRYPTPROTECT_UI_FORBIDDEN,
@@ -60,16 +60,16 @@ pub fn decrypt(encoded: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     let mut cipher = B64.decode(encoded).map_err(|e| e.to_string())?;
-    let mut entropy_copy = ENTROPY.to_vec();
+    let entropy_copy = ENTROPY.to_vec();
 
     unsafe {
         let input = CRYPT_INTEGER_BLOB {
             cbData: cipher.len() as u32,
             pbData: cipher.as_mut_ptr(),
         };
-        let mut entropy = CRYPT_INTEGER_BLOB {
+        let entropy = CRYPT_INTEGER_BLOB {
             cbData: entropy_copy.len() as u32,
-            pbData: entropy_copy.as_mut_ptr(),
+            pbData: entropy_copy.as_ptr() as *mut u8,
         };
         let mut output = CRYPT_INTEGER_BLOB {
             cbData: 0,
@@ -79,7 +79,7 @@ pub fn decrypt(encoded: &str) -> Result<String, String> {
         let ok = CryptUnprotectData(
             &input,
             None,
-            Some(&mut entropy),
+            Some(&entropy),
             None,
             None,
             CRYPTPROTECT_UI_FORBIDDEN,

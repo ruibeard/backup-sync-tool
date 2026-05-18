@@ -1,24 +1,32 @@
 // webdav.rs — minimal blocking WebDAV client over ureq
 
-#![allow(dead_code)]
-
 use crate::config::Config;
-use std::collections::{HashSet, VecDeque};
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use std::fmt;
 use std::io::Read;
 use std::time::{Duration, UNIX_EPOCH};
-
-#[derive(Debug, Clone)]
-pub struct RemoteFile {
-    pub href: String,
-    pub is_collection: bool,
-}
 
 #[derive(Debug, Clone)]
 pub enum WebDavError {
     AuthFailed(u16),
     Http(u16, String),
     Other(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteFile {
+    pub relative_path: String,
+    pub size: u64,
+    pub mtime: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PropfindEntry {
+    href: String,
+    is_collection: bool,
+    size: u64,
+    mtime: u64,
 }
 
 impl WebDavError {
@@ -108,49 +116,6 @@ pub fn test_connection(cfg: &Config, password: &str) -> Result<(), WebDavError> 
     } else {
         Err(http_error(status, "Server"))
     }
-}
-
-pub fn list_folders(
-    cfg: &Config,
-    password: &str,
-    folder_url: &str,
-) -> Result<Vec<String>, WebDavError> {
-    validate_https(&cfg.webdav_url)?;
-    let entries = list_entries(cfg, password, folder_url, 1)?;
-    Ok(entries
-        .into_iter()
-        .filter(|entry| entry.is_collection)
-        .map(|entry| entry.href)
-        .collect())
-}
-
-pub fn list_entries_recursive(
-    cfg: &Config,
-    password: &str,
-    folder_url: &str,
-) -> Result<Vec<RemoteFile>, WebDavError> {
-    validate_https(&cfg.webdav_url)?;
-    let mut queue = VecDeque::from([folder_url.trim_end_matches('/').to_string() + "/"]);
-    let mut seen_dirs = HashSet::new();
-    let mut all = Vec::new();
-
-    while let Some(current) = queue.pop_front() {
-        let current_key = current.trim_end_matches('/').to_string();
-        if !seen_dirs.insert(current_key) {
-            continue;
-        }
-
-        let entries = list_entries(cfg, password, &current, 1)?;
-        for entry in entries {
-            if entry.is_collection {
-                let next = entry.href.trim_end_matches('/').to_string() + "/";
-                queue.push_back(next);
-            }
-            all.push(entry);
-        }
-    }
-
-    Ok(all)
 }
 
 pub fn get_file(cfg: &Config, password: &str, remote_url: &str) -> Result<Vec<u8>, WebDavError> {
@@ -250,27 +215,67 @@ pub fn mkcol(cfg: &Config, password: &str, remote_url: &str) -> Result<(), WebDa
     }
 }
 
-fn parse_propfind_folders(xml: &str, base_url: &str) -> Vec<String> {
-    parse_propfind_entries(xml, base_url)
-        .into_iter()
-        .filter(|entry| entry.is_collection)
-        .map(|entry| entry.href)
-        .collect()
-}
-
-fn list_entries(
+pub fn list_files_recursive(
     cfg: &Config,
     password: &str,
-    folder_url: &str,
-    depth: u32,
+    remote_base_url: &str,
 ) -> Result<Vec<RemoteFile>, WebDavError> {
     validate_https(&cfg.webdav_url)?;
+
+    let mut files = Vec::new();
+    let mut queue = std::collections::VecDeque::from([ensure_trailing_slash(remote_base_url)]);
+    let mut seen_dirs = std::collections::HashSet::new();
+    let base_path = url_path(remote_base_url);
+
+    while let Some(folder_url) = queue.pop_front() {
+        let folder_url = ensure_trailing_slash(&folder_url);
+        if !seen_dirs.insert(folder_url.clone()) {
+            continue;
+        }
+
+        let entries = propfind_depth_one(cfg, password, &folder_url)?;
+        let folder_path = url_path(&folder_url);
+        for entry in entries {
+            let href_url = absolute_href_url(&cfg.webdav_url, &entry.href);
+            let href_path = url_path(&href_url);
+            if same_webdav_path(&href_path, &folder_path) {
+                continue;
+            }
+
+            if entry.is_collection {
+                queue.push_back(ensure_trailing_slash(&href_url));
+                continue;
+            }
+
+            let Some(relative_path) = relative_href_path(&base_path, &href_path) else {
+                continue;
+            };
+            if relative_path.is_empty() {
+                continue;
+            }
+
+            files.push(RemoteFile {
+                relative_path,
+                size: entry.size,
+                mtime: entry.mtime,
+            });
+        }
+    }
+
+    Ok(files)
+}
+
+fn propfind_depth_one(
+    cfg: &Config,
+    password: &str,
+    remote_url: &str,
+) -> Result<Vec<PropfindEntry>, WebDavError> {
     let auth = basic_auth(&cfg.username, password);
-    let body = r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:resourcetype/><D:displayname/></D:prop></D:propfind>"#;
+    let body = r#"<?xml version="1.0"?><D:propfind xmlns:D="DAV:" xmlns:S="SAR:"><D:prop><D:resourcetype/><D:getcontentlength/><D:getlastmodified/><S:lastmodified/></D:prop></D:propfind>"#;
     let response = agent()
-        .request("PROPFIND", folder_url)
+        .request("PROPFIND", remote_url)
         .set("Authorization", &auth)
-        .set("Depth", if depth == 0 { "0" } else { "1" })
+        .set("Depth", "1")
         .set("Content-Type", "application/xml")
         .send_string(body)
         .map_err(WebDavError::from)?;
@@ -282,101 +287,220 @@ fn list_entries(
     let xml = response
         .into_string()
         .map_err(|e| WebDavError::Other(e.to_string()))?;
-    Ok(parse_propfind_entries(&xml, folder_url))
+    Ok(parse_propfind_entries(&xml))
 }
 
-fn parse_propfind_entries(xml: &str, base_url: &str) -> Vec<RemoteFile> {
+fn parse_propfind_entries(xml: &str) -> Vec<PropfindEntry> {
+    let mut reader = Reader::from_str(xml);
+    reader.trim_text(true);
+
     let mut entries = Vec::new();
-    let xml_lower = xml.to_ascii_lowercase();
-    let mut search_from = 0usize;
-    while let Some(rel_start) = find_response_start(&xml_lower[search_from..]) {
-        let start = search_from + rel_start;
-        let next_search = start + 1;
-        let end = match find_response_start(&xml_lower[next_search..]) {
-            Some(rel_end) => next_search + rel_end,
-            None => xml.len(),
-        };
-        let block = &xml[start..end];
-        let block_lower = &xml_lower[start..end];
+    let mut current: Option<PropfindEntry> = None;
+    let mut text_target = String::new();
 
-        if let Some(href) = extract_href(block, block_lower) {
-            let href = absolutize_href(base_url, &decode_href(&href));
-            let is_collection =
-                block_lower.contains("<d:collection") || block_lower.contains("<collection");
-            if href.trim_end_matches('/') != base_url.trim_end_matches('/') {
-                entries.push(RemoteFile {
-                    href,
-                    is_collection,
-                });
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let tag = local_name(e.name().as_ref());
+                if tag == "response" {
+                    current = Some(PropfindEntry::default());
+                } else if let Some(entry) = current.as_mut() {
+                    if tag == "collection" {
+                        entry.is_collection = true;
+                    }
+                    if matches!(
+                        tag.as_str(),
+                        "href" | "getcontentlength" | "getlastmodified" | "lastmodified"
+                    ) {
+                        text_target = tag;
+                    }
+                }
             }
+            Ok(Event::Empty(e)) => {
+                if let Some(entry) = current.as_mut() {
+                    if local_name(e.name().as_ref()) == "collection" {
+                        entry.is_collection = true;
+                    }
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if let Some(entry) = current.as_mut() {
+                    let text = e.unescape().map(|cow| cow.into_owned()).unwrap_or_default();
+                    match text_target.as_str() {
+                        "href" => entry.href = text,
+                        "getcontentlength" => entry.size = text.parse().unwrap_or(0),
+                        "getlastmodified" | "lastmodified" => {
+                            entry.mtime = parse_http_date_epoch(&text).unwrap_or(entry.mtime);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let tag = local_name(e.name().as_ref());
+                if tag == "response" {
+                    if let Some(entry) = current.take() {
+                        if !entry.href.is_empty() {
+                            entries.push(entry);
+                        }
+                    }
+                }
+                if tag == text_target {
+                    text_target.clear();
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
         }
-
-        search_from = end;
     }
+
     entries
 }
 
-fn absolutize_href(base_url: &str, href: &str) -> String {
+fn local_name(name: &[u8]) -> String {
+    let name = std::str::from_utf8(name).unwrap_or_default();
+    name.rsplit_once(':')
+        .map(|(_, local)| local)
+        .unwrap_or(name)
+        .to_string()
+}
+
+fn ensure_trailing_slash(url: &str) -> String {
+    if url.ends_with('/') {
+        url.to_string()
+    } else {
+        format!("{url}/")
+    }
+}
+
+fn absolute_href_url(base_url: &str, href: &str) -> String {
     if href.starts_with("http://") || href.starts_with("https://") {
         return href.to_string();
     }
+    let origin = url_origin(base_url);
+    if href.starts_with('/') {
+        format!("{origin}{href}")
+    } else {
+        format!("{}/{}", origin.trim_end_matches('/'), href)
+    }
+}
 
-    let trimmed = href.trim();
-    if trimmed.starts_with('/') {
-        if let Some(idx) = base_url.find("//") {
-            let after_scheme = idx + 2;
-            if let Some(path_idx) = base_url[after_scheme..].find('/') {
-                let origin = &base_url[..after_scheme + path_idx];
-                return format!("{origin}{trimmed}");
+fn url_origin(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return String::new();
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    format!("{scheme}://{host}")
+}
+
+fn url_path(url: &str) -> String {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let path = if let Some((_, rest)) = without_query.split_once("://") {
+        rest.find('/').map(|idx| &rest[idx..]).unwrap_or("/")
+    } else {
+        without_query
+    };
+    normalise_webdav_path(&percent_decode(path))
+}
+
+fn same_webdav_path(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/') == right.trim_end_matches('/')
+}
+
+fn relative_href_path(base_path: &str, href_path: &str) -> Option<String> {
+    let base = base_path.trim_end_matches('/');
+    let href = href_path.trim_start_matches('/');
+    let base = base.trim_start_matches('/');
+    let relative = href.strip_prefix(base)?.trim_start_matches('/');
+    Some(relative.trim_end_matches('/').to_string())
+}
+
+fn normalise_webdav_path(path: &str) -> String {
+    let replaced = path.replace('\\', "/");
+    let mut out = String::new();
+    let mut last_was_slash = false;
+    for ch in replaced.chars() {
+        if ch == '/' {
+            if !last_was_slash {
+                out.push(ch);
             }
+            last_was_slash = true;
+        } else {
+            out.push(ch);
+            last_was_slash = false;
         }
     }
-
-    let prefix = base_url.trim_end_matches('/');
-    format!("{prefix}/{}", trimmed.trim_start_matches('/'))
-}
-
-fn find_response_start(xml_lower: &str) -> Option<usize> {
-    let a = xml_lower.find("<d:response");
-    let b = xml_lower.find("<response");
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.min(y)),
-        (Some(x), None) => Some(x),
-        (None, Some(y)) => Some(y),
-        (None, None) => None,
+    if out.is_empty() {
+        "/".to_string()
+    } else if out.starts_with('/') {
+        out
+    } else {
+        format!("/{out}")
     }
 }
 
-fn extract_href(block: &str, block_lower: &str) -> Option<String> {
-    for (open, close) in [("<d:href>", "</d:href>"), ("<href>", "</href>")] {
-        if let Some(start) = block_lower.find(open) {
-            let rest = &block[start + open.len()..];
-            let rest_lower = &block_lower[start + open.len()..];
-            if let Some(end) = rest_lower.find(close) {
-                return Some(rest[..end].trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-fn decode_href(href: &str) -> String {
-    let bytes = href.as_bytes();
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
+    let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = &href[i + 1..i + 3];
-            if let Ok(value) = u8::from_str_radix(hex, 16) {
-                out.push(value);
-                i += 3;
-                continue;
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
             }
         }
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).to_string()
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse_http_date_epoch(value: &str) -> Option<u64> {
+    let mut parts = value.split_whitespace();
+    parts.next()?;
+    let day = parts.next()?.parse::<u32>().ok()?;
+    let month = match parts.next()? {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let mut time = parts.next()?.split(':');
+    let hour = time.next()?.parse::<i64>().ok()?;
+    let minute = time.next()?.parse::<i64>().ok()?;
+    let second = time.next()?.parse::<i64>().ok()?;
+    Some(
+        days_from_civil(year, month, day) as u64 * 86_400
+            + hour as u64 * 3_600
+            + minute as u64 * 60
+            + second as u64,
+    )
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - if month <= 2 { 1 } else { 0 };
+    let era = (if year >= 0 { year } else { year - 399 }) / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let day = day as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) as i64
 }
 
 fn sar_http_date(time: std::time::SystemTime) -> String {

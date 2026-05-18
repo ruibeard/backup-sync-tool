@@ -251,10 +251,12 @@ Main behavior:
 
 - Startup loads local manifest from `.backupsynctool-manifest.json`.
 - Startup fetches remote manifest from WebDAV.
+- When `sync_remote_changes` is enabled, startup and remote polling also scan the approved WebDAV folder with `PROPFIND` so files that exist on the server but are missing from the manifest can still be downloaded.
+- If there is no local manifest and `sync_remote_changes` is enabled, existing server files are downloaded as the first baseline before the app writes a new manifest.
 - Local creates/modifies are queued and uploaded after a short debounce.
 - Uploads are bounded by `parallel_uploads`.
 - Manifest is uploaded after batches.
-- Optional remote-to-local sync polls remote manifest every 60 seconds.
+- Optional remote-to-local sync polls remote state every 60 seconds.
 - Manifest file itself is ignored by scanning and event handling.
 
 Remote URL construction:

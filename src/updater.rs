@@ -17,7 +17,6 @@ struct GhAsset {
 }
 
 pub struct UpdateInfo {
-    #[allow(dead_code)]
     pub version: String,
     pub url: String,
 }

@@ -90,7 +90,7 @@ impl SyncEngine {
             });
 
             let remote_manifest =
-                fetch_remote_manifest(&cfg_watcher, &pass_watcher, &log_clone, &auth_failed_clone);
+                fetch_remote_state(&cfg_watcher, &pass_watcher, &log_clone, &auth_failed_clone);
             sync_startup(
                 &cfg_watcher,
                 &pass_watcher,
@@ -156,7 +156,7 @@ impl SyncEngine {
                 if cfg_watcher.sync_remote_changes
                     && last_remote_sync.elapsed() >= REMOTE_SYNC_INTERVAL
                 {
-                    if let Some(remote_manifest) = fetch_remote_manifest(
+                    if let Some(remote_manifest) = fetch_remote_state(
                         &cfg_watcher,
                         &pass_watcher,
                         &log_clone,
@@ -232,8 +232,48 @@ fn sync_startup(
     auth_failed: &AuthFailedFn,
 ) {
     let local_state = scan_local_state(cfg);
+    let remote_manifest = remote_manifest.cloned().unwrap_or_default();
 
     if !had_local_manifest {
+        if cfg.sync_remote_changes && !remote_manifest.files.is_empty() {
+            log("No local manifest, downloading server files as baseline".to_string());
+            let mut downloads: Vec<String> = remote_manifest
+                .files
+                .keys()
+                .filter(|relative| *relative != MANIFEST_NAME)
+                .cloned()
+                .collect();
+            downloads.sort();
+
+            if !downloads.is_empty() {
+                log(format!("{} file(s) to download", downloads.len()));
+                activity(ActivityInfo {
+                    state: ActivityState::Syncing,
+                    completed: 0,
+                    total: downloads.len(),
+                });
+                download_remote_paths(
+                    cfg,
+                    password,
+                    manifest,
+                    &remote_manifest,
+                    &downloads,
+                    suppressed,
+                    log,
+                    auth_failed,
+                );
+            }
+
+            let refreshed = scan_local_state(cfg);
+            {
+                let mut guard = manifest.lock().unwrap();
+                *guard = refreshed.clone();
+                save_local_manifest(cfg, &guard);
+            }
+            save_remote_manifest(cfg, password, &refreshed, log, auth_failed);
+            return;
+        }
+
         log("No local manifest, using local files as baseline".to_string());
 
         let mut uploads: Vec<PathBuf> = local_state
@@ -273,7 +313,6 @@ fn sync_startup(
     }
 
     let local_manifest = manifest.lock().unwrap().clone();
-    let remote_manifest = remote_manifest.cloned().unwrap_or_default();
 
     let mut uploads = Vec::new();
     let mut downloads = Vec::new();
@@ -386,6 +425,8 @@ fn apply_remote_manifest(
         *guard = refreshed;
         save_local_manifest(cfg, &guard);
     }
+    let snapshot = manifest.lock().unwrap().clone();
+    save_remote_manifest(cfg, password, &snapshot, log, auth_failed);
 }
 
 fn download_remote_paths(
@@ -422,6 +463,7 @@ fn download_remote_paths(
         if let Some(parent) = local_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        mark_suppressed(suppressed, &local_path);
         if let Err(err) = fs::write(&local_path, &remote_data) {
             log(format!("Local write failed {}: {}", relative, err));
             continue;
@@ -576,6 +618,49 @@ fn fetch_remote_manifest(
             None
         }
     }
+}
+
+fn fetch_remote_state(
+    cfg: &Config,
+    password: &str,
+    log: &LogFn,
+    auth_failed: &AuthFailedFn,
+) -> Option<SyncManifest> {
+    let mut manifest = fetch_remote_manifest(cfg, password, log, auth_failed).unwrap_or_default();
+
+    if cfg.sync_remote_changes {
+        match webdav::list_files_recursive(cfg, password, &remote_base_url(cfg)) {
+            Ok(files) => {
+                let mut discovered = 0usize;
+                for file in files {
+                    if file.relative_path == MANIFEST_NAME {
+                        continue;
+                    }
+                    if !manifest.files.contains_key(&file.relative_path) {
+                        manifest.files.insert(
+                            file.relative_path,
+                            FileState {
+                                size: file.size,
+                                mtime: file.mtime,
+                            },
+                        );
+                        discovered += 1;
+                    }
+                }
+                if discovered > 0 {
+                    log(format!("Discovered {} server file(s)", discovered));
+                }
+            }
+            Err(err) => {
+                if err.is_auth_failed() {
+                    auth_failed();
+                }
+                log(format!("Server folder scan unavailable: {}", err));
+            }
+        }
+    }
+
+    Some(manifest)
 }
 
 fn save_remote_manifest(
@@ -781,9 +866,9 @@ fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
-fn mark_suppressed(suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>, path: &PathBuf) {
+fn mark_suppressed(suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>, path: &Path) {
     if let Ok(mut guard) = suppressed.lock() {
-        guard.push((path.clone(), Instant::now() + Duration::from_secs(3)));
+        guard.push((path.to_path_buf(), Instant::now() + Duration::from_secs(3)));
         guard.retain(|(_, until)| *until > Instant::now());
     }
 }

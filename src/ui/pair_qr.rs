@@ -93,7 +93,7 @@ unsafe extern "system" fn pair_qr_wnd_proc(
         }
         WM_CTLCOLORSTATIC => {
             let hdc = HDC(wp.0 as isize);
-            let id = GetDlgCtrlID(HWND(lp.0 as isize)) as u16;
+            let id = GetDlgCtrlID(HWND(lp.0)) as u16;
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(
                 hdc,

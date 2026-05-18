@@ -98,7 +98,6 @@ const SYNC_ANIM_MS: u32 = 120;
 
 const SS_LEFT: u32 = 0x0000;
 const SS_CENTER: u32 = 0x0001;
-#[allow(dead_code)]
 const SS_RIGHT: u32 = 0x0002;
 const SS_NOTIFY: u32 = 0x0100;
 
@@ -150,15 +149,10 @@ struct WndState {
     server_tooltip: HWND,
     server_tooltip_text: Vec<u16>,
     status_dot_color: u32,
-    #[allow(dead_code)]
     hfont: HFONT,
-    #[allow(dead_code)]
     hfont_hdr: HFONT,
-    #[allow(dead_code)]
     hfont_b: HFONT,
-    #[allow(dead_code)]
     hfont_small: HFONT,
-    #[allow(dead_code)]
     hfont_link: HFONT,
     br_win: HBRUSH,
     br_sect: HBRUSH,

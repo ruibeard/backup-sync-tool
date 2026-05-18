@@ -23,7 +23,7 @@ pub unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) {
     let mut tip = [0u16; 128];
     fill_tip(&mut tip, "Backup Sync Tool");
 
-    let mut nid = NOTIFYICONDATAW {
+    let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
@@ -33,14 +33,14 @@ pub unsafe fn add_tray_icon(hwnd: HWND, hicon: HICON) {
         szTip: tip,
         ..Default::default()
     };
-    let _ = Shell_NotifyIconW(NIM_ADD, &mut nid);
+    let _ = Shell_NotifyIconW(NIM_ADD, &nid);
 }
 
 pub unsafe fn set_tray_icon_and_tip(hwnd: HWND, hicon: HICON, text: &str) {
     let mut tip = [0u16; 128];
     fill_tip(&mut tip, text);
 
-    let mut nid = NOTIFYICONDATAW {
+    let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
@@ -49,18 +49,18 @@ pub unsafe fn set_tray_icon_and_tip(hwnd: HWND, hicon: HICON, text: &str) {
         szTip: tip,
         ..Default::default()
     };
-    let _ = Shell_NotifyIconW(NIM_MODIFY, &mut nid);
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 // Remove tray icon (call on exit)
 pub unsafe fn remove_tray_icon(hwnd: HWND) {
-    let mut nid = NOTIFYICONDATAW {
+    let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
         ..Default::default()
     };
-    let _ = Shell_NotifyIconW(NIM_DELETE, &mut nid);
+    let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
 // Show right-click context menu at cursor

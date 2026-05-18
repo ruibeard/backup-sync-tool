@@ -32,6 +32,7 @@ serde_json = "1"
 
 # HTTP client (blocking, no async runtime)
 ureq = { version = "2", features = ["tls"] }
+quick-xml = "0.31"
 
 # File watching
 notify = { version = "6", default-features = false }

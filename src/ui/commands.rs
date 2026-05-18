@@ -53,7 +53,7 @@ unsafe fn browse_local(hwnd: HWND) {
         None
     };
     let mut display = [0u16; 260];
-    let mut bi = BROWSEINFOW {
+    let bi = BROWSEINFOW {
         hwndOwner: hwnd,
         lpszTitle: PCWSTR(title.as_ptr()),
         pszDisplayName: PWSTR(display.as_mut_ptr()),
@@ -67,7 +67,7 @@ unsafe fn browse_local(hwnd: HWND) {
         ),
         ..Default::default()
     };
-    let pidl = SHBrowseForFolderW(&mut bi);
+    let pidl = SHBrowseForFolderW(&bi);
     if pidl.is_null() {
         return;
     }
@@ -110,7 +110,7 @@ unsafe fn do_connect(hwnd: HWND) {
         &hstring("Connecting"),
     );
     ShowWindow(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), SW_SHOW);
-    let raw = hwnd.0 as isize;
+    let raw = hwnd.0;
     std::thread::spawn(move || {
         let ok = webdav::test_connection(&cfg, &pass).is_ok();
         PostMessageW(
@@ -136,7 +136,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
     st.pair_id = st.pair_id.wrapping_add(1);
     let pair_id = st.pair_id;
     st.pair_cancel = Some(cancel.clone());
-    let raw = hwnd.0 as isize;
+    let raw = hwnd.0;
 
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring("Waiting..."));
@@ -328,7 +328,7 @@ unsafe fn do_save(hwnd: HWND) {
     apply_startup(&st.config);
     let cfg = st.config.clone();
     let pass = st.password_plain.clone();
-    let raw = hwnd.0 as isize;
+    let raw = hwnd.0;
     let log: crate::sync::LogFn = Arc::new(move |m: String| {
         logs::append(&m);
         let s = Box::new(m);
@@ -412,7 +412,7 @@ unsafe fn do_update(hwnd: HWND) {
         )
         .ok();
         ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
-        let raw = hwnd.0 as isize;
+        let raw = hwnd.0;
         std::thread::spawn(move || {
             let _ = crate::updater::download_and_replace(&url, |pct| {
                 let m = Box::new(format!("Downloading: {pct}%"));
@@ -597,7 +597,7 @@ unsafe fn layout_main(hwnd: HWND) {
     .ok();
     y += INP_H + SECT;
 
-    if (&(*st).dividers).len() > 1 {
+    if (*st).dividers.len() > 1 {
         (&mut (*st).dividers)[1] = y - SECT / 2;
     }
 
@@ -668,7 +668,7 @@ unsafe fn layout_main(hwnd: HWND) {
     y += sync_row_h + (*st).post_sync_sect;
 
     let div_idx = (*st).divider_activity_idx;
-    if div_idx < (&(*st).dividers).len() {
+    if div_idx < (*st).dividers.len() {
         (&mut (*st).dividers)[div_idx] = y - (*st).post_sync_sect / 2;
     }
 

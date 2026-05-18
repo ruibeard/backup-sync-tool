@@ -103,7 +103,7 @@ unsafe fn start_connection_check(hwnd: HWND) {
     {
         return;
     }
-    let raw = hwnd.0 as isize;
+    let raw = hwnd.0;
     std::thread::spawn(move || {
         let ok = webdav::test_connection(&cfg, &pass).is_ok();
         unsafe {
@@ -158,9 +158,11 @@ unsafe fn mkfont(name: &str, pt: i32, weight: i32) -> HFONT {
     ReleaseDC(None, hdc);
     let h = -(pt * dpi / 72);
     let nw: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut lf = LOGFONTW::default();
-    lf.lfHeight = h;
-    lf.lfWeight = weight;
+    let mut lf = LOGFONTW {
+        lfHeight: h,
+        lfWeight: weight,
+        ..Default::default()
+    };
     let n = nw.len().min(lf.lfFaceName.len());
     lf.lfFaceName[..n].copy_from_slice(&nw[..n]);
     CreateFontIndirectW(&lf)
@@ -172,10 +174,12 @@ unsafe fn mkfont_underline(name: &str, pt: i32, weight: i32) -> HFONT {
     ReleaseDC(None, hdc);
     let h = -(pt * dpi / 72);
     let nw: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut lf = LOGFONTW::default();
-    lf.lfHeight = h;
-    lf.lfWeight = weight;
-    lf.lfUnderline = 1; // underline for clickable links
+    let mut lf = LOGFONTW {
+        lfHeight: h,
+        lfWeight: weight,
+        lfUnderline: 1,
+        ..Default::default()
+    };
     let n = nw.len().min(lf.lfFaceName.len());
     lf.lfFaceName[..n].copy_from_slice(&nw[..n]);
     CreateFontIndirectW(&lf)
@@ -184,12 +188,6 @@ unsafe fn mkfont_underline(name: &str, pt: i32, weight: i32) -> HFONT {
 fn hstring(s: &str) -> HSTRING {
     HSTRING::from(s)
 }
-#[allow(dead_code)]
-fn wstr(b: &[u16]) -> String {
-    let e = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    String::from_utf16_lossy(&b[..e])
-}
-
 unsafe fn msgbox(hwnd: HWND, text: &str, title: &str) {
     MessageBoxW(
         hwnd,
@@ -205,7 +203,7 @@ unsafe fn msgbox_yn(hwnd: HWND, text: &str, title: &str) -> bool {
         &hstring(title),
         MB_YESNO | MB_ICONQUESTION,
     )
-    .0 == IDYES.0 as i32
+    .0 == IDYES.0
 }
 
 fn activity_entry(message: &str) -> Option<String> {
@@ -229,6 +227,13 @@ fn activity_entry(message: &str) -> Option<String> {
     }
     if let Some(name) = message.strip_prefix("Downloaded: ") {
         return Some(format!("Downloaded {}", display_activity_name(name)));
+    }
+    None
+}
+
+fn activity_replaces(message: &str) -> Option<String> {
+    if let Some(name) = message.strip_prefix("Uploaded: ") {
+        return Some(format!("Uploading {}", display_activity_name(name)));
     }
     None
 }

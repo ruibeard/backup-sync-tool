@@ -86,7 +86,7 @@ unsafe extern "system" fn wnd_proc(
         // Static / label controls
         WM_CTLCOLORSTATIC => {
             let hdc = HDC(wparam.0 as isize);
-            let hctl = HWND(lparam.0 as isize);
+            let hctl = HWND(lparam.0);
             let id = GetDlgCtrlID(hctl) as u16;
             SetBkMode(hdc, TRANSPARENT);
             let st = state_ptr(hwnd);
@@ -203,6 +203,11 @@ unsafe extern "system" fn wnd_proc(
                 DeleteObject((*st).br_win);
                 DeleteObject((*st).br_sect);
                 DeleteObject((*st).br_input);
+                DeleteObject((*st).hfont);
+                DeleteObject((*st).hfont_hdr);
+                DeleteObject((*st).hfont_b);
+                DeleteObject((*st).hfont_small);
+                DeleteObject((*st).hfont_link);
                 drop(Box::from_raw(st));
             }
             PostQuitMessage(0);
