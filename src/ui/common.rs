@@ -27,18 +27,230 @@ use std::sync::{
 };
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi as gdi;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::WindowsAndMessaging as wam;
 use windows::Win32::UI::Shell::{
     DefSubclassProc, ExtractIconExW, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW,
-    SetWindowSubclass, ShellExecuteW, SHGetStockIconInfo, SHSTOCKICONID, SHSTOCKICONINFO,
+    SetWindowSubclass, SHGetStockIconInfo, SHSTOCKICONID, SHSTOCKICONINFO,
     BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
-    SHGSI_ICON, SHGSI_LINKOVERLAY, SHGSI_SMALLICON, SIID_ERROR, SIID_FOLDER, SIID_FOLDEROPEN,
-    SIID_SOFTWARE, SIID_WARNING,
+    SHGSI_ICON, SHGSI_LINKOVERLAY, SHGSI_SMALLICON, SIID_DRIVE35, SIID_ERROR, SIID_FOLDER,
+    SIID_FOLDEROPEN, SIID_KEY, SIID_SERVER, SIID_SOFTWARE, SIID_WARNING,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+trait IntoOptionalHwnd {
+    fn into_optional_hwnd(self) -> Option<HWND>;
+}
+
+impl IntoOptionalHwnd for HWND {
+    fn into_optional_hwnd(self) -> Option<HWND> {
+        Some(self)
+    }
+}
+
+impl IntoOptionalHwnd for Option<HWND> {
+    fn into_optional_hwnd(self) -> Option<HWND> {
+        self
+    }
+}
+
+trait IntoOptionalHmenu {
+    fn into_optional_hmenu(self) -> Option<HMENU>;
+}
+
+impl IntoOptionalHmenu for HMENU {
+    fn into_optional_hmenu(self) -> Option<HMENU> {
+        Some(self)
+    }
+}
+
+impl IntoOptionalHmenu for Option<HMENU> {
+    fn into_optional_hmenu(self) -> Option<HMENU> {
+        self
+    }
+}
+
+trait IntoOptionalHinstance {
+    fn into_optional_hinstance(self) -> Option<HINSTANCE>;
+}
+
+impl IntoOptionalHinstance for HINSTANCE {
+    fn into_optional_hinstance(self) -> Option<HINSTANCE> {
+        Some(self)
+    }
+}
+
+impl IntoOptionalHinstance for Option<HINSTANCE> {
+    fn into_optional_hinstance(self) -> Option<HINSTANCE> {
+        self
+    }
+}
+
+#[allow(non_snake_case)]
+unsafe fn CreateWindowExW<P1, P2, P7, P8>(
+    ex_style: WINDOW_EX_STYLE,
+    class_name: P1,
+    window_name: P2,
+    style: WINDOW_STYLE,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    parent: P7,
+    menu: P8,
+    instance: impl IntoOptionalHinstance,
+    param: Option<*const c_void>,
+) -> HWND
+where
+    P1: Param<PCWSTR>,
+    P2: Param<PCWSTR>,
+    P7: IntoOptionalHwnd,
+    P8: IntoOptionalHmenu,
+{
+    wam::CreateWindowExW(
+        ex_style,
+        class_name,
+        window_name,
+        style,
+        x,
+        y,
+        width,
+        height,
+        parent.into_optional_hwnd(),
+        menu.into_optional_hmenu(),
+        instance.into_optional_hinstance(),
+        param,
+    )
+    .unwrap_or_default()
+}
+
+#[allow(non_snake_case)]
+unsafe fn GetDlgItem(hwnd: HWND, id: i32) -> HWND {
+    wam::GetDlgItem(Some(hwnd), id).unwrap_or_default()
+}
+
+#[allow(non_snake_case)]
+unsafe fn GetParent(hwnd: HWND) -> HWND {
+    wam::GetParent(hwnd).unwrap_or_default()
+}
+
+#[allow(non_snake_case)]
+unsafe fn IsWindow(hwnd: HWND) -> BOOL {
+    wam::IsWindow(Some(hwnd))
+}
+
+#[allow(non_snake_case)]
+unsafe fn LoadIconW<P1>(instance: impl IntoOptionalHinstance, icon_name: P1) -> Result<HICON>
+where
+    P1: Param<PCWSTR>,
+{
+    wam::LoadIconW(instance.into_optional_hinstance(), icon_name)
+}
+
+#[allow(non_snake_case)]
+unsafe fn InvalidateRect(hwnd: HWND, rect: Option<&RECT>, erase: BOOL) -> BOOL {
+    gdi::InvalidateRect(
+        Some(hwnd),
+        rect.map(|rc| rc as *const RECT),
+        erase.as_bool(),
+    )
+}
+
+#[allow(non_snake_case)]
+unsafe fn GetWindowDC(hwnd: HWND) -> HDC {
+    gdi::GetWindowDC(Some(hwnd))
+}
+
+#[allow(non_snake_case)]
+unsafe fn ReleaseDC(hwnd: impl IntoOptionalHwnd, hdc: HDC) -> i32 {
+    gdi::ReleaseDC(hwnd.into_optional_hwnd(), hdc)
+}
+
+#[allow(non_snake_case)]
+unsafe fn DeleteObject(object: impl Into<HGDIOBJ>) -> BOOL {
+    gdi::DeleteObject(object.into())
+}
+
+#[allow(non_snake_case)]
+unsafe fn SelectObject(hdc: HDC, object: impl Into<HGDIOBJ>) -> HGDIOBJ {
+    gdi::SelectObject(hdc, object.into())
+}
+
+#[allow(non_snake_case)]
+unsafe fn DrawIconEx(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    icon: HICON,
+    width: i32,
+    height: i32,
+    step: u32,
+    brush: HBRUSH,
+    flags: DI_FLAGS,
+) -> BOOL {
+    BOOL::from(
+        wam::DrawIconEx(
+            hdc,
+            x,
+            y,
+            icon,
+            width,
+            height,
+            step,
+            (!brush.0.is_null()).then_some(brush),
+            flags,
+        )
+        .is_ok(),
+    )
+}
+
+#[allow(non_snake_case)]
+unsafe fn SendMessageW(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    wam::SendMessageW(hwnd, msg, Some(wparam), Some(lparam))
+}
+
+#[allow(non_snake_case)]
+unsafe fn PostMessageW(
+    hwnd: impl IntoOptionalHwnd,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> Result<()> {
+    wam::PostMessageW(hwnd.into_optional_hwnd(), msg, wparam, lparam)
+}
+
+#[allow(non_snake_case)]
+unsafe fn SetTimer(hwnd: HWND, timer_id: usize, elapsed_ms: u32, proc: TIMERPROC) -> usize {
+    wam::SetTimer(Some(hwnd), timer_id, elapsed_ms, proc)
+}
+
+#[allow(non_snake_case)]
+unsafe fn KillTimer(hwnd: HWND, timer_id: usize) -> Result<()> {
+    wam::KillTimer(Some(hwnd), timer_id)
+}
+
+#[allow(non_snake_case)]
+unsafe fn GetDeviceCaps(hdc: HDC, index: GET_DEVICE_CAPS_INDEX) -> i32 {
+    gdi::GetDeviceCaps(Some(hdc), index)
+}
+
+#[allow(non_snake_case)]
+unsafe fn MessageBoxW<P1, P2>(
+    hwnd: HWND,
+    text: P1,
+    caption: P2,
+    style: MESSAGEBOX_STYLE,
+) -> MESSAGEBOX_RESULT
+where
+    P1: Param<PCWSTR>,
+    P2: Param<PCWSTR>,
+{
+    wam::MessageBoxW(Some(hwnd), text, caption, style)
+}
 
 // ── Colours  0x00BBGGRR ──────────────────────────────────────────────────────
 const C_WIN_BG: u32 = 0x00F0F0F0;
@@ -75,6 +287,7 @@ const IDC_ACTIVITY_LIST: u16 = 114;
 const IDC_START_WINDOWS: u16 = 115;
 const IDC_SYNC_REMOTE: u16 = 116;
 const IDC_SYNC_PROGRESS: u16 = 118;
+const IDC_SYNC_REMOTE_ICON: u16 = 119;
 const IDC_REPO: u16 = 120;
 const IDC_DEST_CREATED: u16 = 121;
 const IDC_UPDATE_LINK: u16 = 122;
@@ -112,6 +325,9 @@ const AUTHOR_URL: &str = "https://ruialmeida.me";
 const PAIR_QR_CLASS_NAME: PCWSTR = w!("BackupSyncToolPairQrWnd");
 const PAIR_QR_CLIENT_W: i32 = 380;
 const PAIR_QR_CLIENT_H: i32 = 500;
+const IDC_PAIR_QR_TITLE: u16 = 300;
+const IDC_PAIR_QR_STATUS: u16 = 301;
+const IDC_PAIR_QR_CODE: u16 = 302;
 const IDC_PAIR_QR_LINK: u16 = 303;
 const IDC_PAIR_QR_CANCEL: u16 = 304;
 
@@ -129,7 +345,7 @@ const LBL_H: i32 = 18; // label text height
 const BROWSE_W: i32 = 34; // folder icon button width
 const FOLDER_ACTIONS_W: i32 = BROWSE_W * 2 + PAD;
 const PAIR_BTN_W: i32 = 82;
-const SERVER_STATUS_W: i32 = 170;
+const SERVER_STATUS_W: i32 = 58;
 const MIN_ACTIVITY_LIST_H: i32 = 96;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
 
@@ -215,8 +431,8 @@ struct PairQrState {
     parent: HWND,
     code: String,
     approve_url: String,
+    ready: bool,
     hfont: HFONT,
     hfont_b: HFONT,
     hfont_code: HFONT,
 }
-

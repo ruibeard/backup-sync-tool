@@ -25,7 +25,7 @@ fn main() {
     let start_minimized = !std::env::args().any(|arg| arg == "--show");
     unsafe {
         if OpenMutexW(MUTEX_ALL_ACCESS, false, w!("BackupSyncToolSingleton")).is_ok() {
-            let hwnd = FindWindowW(ui::CLASS_NAME, None);
+            let hwnd = FindWindowW(ui::CLASS_NAME, None).unwrap_or_default();
             if !hwnd.0.is_null() && !start_minimized {
                 ShowWindow(hwnd, SW_RESTORE);
                 let _ = SetForegroundWindow(hwnd);

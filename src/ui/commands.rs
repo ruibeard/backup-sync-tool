@@ -92,8 +92,8 @@ unsafe fn do_open_local_folder(hwnd: HWND) {
         msgbox(hwnd, "Origin folder does not exist.", "Open Folder");
         return;
     }
-    let _ = ShellExecuteW(
-        hwnd,
+    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+        Some(hwnd),
         w!("open"),
         &hstring(folder),
         None,
@@ -161,8 +161,9 @@ unsafe fn do_pair_device(hwnd: HWND) {
 
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring("Waiting..."));
-    EnableWindow(pair_hwnd, FALSE);
+    EnableWindow(pair_hwnd, false);
     ShowWindow(GetDlgItem(hwnd, IDC_SAVE as i32), SW_HIDE);
+    show_pair_qr_window(hwnd);
     set_status_dot_color(hwnd, C_AMBER);
     let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
@@ -450,8 +451,8 @@ unsafe fn do_update(hwnd: HWND) {
 }
 
 unsafe fn do_open_repo(hwnd: HWND) {
-    let _ = ShellExecuteW(
-        hwnd,
+    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+        Some(hwnd),
         w!("open"),
         &hstring(REPO_URL),
         None,
@@ -461,8 +462,8 @@ unsafe fn do_open_repo(hwnd: HWND) {
 }
 
 unsafe fn do_open_author(hwnd: HWND) {
-    let _ = ShellExecuteW(
-        hwnd,
+    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+        Some(hwnd),
         w!("open"),
         &hstring(AUTHOR_URL),
         None,
@@ -474,7 +475,14 @@ unsafe fn do_open_author(hwnd: HWND) {
 unsafe fn do_open_logs(hwnd: HWND) {
     let dir = logs::ensure_logs_dir();
     let dir_w = hstring(&dir.to_string_lossy());
-    let _ = ShellExecuteW(hwnd, w!("open"), &dir_w, None, None, SW_SHOWNORMAL);
+    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+        Some(hwnd),
+        w!("open"),
+        &dir_w,
+        None,
+        None,
+        SW_SHOWNORMAL,
+    );
 }
 
 fn required_client_height(st: &WndState) -> i32 {
@@ -500,7 +508,7 @@ unsafe fn layout_main(hwnd: HWND) {
     let pair_x = M + INNER_W - PAIR_BTN_W;
     let server_status_w = SERVER_STATUS_W;
     let server_status_x = pair_x - PAD - server_status_w;
-    let status_x = server_status_x - status_w - 4;
+    let status_x = server_status_x - status_w - 6;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SERVER_HDR as i32),
         None,
@@ -711,6 +719,8 @@ unsafe fn layout_main(hwnd: HWND) {
     let startup_x = M;
     let startup_w = 126i32;
     let two_way_x = startup_x + startup_w + 12;
+    let two_way_icon_w = 18i32;
+    let two_way_check_x = two_way_x + two_way_icon_w;
     let two_way_w = save_x - two_way_x - 12;
 
     SetWindowPos(
@@ -724,11 +734,21 @@ unsafe fn layout_main(hwnd: HWND) {
     )
         .ok();
     SetWindowPos(
-        GetDlgItem(hwnd, IDC_SYNC_REMOTE as i32),
+        GetDlgItem(hwnd, IDC_SYNC_REMOTE_ICON as i32),
         None,
         two_way_x,
+        check_y + 1,
+        16,
+        16,
+        SWP_NOZORDER,
+    )
+        .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SYNC_REMOTE as i32),
+        None,
+        two_way_check_x,
         check_y,
-        two_way_w,
+        two_way_w - two_way_icon_w,
         18,
         SWP_NOZORDER,
     )

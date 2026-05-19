@@ -49,7 +49,7 @@ unsafe fn on_create(hwnd: HWND) {
         server_tooltip: HWND(std::ptr::null_mut()),
         server_tooltip_text: Vec::new(),
         status_dot_color: C_RED,
-        status_ok_icon: load_imageres_icon(106),
+        status_ok_icon: load_imageres_icon_resource(106),
         status_warn_icon: load_stock_icon(SIID_WARNING, false),
         status_error_icon: load_stock_icon(SIID_ERROR, false),
         hfont,
@@ -230,7 +230,7 @@ unsafe fn build_ui(
         let pair_x = M + INNER_W - PAIR_BTN_W;
         let server_status_w = SERVER_STATUS_W;
         let server_status_x = pair_x - PAD - server_status_w;
-        let status_x = server_status_x - status_w - 4;
+        let status_x = server_status_x - status_w - 6;
 
         let hdr_toggle_w = 90i32;
         mkstatic(
@@ -485,6 +485,8 @@ unsafe fn build_ui(
         let startup_x = M;
         let startup_w = 126i32;
         let two_way_x = startup_x + startup_w + 12;
+        let two_way_icon_w = 18i32;
+        let two_way_check_x = two_way_x + two_way_icon_w;
         let two_way_w = save_x - two_way_x - 12;
 
         mkcheck(
@@ -499,14 +501,28 @@ unsafe fn build_ui(
             hf_small,
             cfg.start_with_windows,
         );
+        let remote_icon = mkstatic_align(
+            hwnd,
+            hi,
+            IDC_SYNC_REMOTE_ICON,
+            "",
+            two_way_x,
+            check_y + 1,
+            16,
+            16,
+            hf_small,
+            SS_ICON,
+        );
+        set_static_icon(remote_icon, load_stock_icon(SIID_SERVER, false));
+
         mkcheck(
             hwnd,
             hi,
             IDC_SYNC_REMOTE,
             "Download from server",
-            two_way_x,
+            two_way_check_x,
             check_y,
-            two_way_w,
+            two_way_w - two_way_icon_w,
             18,
             hf_small,
             cfg.sync_remote_changes,
@@ -622,7 +638,7 @@ unsafe fn mkstatic(
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -652,7 +668,7 @@ unsafe fn mklink(
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -683,7 +699,7 @@ unsafe fn mkstatic_align(
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -734,7 +750,7 @@ unsafe fn mkedit_raw(
         w,
         INP_H,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -765,7 +781,7 @@ unsafe fn mkbtn(
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -792,7 +808,7 @@ unsafe fn mkiconbtn(
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     )
@@ -847,7 +863,7 @@ unsafe fn mkcheck(
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -884,7 +900,7 @@ unsafe fn mklb(
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -903,7 +919,7 @@ unsafe fn mkprogress(hwnd: HWND, hi: HINSTANCE, id: u16, x: i32, y: i32, w: i32,
         w,
         h,
         hwnd,
-        HMENU(id as isize),
+        HMENU(id as usize as *mut _),
         hi,
         None,
     );
@@ -1031,4 +1047,3 @@ unsafe fn update_server_tooltip(hwnd: HWND) {
         );
     }
 }
-

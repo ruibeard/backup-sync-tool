@@ -2,7 +2,7 @@ unsafe fn apply_startup(cfg: &Config) {
     use windows::Win32::System::Registry::*;
     let key = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
     let mut hk = HKEY::default();
-    if RegOpenKeyExW(HKEY_CURRENT_USER, key, 0, KEY_SET_VALUE, &mut hk).is_ok() {
+    if RegOpenKeyExW(HKEY_CURRENT_USER, key, Some(0), KEY_SET_VALUE, &mut hk).is_ok() {
         if cfg.start_with_windows {
             if let Ok(exe) = std::env::current_exe() {
                 let command = format!("\"{}\"", exe.to_string_lossy());
@@ -10,7 +10,7 @@ unsafe fn apply_startup(cfg: &Config) {
                 let _ = RegSetValueExW(
                     hk,
                     w!("BackupSyncTool"),
-                    0,
+                    Some(0),
                     REG_SZ,
                     Some(bytemuck::cast_slice(&v)),
                 );

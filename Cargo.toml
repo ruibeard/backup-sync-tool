@@ -39,6 +39,8 @@ notify = { version = "6" }
 
 # Base64 for DPAPI blob serialisation
 base64 = "0.22"
+rsa = "0.9"
+unicode-normalization = "0.1"
 
 # Local QR code generation for device pairing
 qrcodegen = "1"

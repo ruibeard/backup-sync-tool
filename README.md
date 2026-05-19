@@ -133,24 +133,25 @@ Relevant local paths:
 
 ```text
 C:\XDSoftware\backups
-C:\XDSoftware\bin\xd\XDPeople.NET.dll
 C:\XDSoftware\cfg\xd.lic
+C:\XDSoftware\cfg\xd.pem
 ```
 
 Current app behavior:
 
-- `src/xd.rs` uses PowerShell directly.
-- It loads `C:\XDSoftware\bin\xd\XDPeople.NET.dll`.
-- It calls `XDPeople.Utils.XDLicence.LoadToPreview("C:\XDSoftware\cfg\xd.lic")`.
-- It reads the licence number and commercial name.
+- `src/xd.rs` performs native Rust detection; it does not use PowerShell or XD DLL reflection.
+- It reads `C:\XDSoftware\cfg\xd.lic` as JSON.
+- It reads `C:\XDSoftware\cfg\xd.pem` as the RSA public key.
+- It decrypts the `Number` and `ClientComercialName` fields with the same raw RSA block algorithm used by the diagnostic `license-inspector.exe --remote-folder` helper.
+- It builds the detected folder as `Number` + `-` + slugified commercial name.
 
 Detected values:
 
 | Rust helper | Source | Example |
 | --- | --- | --- |
 | `default_watch_folder()` | Existing `C:\XDSoftware\backups` directory | `C:\XDSoftware\backups` |
-| `detect_customer_name()` | `$lic.ComercialName` | `Palmeira Minimercado` |
-| `detect_default_remote_folder()` | `$lic.Number` + slugified `$lic.ComercialName` | `XDPT.59655-Palmeira-Minimercado` |
+| `detect_customer_hint().customer` | Decrypted `ClientComercialName` | `Palmeira Minimercado` |
+| `detect_customer_hint().folder` | Decrypted `Number` + slugified decrypted `ClientComercialName` | `XDPT.59655-Palmeira-Minimercado` |
 
 Before pairing, the app may prefill an empty destination field from XD detection. That value is only a hint. Pairing must not trust the editable destination textbox.
 
@@ -168,11 +169,12 @@ sequenceDiagram
     participant WebDAV
 
     User->>App: Click Pair
-    App->>XD: Detect local hints
+    App-->>User: Show pairing popup immediately
+    App->>XD: Detect optional local hints in background
     XD-->>App: detected_folder
     App->>API: POST /api/pair/start
     API-->>App: code, approve_url, poll_token
-    App-->>User: Show QR/code popup
+    App-->>User: Update popup with QR/code
     Admin->>API: Approve customer/folder
     loop Poll until approved/rejected/expired/consumed/failed/cancelled/timeout
         App->>API: GET /api/pair/status/{poll_token}
@@ -297,9 +299,9 @@ Implemented behavior:
 - Closing hides to tray.
 - Tray double-click reopens.
 - Tray menu can open app/logs or exit.
-- Pair button starts QR/code flow.
+- Pair button opens the pairing popup immediately, then the background pairing worker adds the QR/code after `/api/pair/start` responds.
 - While pairing is pending, the server status shows an amber dot, `Waiting for approval`, and the Pair button changes to `Waiting...`.
-- The pairing QR window shows the approval code, expiry text, waiting-for-admin message, and a Cancel button.
+- The pairing QR window starts in a preparing state, then shows the approval code, expiry text, waiting-for-admin message, QR code, approval link, and a Cancel button.
 - Pairing approval saves the returned device token, WebDAV credentials, and approved folder automatically. The user does not need to click Save to complete pairing.
 - Save is for local settings such as the local backup folder, startup preference, and remote-download preference; it is hidden while pairing is pending.
 - UPDATE button is hidden until a newer GitHub release is found.

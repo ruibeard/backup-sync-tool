@@ -13,7 +13,7 @@ unsafe fn restore_pair_idle_controls(hwnd: HWND) {
     };
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring(label));
-    EnableWindow(pair_hwnd, TRUE);
+    EnableWindow(pair_hwnd, true);
     ShowWindow(GetDlgItem(hwnd, IDC_SAVE as i32), SW_SHOW);
 }
 
@@ -98,12 +98,12 @@ unsafe fn start_connection_check(hwnd: HWND) {
     {
         return;
     }
-    let raw = hwnd.0;
+    let raw = hwnd.0 as isize;
     std::thread::spawn(move || {
         let ok = webdav::test_connection(&cfg, &pass).is_ok();
         unsafe {
             PostMessageW(
-                HWND(raw),
+                HWND(raw as *mut _),
                 WM_APP_CONNECTED,
                 WPARAM(if ok { 1 } else { 0 }),
                 LPARAM(0),
@@ -210,6 +210,17 @@ unsafe fn set_button_icon(hwnd: HWND, icon: HICON) {
     }
 }
 
+unsafe fn set_static_icon(hwnd: HWND, icon: HICON) {
+    if !icon.0.is_null() {
+        SendMessageW(
+            hwnd,
+            STM_SETIMAGE,
+            WPARAM(IMAGE_ICON as usize),
+            LPARAM(icon.0 as isize),
+        );
+    }
+}
+
 unsafe fn set_status_icon(hwnd: HWND, color: u32) {
     let st = stmut(hwnd);
     let icon = if color == C_GREEN {
@@ -229,7 +240,7 @@ unsafe fn set_status_icon(hwnd: HWND, color: u32) {
     }
 }
 
-unsafe fn load_imageres_icon(index: i32) -> HICON {
+unsafe fn load_imageres_icon_resource(resource_id: i32) -> HICON {
     let path = std::env::var("SystemRoot")
         .map(|root| format!("{root}\\System32\\imageres.dll"))
         .unwrap_or_else(|_| "C:\\Windows\\System32\\imageres.dll".to_string());
@@ -238,7 +249,7 @@ unsafe fn load_imageres_icon(index: i32) -> HICON {
     let mut small = [HICON(std::ptr::null_mut())];
     let count = ExtractIconExW(
         PCWSTR(path_w.as_ptr()),
-        index,
+        -resource_id,
         Some(large.as_mut_ptr()),
         Some(small.as_mut_ptr()),
         1,
@@ -328,4 +339,3 @@ fn non_empty(value: String) -> Option<String> {
         Some(value)
     }
 }
-

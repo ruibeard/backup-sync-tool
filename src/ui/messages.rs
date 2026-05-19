@@ -163,7 +163,7 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
     let icon_name = names[st.sync_anim_frame % names.len()];
     st.sync_anim_frame = (st.sync_anim_frame + 1) % names.len();
     let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
-    if hicon.0 != 0 {
+    if !hicon.0.is_null() {
         let tip = if !st.sync_status_text.is_empty() {
             format!("Backup Sync Tool - {}", st.sync_status_text)
         } else {
@@ -205,7 +205,7 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
             status_label_hwnd,
             &hstring(if paired { "Paired" } else { "Offline" }),
         );
-        EnableWindow(conn_hwnd, TRUE);
+        EnableWindow(conn_hwnd, true);
         ShowWindow(conn_hwnd, SW_HIDE);
         ShowWindow(status_hwnd, SW_SHOW);
     }
@@ -378,7 +378,7 @@ unsafe fn on_app_pair_started(hwnd: HWND, lp: LPARAM) -> LRESULT {
     if started.pair_id != stmut(hwnd).pair_id {
         return LRESULT(0);
     }
-    show_pair_qr_window(hwnd, &started.code, &started.approve_url);
+    update_pair_qr_window(hwnd, &started.code, &started.approve_url);
     LRESULT(0)
 }
 
@@ -429,4 +429,3 @@ unsafe fn on_tray(hwnd: HWND, lp: LPARAM) -> LRESULT {
     }
     LRESULT(0)
 }
-

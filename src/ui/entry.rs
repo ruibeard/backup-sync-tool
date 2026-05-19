@@ -27,7 +27,7 @@ pub fn run(hinstance: HINSTANCE, start_minimized: bool) {
             lpfnWndProc: Some(pair_qr_wnd_proc),
             hInstance: hinstance,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as isize),
+            hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as usize as *mut _),
             lpszClassName: PAIR_QR_CLASS_NAME,
             ..Default::default()
         };
@@ -212,4 +212,3 @@ unsafe extern "system" fn wnd_proc(
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
-

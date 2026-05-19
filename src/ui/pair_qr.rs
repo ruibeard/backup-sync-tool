@@ -1,4 +1,4 @@
-unsafe fn show_pair_qr_window(parent: HWND, code: &str, approve_url: &str) {
+unsafe fn show_pair_qr_window(parent: HWND) {
     let st = stmut(parent);
     if !st.pair_qr_hwnd.0.is_null() && IsWindow(st.pair_qr_hwnd).as_bool() {
         DestroyWindow(st.pair_qr_hwnd).ok();
@@ -11,8 +11,9 @@ unsafe fn show_pair_qr_window(parent: HWND, code: &str, approve_url: &str) {
     let hfont_code = mkfont("Segoe UI", 18, FW_SEMIBOLD.0 as i32);
     let state = Box::new(PairQrState {
         parent,
-        code: code.to_string(),
-        approve_url: approve_url.to_string(),
+        code: String::new(),
+        approve_url: String::new(),
+        ready: false,
         hfont,
         hfont_b,
         hfont_code,
@@ -67,6 +68,39 @@ unsafe fn show_pair_qr_window(parent: HWND, code: &str, approve_url: &str) {
     UpdateWindow(hwnd);
 }
 
+unsafe fn update_pair_qr_window(parent: HWND, code: &str, approve_url: &str) {
+    let hwnd = stmut(parent).pair_qr_hwnd;
+    if hwnd.0.is_null() || !IsWindow(hwnd).as_bool() {
+        return;
+    }
+
+    {
+        let st = pair_qr_state(hwnd);
+        st.code = code.to_string();
+        st.approve_url = approve_url.to_string();
+        st.ready = true;
+    }
+
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_PAIR_QR_TITLE as i32),
+        &hstring("Scan to pair with the server"),
+    );
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_PAIR_QR_STATUS as i32),
+        &hstring("Waiting for admin approval..."),
+    );
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_PAIR_QR_CODE as i32),
+        &hstring(&format!("Code: {code}")),
+    );
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_PAIR_QR_LINK as i32),
+        &hstring(approve_url),
+    );
+    InvalidateRect(hwnd, None, TRUE);
+    UpdateWindow(hwnd);
+}
+
 unsafe extern "system" fn pair_qr_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -111,8 +145,11 @@ unsafe extern "system" fn pair_qr_wnd_proc(
             match id {
                 IDC_PAIR_QR_LINK => {
                     let st = pair_qr_state(hwnd);
-                    let _ = ShellExecuteW(
-                        hwnd,
+                    if !st.ready {
+                        return LRESULT(0);
+                    }
+                    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                        Some(hwnd),
                         w!("open"),
                         &hstring(&st.approve_url),
                         None,
@@ -148,8 +185,8 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
     mkstatic_align(
         hwnd,
         hi,
-        0,
-        "Scan to pair with the server",
+        IDC_PAIR_QR_TITLE,
+        "Preparing pairing request...",
         margin,
         18,
         PAIR_QR_CLIENT_W - margin * 2,
@@ -160,8 +197,8 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
     mkstatic_align(
         hwnd,
         hi,
-        0,
-        "Waiting for admin approval...",
+        IDC_PAIR_QR_STATUS,
+        "Contacting server...",
         margin,
         332,
         PAIR_QR_CLIENT_W - margin * 2,
@@ -172,8 +209,8 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
     mkstatic_align(
         hwnd,
         hi,
-        0,
-        &format!("Code: {}", st.code),
+        IDC_PAIR_QR_CODE,
+        "Code: pending",
         margin,
         360,
         PAIR_QR_CLIENT_W - margin * 2,
@@ -197,7 +234,7 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         hwnd,
         hi,
         IDC_PAIR_QR_LINK,
-        &st.approve_url,
+        "",
         margin,
         418,
         PAIR_QR_CLIENT_W - margin * 2,
@@ -226,6 +263,35 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
     DeleteObject(br_bg);
 
     let st = pair_qr_state(hwnd);
+    if !st.ready {
+        let br_white = CreateSolidBrush(COLORREF(0x00FFFFFF));
+        let outer = RECT {
+            left: 52,
+            top: 52,
+            right: PAIR_QR_CLIENT_W - 52,
+            bottom: 318,
+        };
+        FillRect(hdc, &outer, br_white);
+        DeleteObject(br_white);
+        let mut text_rc = RECT {
+            left: 78,
+            top: 164,
+            right: PAIR_QR_CLIENT_W - 78,
+            bottom: 210,
+        };
+        SetTextColor(hdc, COLORREF(C_LABEL));
+        SetBkMode(hdc, TRANSPARENT);
+        SelectObject(hdc, st.hfont_b);
+        let mut text: Vec<u16> = "Generating QR code...".encode_utf16().collect();
+        DrawTextW(
+            hdc,
+            &mut text,
+            &mut text_rc,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        return;
+    }
+
     let qr = match QrCode::encode_text(&st.approve_url, QrCodeEcc::Medium) {
         Ok(qr) => qr,
         Err(_) => return,
@@ -305,4 +371,3 @@ unsafe fn center_child_window(parent: HWND, child: HWND, child_w: i32, child_h: 
     )
     .ok();
 }
-

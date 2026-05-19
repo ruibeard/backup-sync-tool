@@ -12,8 +12,8 @@ pub const ID_TRAY_LOGS: usize = 1002;
 pub const ID_TRAY_EXIT: usize = 1003;
 
 unsafe fn fill_tip(dst: &mut [u16; 128], text: &str) {
-    let wide = HSTRING::from(text);
-    let src = &*wide;
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let src = wide.as_slice();
     let len = src.len().min(127);
     dst[..len].copy_from_slice(&src[..len]);
 }
