@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Runtime.Loader;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text;
 using System.Globalization;
@@ -72,6 +74,12 @@ if (loadToPreview is null)
 {
     Console.Error.WriteLine("Method 'XDPeople.Utils.XDLicence.LoadToPreview(string)' was not found.");
     return 1;
+}
+
+if (options.Probe)
+{
+    PrintProbe(options, assembly, xdLicenceType, loadToPreview);
+    return 0;
 }
 
 object? licenceData;
@@ -266,6 +274,9 @@ static Options ParseArgs(string[] args)
             case "--remote-folder":
                 options.RemoteFolder = true;
                 break;
+            case "--probe":
+                options.Probe = true;
+                break;
             case "--all":
                 options.All = true;
                 break;
@@ -300,7 +311,274 @@ static string ReadValue(string[] args, ref int index, string optionName)
 static void PrintUsage()
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  dotnet run --project tools/license-inspector -- [--license <path>] [--xd-dir <path>] [--json] [--all] [--remote-folder]");
+    Console.WriteLine("  dotnet run --project tools/license-inspector -- [--license <path>] [--xd-dir <path>] [--json] [--all] [--remote-folder] [--probe]");
+}
+
+static void PrintProbe(Options options, Assembly assembly, Type licenceType, MethodInfo loadToPreview)
+{
+    var licenceBytes = File.ReadAllBytes(options.LicensePath);
+    var hash = Convert.ToHexString(SHA256.HashData(licenceBytes));
+
+    Console.WriteLine("== Files ==");
+    Console.WriteLine($"LicencePath: {options.LicensePath}");
+    Console.WriteLine($"LicenceBytes: {licenceBytes.Length}");
+    Console.WriteLine($"LicenceSha256: {hash}");
+    Console.WriteLine($"LicenceFirst32Hex: {Convert.ToHexString(licenceBytes.Take(32).ToArray())}");
+    Console.WriteLine($"LicencePrintableRatio: {PrintableRatio(licenceBytes):F3}");
+    Console.WriteLine($"LicenceEntropyBitsPerByte: {EntropyBitsPerByte(licenceBytes):F3}");
+    Console.WriteLine($"XdAssemblyPath: {Path.Combine(options.XdDir, "XDPeople.NET.dll")}");
+    Console.WriteLine($"XdAssemblyName: {assembly.FullName}");
+    Console.WriteLine();
+
+    Console.WriteLine("== Entry Method ==");
+    Console.WriteLine(MethodDisplay(loadToPreview));
+    Console.WriteLine($"ReturnType: {TypeDisplay(loadToPreview.ReturnType)}");
+    Console.WriteLine($"Parameters: {string.Join(", ", loadToPreview.GetParameters().Select(p => $"{TypeDisplay(p.ParameterType)} {p.Name}"))}");
+    Console.WriteLine();
+
+    var methods = new List<MethodBase> { loadToPreview };
+    var seen = new HashSet<string>(StringComparer.Ordinal) { MethodKey(loadToPreview) };
+
+    for (var index = 0; index < methods.Count && index < 40; index++)
+    {
+        var method = methods[index];
+        foreach (var called in CalledAssemblyMethods(method, assembly))
+        {
+            if (seen.Add(MethodKey(called)))
+            {
+                methods.Add(called);
+            }
+        }
+    }
+
+    Console.WriteLine("== Disassembly ==");
+    foreach (var method in methods)
+    {
+        Console.WriteLine();
+        Console.WriteLine(MethodDisplay(method));
+        foreach (var line in Disassemble(method))
+        {
+            Console.WriteLine(line);
+        }
+    }
+}
+
+static string TypeDisplay(Type type) =>
+    type.FullName ?? type.Name;
+
+static string MethodDisplay(MethodBase method)
+{
+    var declaringType = method.DeclaringType is null ? "<global>" : TypeDisplay(method.DeclaringType);
+    return $"{declaringType}::{method.Name}";
+}
+
+static string MethodKey(MethodBase method) =>
+    $"{method.Module.ModuleVersionId}:{method.MetadataToken}";
+
+static IEnumerable<MethodBase> CalledAssemblyMethods(MethodBase method, Assembly assembly)
+{
+    foreach (var instruction in ReadInstructions(method))
+    {
+        if (instruction.Operand is MethodBase called && called.Module.Assembly == assembly)
+        {
+            yield return called;
+        }
+    }
+}
+
+static IEnumerable<string> Disassemble(MethodBase method)
+{
+    var instructions = ReadInstructions(method).ToArray();
+    if (instructions.Length == 0)
+    {
+        yield return "  <no IL>";
+        yield break;
+    }
+
+    foreach (var instruction in instructions)
+    {
+        yield return $"  IL_{instruction.Offset:X4}: {instruction.OpCode.Name,-12} {OperandDisplay(instruction.Operand)}".TrimEnd();
+    }
+}
+
+static string OperandDisplay(object? operand)
+{
+    return operand switch
+    {
+        null => string.Empty,
+        string value => $"\"{value}\"",
+        MethodBase method => MethodDisplay(method),
+        FieldInfo field => $"{TypeDisplay(field.DeclaringType!)}::{field.Name}",
+        Type type => TypeDisplay(type),
+        int value => value.ToString(CultureInfo.InvariantCulture),
+        long value => value.ToString(CultureInfo.InvariantCulture),
+        float value => value.ToString(CultureInfo.InvariantCulture),
+        double value => value.ToString(CultureInfo.InvariantCulture),
+        int[] labels => string.Join(", ", labels.Select(label => $"IL_{label:X4}")),
+        _ => operand.ToString() ?? string.Empty,
+    };
+}
+
+static IReadOnlyList<Instruction> ReadInstructions(MethodBase method)
+{
+    var body = method.GetMethodBody();
+    var il = body?.GetILAsByteArray();
+    if (il is null || il.Length == 0)
+    {
+        return [];
+    }
+
+    var instructions = new List<Instruction>();
+    var module = method.Module;
+    var position = 0;
+
+    while (position < il.Length)
+    {
+        var offset = position;
+        var code = il[position++];
+        OpCode opCode;
+
+        if (code == 0xFE)
+        {
+            opCode = IlOpCodeMap.MultiByte[il[position++]];
+        }
+        else
+        {
+            opCode = IlOpCodeMap.SingleByte[code];
+        }
+
+        object? operand = ReadOperand(il, ref position, offset, opCode, module);
+        instructions.Add(new Instruction(offset, opCode, operand));
+    }
+
+    return instructions;
+}
+
+static object? ReadOperand(byte[] il, ref int position, int offset, OpCode opCode, Module module)
+{
+    try
+    {
+        return opCode.OperandType switch
+        {
+            OperandType.InlineNone => null,
+            OperandType.ShortInlineBrTarget => position + 1 + unchecked((sbyte)il[position++]),
+            OperandType.InlineBrTarget => ReadInt32(il, ref position) + position,
+            OperandType.ShortInlineI => unchecked((sbyte)il[position++]),
+            OperandType.InlineI => ReadInt32(il, ref position),
+            OperandType.InlineI8 => ReadInt64(il, ref position),
+            OperandType.ShortInlineR => ReadSingle(il, ref position),
+            OperandType.InlineR => ReadDouble(il, ref position),
+            OperandType.InlineString => module.ResolveString(ReadInt32(il, ref position)),
+            OperandType.InlineSig => $"signature:0x{ReadInt32(il, ref position):X8}",
+            OperandType.InlineSwitch => ReadSwitchTargets(il, ref position),
+            OperandType.InlineTok or OperandType.InlineType or OperandType.InlineField or OperandType.InlineMethod => ResolveMember(module, ReadInt32(il, ref position)),
+            OperandType.InlineVar => ReadUInt16(il, ref position),
+            OperandType.ShortInlineVar => il[position++],
+            _ => $"operand:{opCode.OperandType}@IL_{offset:X4}",
+        };
+    }
+    catch (Exception ex)
+    {
+        return $"<unresolved: {ex.GetType().Name}: {ex.Message}>";
+    }
+}
+
+static MemberInfo ResolveMember(Module module, int token)
+{
+    try
+    {
+        return module.ResolveMember(token) ?? throw new InvalidOperationException($"Token 0x{token:X8} did not resolve.");
+    }
+    catch
+    {
+        return module.ResolveType(token) ?? throw new InvalidOperationException($"Token 0x{token:X8} did not resolve as a type.");
+    }
+}
+
+static int[] ReadSwitchTargets(byte[] il, ref int position)
+{
+    var count = ReadInt32(il, ref position);
+    var basePosition = position + (count * 4);
+    var labels = new int[count];
+
+    for (var i = 0; i < count; i++)
+    {
+        labels[i] = basePosition + ReadInt32(il, ref position);
+    }
+
+    return labels;
+}
+
+static short ReadInt16(byte[] il, ref int position)
+{
+    var value = BitConverter.ToInt16(il, position);
+    position += 2;
+    return value;
+}
+
+static ushort ReadUInt16(byte[] il, ref int position) =>
+    unchecked((ushort)ReadInt16(il, ref position));
+
+static int ReadInt32(byte[] il, ref int position)
+{
+    var value = BitConverter.ToInt32(il, position);
+    position += 4;
+    return value;
+}
+
+static long ReadInt64(byte[] il, ref int position)
+{
+    var value = BitConverter.ToInt64(il, position);
+    position += 8;
+    return value;
+}
+
+static float ReadSingle(byte[] il, ref int position)
+{
+    var value = BitConverter.ToSingle(il, position);
+    position += 4;
+    return value;
+}
+
+static double ReadDouble(byte[] il, ref int position)
+{
+    var value = BitConverter.ToDouble(il, position);
+    position += 8;
+    return value;
+}
+
+static double PrintableRatio(byte[] bytes)
+{
+    if (bytes.Length == 0)
+    {
+        return 0;
+    }
+
+    var printable = bytes.Count(b => b is 9 or 10 or 13 || b is >= 32 and <= 126);
+    return (double)printable / bytes.Length;
+}
+
+static double EntropyBitsPerByte(byte[] bytes)
+{
+    if (bytes.Length == 0)
+    {
+        return 0;
+    }
+
+    var counts = new int[256];
+    foreach (var b in bytes)
+    {
+        counts[b]++;
+    }
+
+    var entropy = 0.0;
+    foreach (var count in counts.Where(count => count > 0))
+    {
+        var probability = (double)count / bytes.Length;
+        entropy -= probability * Math.Log2(probability);
+    }
+
+    return entropy;
 }
 
 sealed class Options
@@ -310,6 +588,39 @@ sealed class Options
     public bool Json { get; set; }
     public bool All { get; set; }
     public bool RemoteFolder { get; set; }
+    public bool Probe { get; set; }
+}
+
+readonly record struct Instruction(int Offset, OpCode OpCode, object? Operand);
+
+static class IlOpCodeMap
+{
+    public static readonly OpCode[] SingleByte = BuildOpCodeMap(singleByte: true);
+    public static readonly OpCode[] MultiByte = BuildOpCodeMap(singleByte: false);
+
+    private static OpCode[] BuildOpCodeMap(bool singleByte)
+    {
+        var map = new OpCode[256];
+        foreach (var field in typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static))
+        {
+            if (field.GetValue(null) is not OpCode opCode)
+            {
+                continue;
+            }
+
+            var value = unchecked((ushort)opCode.Value);
+            if (singleByte && value <= 0xFF)
+            {
+                map[value] = opCode;
+            }
+            else if (!singleByte && (value & 0xFF00) == 0xFE00)
+            {
+                map[value & 0xFF] = opCode;
+            }
+        }
+
+        return map;
+    }
 }
 
 sealed class XdLoadContext : AssemblyLoadContext
