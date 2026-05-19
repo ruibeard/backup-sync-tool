@@ -485,8 +485,6 @@ unsafe fn build_ui(
         let startup_x = M;
         let startup_w = 126i32;
         let two_way_x = startup_x + startup_w + 12;
-        let two_way_icon_w = 18i32;
-        let two_way_check_x = two_way_x + two_way_icon_w;
         let two_way_w = save_x - two_way_x - 12;
 
         mkcheck(
@@ -501,28 +499,14 @@ unsafe fn build_ui(
             hf_small,
             cfg.start_with_windows,
         );
-        let remote_icon = mkstatic_align(
-            hwnd,
-            hi,
-            IDC_SYNC_REMOTE_ICON,
-            "",
-            two_way_x,
-            check_y + 1,
-            16,
-            16,
-            hf_small,
-            SS_ICON,
-        );
-        set_static_icon(remote_icon, load_stock_icon(SIID_SERVER, false));
-
         mkcheck(
             hwnd,
             hi,
             IDC_SYNC_REMOTE,
             "Download from server",
-            two_way_check_x,
+            two_way_x,
             check_y,
-            two_way_w - two_way_icon_w,
+            two_way_w,
             18,
             hf_small,
             cfg.sync_remote_changes,
@@ -536,7 +520,7 @@ unsafe fn build_ui(
 
         let footer_h = LBL_H;
         let footer_y = y + 2;
-        let update_btn_w = 26i32;
+        let update_btn_w = 52i32;
         let update_btn_h = 20i32;
         let github_btn_w = 20i32;
         let version_w = 72i32;
@@ -563,16 +547,17 @@ unsafe fn build_ui(
             hf_small,
         );
 
-        let update_btn = mkiconbtn(
+        mkbtn(
             hwnd,
             hi,
             IDC_UPDATE_LINK,
+            "Update",
             update_btn_x,
             update_btn_y,
             update_btn_w,
             update_btn_h,
+            hf_small,
         );
-        set_button_icon(update_btn, load_stock_icon(SIID_SOFTWARE, false));
         ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
 
         // Author credit row

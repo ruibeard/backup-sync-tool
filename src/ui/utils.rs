@@ -210,17 +210,6 @@ unsafe fn set_button_icon(hwnd: HWND, icon: HICON) {
     }
 }
 
-unsafe fn set_static_icon(hwnd: HWND, icon: HICON) {
-    if !icon.0.is_null() {
-        SendMessageW(
-            hwnd,
-            STM_SETIMAGE,
-            WPARAM(IMAGE_ICON as usize),
-            LPARAM(icon.0 as isize),
-        );
-    }
-}
-
 unsafe fn set_status_icon(hwnd: HWND, color: u32) {
     let st = stmut(hwnd);
     let icon = if color == C_GREEN {

@@ -719,8 +719,6 @@ unsafe fn layout_main(hwnd: HWND) {
     let startup_x = M;
     let startup_w = 126i32;
     let two_way_x = startup_x + startup_w + 12;
-    let two_way_icon_w = 18i32;
-    let two_way_check_x = two_way_x + two_way_icon_w;
     let two_way_w = save_x - two_way_x - 12;
 
     SetWindowPos(
@@ -734,21 +732,11 @@ unsafe fn layout_main(hwnd: HWND) {
     )
         .ok();
     SetWindowPos(
-        GetDlgItem(hwnd, IDC_SYNC_REMOTE_ICON as i32),
-        None,
-        two_way_x,
-        check_y + 1,
-        16,
-        16,
-        SWP_NOZORDER,
-    )
-        .ok();
-    SetWindowPos(
         GetDlgItem(hwnd, IDC_SYNC_REMOTE as i32),
         None,
-        two_way_check_x,
+        two_way_x,
         check_y,
-        two_way_w - two_way_icon_w,
+        two_way_w,
         18,
         SWP_NOZORDER,
     )
@@ -768,7 +756,7 @@ unsafe fn layout_main(hwnd: HWND) {
 
     let footer_h = LBL_H;
     let footer_y = y + 2;
-    let update_btn_w = 26i32;
+    let update_btn_w = 52i32;
     let update_btn_h = 20i32;
     let github_btn_w = 20i32;
     let version_w = 72i32;

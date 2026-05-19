@@ -45,10 +45,6 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
 
     if is_github {
         draw_github_icon(hdc, &rc, di.hwndItem);
-    } else if id == IDC_PAIR_DEVICE {
-        draw_stock_icon_text(hdc, &rc, di.hwndItem, SIID_KEY, fg);
-    } else if id == IDC_SAVE {
-        draw_stock_icon_text(hdc, &rc, di.hwndItem, SIID_DRIVE35, fg);
     } else if len > 0 {
         let mut buf = vec![0u16; (len + 1) as usize];
         GetWindowTextW(di.hwndItem, &mut buf);
@@ -77,44 +73,6 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
         DrawFocusRect(hdc, &fr);
     }
     LRESULT(1)
-}
-
-unsafe fn draw_stock_icon_text(
-    hdc: HDC,
-    rc: &RECT,
-    hwnd_item: HWND,
-    icon_id: SHSTOCKICONID,
-    fg: u32,
-) {
-    let icon = load_stock_icon(icon_id, false);
-    let size = 16;
-    let x = rc.left + 11;
-    let y = rc.top + ((rc.bottom - rc.top - size) / 2);
-    if !icon.0.is_null() {
-        let _ = DrawIconEx(hdc, x, y, icon, size, size, 0, HBRUSH(std::ptr::null_mut()), DI_NORMAL);
-    }
-
-    let len = GetWindowTextLengthW(hwnd_item);
-    if len <= 0 {
-        return;
-    }
-
-    let mut buf = vec![0u16; (len + 1) as usize];
-    GetWindowTextW(hwnd_item, &mut buf);
-    let hf = HFONT(SendMessageW(hwnd_item, WM_GETFONT, WPARAM(0), LPARAM(0)).0 as *mut _);
-    let of = SelectObject(hdc, hf);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, COLORREF(fg));
-    let mut tr = *rc;
-    tr.left += 23;
-    tr.right -= 6;
-    DrawTextW(
-        hdc,
-        &mut buf[..len as usize],
-        &mut tr,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-    SelectObject(hdc, of);
 }
 
 unsafe fn draw_github_icon(hdc: HDC, rc: &RECT, hwnd_item: HWND) {
