@@ -4,10 +4,10 @@ unsafe fn draw_activity_text(hdc: HDC, rc: &mut RECT, text: &str, format: DRAW_T
 }
 
 fn activity_row_height(row: &ActivityRow) -> i32 {
-    if row.kind == ActivityKind::Done || row.kind == ActivityKind::Info || row.kind == ActivityKind::Error {
-        ACTIVITY_ROW_H_DONE
-    } else {
-        ACTIVITY_ROW_H_ACTIVE
+    match row.kind {
+        ActivityKind::Error if row.detail.is_some() => ACTIVITY_ROW_H_ERROR,
+        ActivityKind::Done | ActivityKind::Info | ActivityKind::Error => ACTIVITY_ROW_H_DONE,
+        _ => ACTIVITY_ROW_H_ACTIVE,
     }
 }
 
@@ -40,6 +40,8 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 label: rest.to_string(),
                 kind: ActivityKind::Info,
                 pct: None,
+                detail: None,
+                relative_path: None,
                 replace_key: None,
             },
         ));
@@ -56,6 +58,8 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 label: message.to_string(),
                 kind: ActivityKind::Info,
                 pct: None,
+                detail: None,
+                relative_path: None,
                 replace_key: None,
             },
         ));
@@ -80,6 +84,8 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                     ActivityKind::Uploading
                 },
                 pct: if done { None } else { Some(pct) },
+                detail: None,
+                relative_path: Some(path.to_string()),
                 replace_key: Some(key),
             },
         ));
@@ -93,6 +99,8 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 label: format!("Uploading {name}"),
                 kind: ActivityKind::Uploading,
                 pct: None,
+                detail: None,
+                relative_path: Some(path.to_string()),
                 replace_key: Some(key),
             },
         ));
@@ -106,19 +114,30 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 label: format!("Uploaded {name}"),
                 kind: ActivityKind::Done,
                 pct: None,
+                detail: None,
+                relative_path: Some(path.to_string()),
                 replace_key: Some(key),
             },
         ));
     }
     if let Some(rest) = message.strip_prefix("Upload failed ") {
-        let name = display_activity_name(rest);
+        let (relative, err) = rest.split_once(": ").unwrap_or((rest, ""));
+        let name = display_activity_name(relative);
+        let key = upload_replace_key(name);
+        let detail = err.trim();
         return Some((
-            None,
+            Some(key.clone()),
             ActivityRow {
-                label: format!("Upload failed {name}"),
+                label: format!("Failed {name}"),
                 kind: ActivityKind::Error,
                 pct: None,
-                replace_key: None,
+                detail: if detail.is_empty() {
+                    None
+                } else {
+                    Some(detail.to_string())
+                },
+                relative_path: Some(relative.to_string()),
+                replace_key: Some(key),
             },
         ));
     }
@@ -131,6 +150,8 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 label: format!("Downloading {name}"),
                 kind: ActivityKind::Downloading,
                 pct: None,
+                detail: None,
+                relative_path: None,
                 replace_key: Some(key),
             },
         ));
@@ -144,6 +165,8 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 label: format!("Downloaded {name}"),
                 kind: ActivityKind::Done,
                 pct: None,
+                detail: None,
+                relative_path: None,
                 replace_key: None,
             },
         ));
@@ -200,10 +223,128 @@ unsafe fn replace_activity_row(hwnd: HWND, replace_key: &str, row: ActivityRow) 
     refresh_activity_listbox(hwnd);
 }
 
+unsafe fn update_retry_failed_button(hwnd: HWND) {
+    let btn = GetDlgItem(hwnd, IDC_RETRY_FAILED as i32);
+    if btn.0.is_null() {
+        return;
+    }
+    let st = stmut(hwnd);
+    let show = st.sync_status_state == crate::sync::ActivityState::Idle as usize
+        && (!st.failed_upload_paths.is_empty() || st.sync_last_failed > 0);
+    let _ = ShowWindow(btn, if show { SW_SHOW } else { SW_HIDE });
+}
+
+fn failed_activity_row(relative: &str, detail: Option<String>) -> (String, ActivityRow) {
+    let name = display_activity_name(relative);
+    let key = upload_replace_key(name);
+    (
+        key.clone(),
+        ActivityRow {
+            label: format!("Failed {name}"),
+            kind: ActivityKind::Error,
+            pct: None,
+            detail,
+            relative_path: Some(relative.to_string()),
+            replace_key: Some(key),
+        },
+    )
+}
+
+unsafe fn finalize_stuck_upload_rows(hwnd: HWND) {
+    let stuck: Vec<(String, ActivityRow)> = {
+        let st = stmut(hwnd);
+        st.activity_rows
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.kind,
+                    ActivityKind::Uploading | ActivityKind::Downloading
+                )
+            })
+            .filter_map(|r| {
+                let relative = r.relative_path.clone().or_else(|| {
+                    r.label
+                        .strip_prefix("Uploading ")
+                        .or_else(|| r.label.strip_prefix("Downloading "))
+                        .map(str::to_string)
+                })?;
+                let (key, row) = failed_activity_row(&relative, Some("Upload did not complete".to_string()));
+                Some((key, row))
+            })
+            .collect()
+    };
+    for (key, row) in stuck {
+        if let Some(relative) = row.relative_path.as_deref() {
+            track_failed_upload_path(hwnd, relative);
+        }
+        insert_failed_activity_row(hwnd, &key, row);
+    }
+}
+
+/// Apply server-reported failed paths and reconcile activity/retry UI after a batch ends.
+unsafe fn apply_sync_batch_failures(hwnd: HWND, failed_paths: &[String]) {
+    for relative in failed_paths {
+        track_failed_upload_path(hwnd, relative);
+        let (key, row) = failed_activity_row(relative, None);
+        insert_failed_activity_row(hwnd, &key, row);
+    }
+    finalize_stuck_upload_rows(hwnd);
+    update_retry_failed_button(hwnd);
+    InvalidateRect(hwnd, Some(&stmut(hwnd).activity_list_rect), TRUE);
+}
+
+unsafe fn track_failed_upload_path(hwnd: HWND, relative: &str) {
+    let st = stmut(hwnd);
+    if !st
+        .failed_upload_paths
+        .iter()
+        .any(|p| p == relative)
+    {
+        st.failed_upload_paths.push(relative.to_string());
+    }
+    update_retry_failed_button(hwnd);
+}
+
+unsafe fn clear_failed_upload_path(hwnd: HWND, relative: &str) {
+    let st = stmut(hwnd);
+    st.failed_upload_paths.retain(|p| p != relative);
+    update_retry_failed_button(hwnd);
+}
+
+unsafe fn insert_failed_activity_row(hwnd: HWND, replace_key: &str, row: ActivityRow) {
+    let st = stmut(hwnd);
+    if st.activity_show_empty {
+        st.activity_show_empty = false;
+        st.activity_rows.clear();
+    }
+    st.activity_rows
+        .retain(|r| r.replace_key.as_deref() != Some(replace_key));
+    st.activity_rows.insert(0, row);
+    if st.activity_rows.len() > MAX_ACTIVITY_ROWS {
+        st.activity_rows.truncate(MAX_ACTIVITY_ROWS);
+    }
+    refresh_activity_listbox(hwnd);
+    InvalidateRect(hwnd, Some(&st.activity_list_rect), TRUE);
+}
+
 unsafe fn apply_activity_log(hwnd: HWND, message: &str) {
     let Some((replace_key, row)) = row_from_log_message(message) else {
         return;
     };
+    if let Some(path) = message.strip_prefix("Uploaded: ") {
+        clear_failed_upload_path(hwnd, path);
+    }
+    if row.kind == ActivityKind::Error {
+        if let Some(relative) = row.relative_path.as_deref() {
+            track_failed_upload_path(hwnd, relative);
+        }
+        if let Some(key) = replace_key.as_deref() {
+            insert_failed_activity_row(hwnd, key, row);
+        } else {
+            push_activity_row(hwnd, row);
+        }
+        return;
+    }
     if stmut(hwnd).activity_show_empty {
         stmut(hwnd).activity_show_empty = false;
         stmut(hwnd).activity_rows.clear();
@@ -236,23 +377,32 @@ unsafe fn on_measure_item(hwnd: HWND, lp: LPARAM) -> LRESULT {
     LRESULT(1)
 }
 
+unsafe fn activity_content_right(rc: &RECT) -> i32 {
+    let scroll_w = GetSystemMetrics(SM_CXVSCROLL);
+    rc.right.saturating_sub(scroll_w.max(16))
+}
+
 unsafe fn draw_activity_row(
     hdc: HDC,
     rc: &RECT,
     row: Option<&ActivityRow>,
     empty: bool,
     anim_frame: usize,
-    hf: HFONT,
+    hf_label: HFONT,
+    hf_status: HFONT,
 ) {
     let hbr = CreateSolidBrush(COLORREF(C_STATUS_BG));
     FillRect(hdc, rc, hbr);
     DeleteObject(hbr);
 
+    let content_right = activity_content_right(rc);
+
     if empty {
-        let of = SelectObject(hdc, hf);
+        let of = SelectObject(hdc, hf_label);
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(0x00999999));
         let mut tr = *rc;
+        tr.right = content_right;
         draw_activity_text(
             hdc,
             &mut tr,
@@ -268,23 +418,30 @@ unsafe fn draw_activity_row(
     };
 
     let done = row.kind == ActivityKind::Done;
+    let is_error = row.kind == ActivityKind::Error;
     let show_bar = row.kind == ActivityKind::Uploading || row.kind == ActivityKind::Downloading;
     let icon = activity_icon_char(row.kind, done);
-    let of = SelectObject(hdc, hf);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, COLORREF(C_LABEL));
 
     let mut top_line = *rc;
-    top_line.left += 8;
+    top_line.left = rc.left + ACTIVITY_PAD_LEFT;
+    top_line.right = content_right - ACTIVITY_PAD_RIGHT;
     top_line.top += 4;
     top_line.bottom = if show_bar {
-        rc.bottom - 10
+        rc.bottom - 9
+    } else if is_error && row.detail.is_some() {
+        rc.bottom - 14
     } else {
         rc.bottom - 4
     };
 
+    let status_right = top_line.right;
+    let status_left = status_right - ACTIVITY_STATUS_W;
+
     let mut icon_rc = top_line;
-    icon_rc.right = icon_rc.left + 14;
+    icon_rc.right = icon_rc.left + 12;
+    let of_icon = SelectObject(hdc, hf_label);
+    SetTextColor(hdc, COLORREF(if is_error { C_RED } else { C_LABEL }));
     draw_activity_text(
         hdc,
         &mut icon_rc,
@@ -293,10 +450,12 @@ unsafe fn draw_activity_row(
     );
 
     let mut label_rc = top_line;
-    label_rc.left += 18;
-    if show_bar {
-        label_rc.right -= 44;
-    }
+    label_rc.left += 16;
+    label_rc.right = if show_bar || done || is_error {
+        status_left - 4
+    } else {
+        top_line.right
+    };
     draw_activity_text(
         hdc,
         &mut label_rc,
@@ -304,7 +463,36 @@ unsafe fn draw_activity_row(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
     );
 
-    if show_bar {
+    if is_error {
+        if let Some(detail) = row.detail.as_deref() {
+            let of_detail = SelectObject(hdc, hf_status);
+            SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
+            let mut detail_rc = *rc;
+            detail_rc.left = label_rc.left;
+            detail_rc.right = top_line.right;
+            detail_rc.top = top_line.bottom;
+            detail_rc.bottom = rc.bottom - 4;
+            draw_activity_text(
+                hdc,
+                &mut detail_rc,
+                detail,
+                DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            SelectObject(hdc, of_detail);
+        }
+        let of_status = SelectObject(hdc, hf_status);
+        SetTextColor(hdc, COLORREF(C_RED));
+        let mut fail_rc = top_line;
+        fail_rc.left = status_left;
+        fail_rc.right = status_right;
+        draw_activity_text(
+            hdc,
+            &mut fail_rc,
+            "Failed",
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        SelectObject(hdc, of_status);
+    } else if show_bar {
         let status = if done {
             Some("Done".to_string())
         } else if let Some(pct) = row.pct {
@@ -313,28 +501,31 @@ unsafe fn draw_activity_row(
             None
         };
         if let Some(status) = status {
-            SetTextColor(hdc, COLORREF(if done { C_GREEN } else { 0x00999999 }));
+            let of_status = SelectObject(hdc, hf_status);
+            SetTextColor(hdc, COLORREF(if done { C_GREEN } else { C_STATUS_MUTED }));
             let mut pct_rc = top_line;
-            pct_rc.left = pct_rc.right - 40;
+            pct_rc.left = status_left;
+            pct_rc.right = status_right;
             draw_activity_text(
                 hdc,
                 &mut pct_rc,
                 &status,
-                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             );
+            SelectObject(hdc, of_status);
         }
 
         let bar_left = top_line.left;
         let bar_right = top_line.right;
-        let bar_top = rc.bottom - 8;
-        let bar_bottom = rc.bottom - 5;
+        let bar_top = rc.bottom - 7;
+        let bar_bottom = rc.bottom - 4;
         let track = RECT {
             left: bar_left,
             top: bar_top,
             right: bar_right,
             bottom: bar_bottom,
         };
-        let br_track = CreateSolidBrush(COLORREF(C_PROGRESS_TRACK));
+        let br_track = CreateSolidBrush(COLORREF(C_ACTIVITY_TRACK));
         FillRect(hdc, &track, br_track);
         DeleteObject(br_track);
 
@@ -363,18 +554,21 @@ unsafe fn draw_activity_row(
             DeleteObject(br_fill);
         }
     } else if done {
+        let of_status = SelectObject(hdc, hf_status);
         SetTextColor(hdc, COLORREF(C_GREEN));
         let mut done_rc = top_line;
-        done_rc.left = done_rc.right - 40;
+        done_rc.left = status_left;
+        done_rc.right = status_right;
         draw_activity_text(
             hdc,
             &mut done_rc,
             "Done",
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
+        SelectObject(hdc, of_status);
     }
 
-    SelectObject(hdc, of);
+    SelectObject(hdc, of_icon);
 
     let hp = CreatePen(PS_SOLID, 1, COLORREF(0x00F0F0F0));
     let op = SelectObject(hdc, hp);
@@ -411,6 +605,7 @@ unsafe fn on_draw_activity_item(lp: LPARAM) -> LRESULT {
         empty && di.itemID == 0,
         (*st).sync_anim_frame,
         (*st).hfont_small,
+        (*st).hfont_activity,
     );
     LRESULT(1)
 }

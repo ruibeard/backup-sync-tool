@@ -12,10 +12,6 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
                 do_open_author(hwnd);
                 return LRESULT(0);
             }
-            IDC_PAIR_DEVICE => {
-                do_pair_device(hwnd);
-                return LRESULT(0);
-            }
             _ => {}
         }
     }
@@ -46,6 +42,8 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         IDC_CONNECT => do_connect(hwnd),
         IDC_UPDATE_LINK => do_update(hwnd),
         IDC_GITHUB => do_open_repo(hwnd),
+        IDC_PAIR_DEVICE => do_pair_device(hwnd),
+        IDC_RETRY_FAILED => do_retry_failed_uploads(hwnd),
         _ => {}
     }
     LRESULT(0)
@@ -144,10 +142,7 @@ unsafe fn do_connect(hwnd: HWND) {
     ShowWindow(GetDlgItem(hwnd, IDC_CONNECT as i32), SW_HIDE);
     // Show amber/yellow dot while connecting.
     set_status_dot_color(hwnd, C_AMBER);
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-        &hstring("Connecting"),
-    );
+    set_status_strip_text(hwnd, "Connecting");
     let raw = hwnd.0 as isize;
     std::thread::spawn(move || {
         let ok = webdav::test_connection(&cfg, &pass).is_ok();
@@ -179,10 +174,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
     ShowWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), SW_HIDE);
     show_pair_qr_window(hwnd);
     set_status_dot_color(hwnd, C_AMBER);
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-        &hstring("Pairing - waiting for approval"),
-    );
+    set_status_strip_text(hwnd, "Pairing \u{00B7} waiting for approval");
 
     std::thread::spawn(move || {
         if detected_folder.is_none() {
@@ -381,8 +373,7 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
         Ok(()) => {
             let st = stmut(hwnd);
             st.sync_status_state = crate::sync::ActivityState::Checking as usize;
-            set_status_strip_text(hwnd, "Checking...");
-            set_status_dot_color(hwnd, C_AMBER);
+            set_status_strip_connection(hwnd);
             if notify_ok {
                 notify_user(hwnd, "Settings saved. Sync started.");
             }
@@ -478,14 +469,14 @@ unsafe fn do_open_logs(hwnd: HWND) {
 }
 
 fn required_client_height(st: &WndState) -> i32 {
-    let folders_h = (LBL_H + 4) + INP_H + GAP + (LBL_H + 4) + INP_H + SECT;
+    let folders_h = (LBL_H + 4) + INP_H + GAP + (LBL_H + 4) + DEST_PATH_H + SECT;
     let activity_h = HDR_H
         + PAD
         + MIN_ACTIVITY_LIST_H
         + st.post_list_gap
         + st.sync_row_h
         + st.post_sync_sect;
-    STATUS_STRIP_H + GAP + HDR_H + 8 + folders_h + activity_h + st.bottom_bar_h
+    CONTENT_TOP_PAD + STATUS_STRIP_H + GAP + ACTION_BTN_H + 8 + folders_h + activity_h + st.bottom_bar_h
 }
 
 unsafe fn layout_main(hwnd: HWND) {
@@ -498,16 +489,16 @@ unsafe fn layout_main(hwnd: HWND) {
     GetClientRect(hwnd, &mut cr).ok();
     let client_h = cr.bottom - cr.top;
 
-    let mut y = 0;
+    let mut y = CONTENT_TOP_PAD;
 
     let dot_size = 10i32;
     let dot_x = M + STATUS_ACCENT_W + 6;
     let dot_y = y + (STATUS_STRIP_H - dot_size) / 2;
     let text_x = dot_x + dot_size + 8;
     (*st).status_strip_rect = RECT {
-        left: 0,
+        left: M,
         top: y,
-        right: WIN_W,
+        right: WIN_W - M,
         bottom: y + STATUS_STRIP_H,
     };
     (*st).server_status_rect = RECT {
@@ -528,14 +519,14 @@ unsafe fn layout_main(hwnd: HWND) {
         .ok();
     y += STATUS_STRIP_H + GAP;
 
-    let pair_x = WIN_W - M - PAIR_LINK_W;
+    let pair_x = WIN_W - M - ACTION_BTN_W;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SERVER_HDR as i32),
         None,
         M,
         y,
         90,
-        HDR_H,
+        ACTION_BTN_H,
         SWP_NOZORDER,
     )
     .ok();
@@ -545,7 +536,7 @@ unsafe fn layout_main(hwnd: HWND) {
         M + 95,
         y,
         pair_x - M - 95 - PAD,
-        HDR_H,
+        ACTION_BTN_H,
         SWP_NOZORDER,
     )
     .ok();
@@ -554,19 +545,19 @@ unsafe fn layout_main(hwnd: HWND) {
         None,
         pair_x,
         y,
-        PAIR_LINK_W,
-        HDR_H,
+        ACTION_BTN_W,
+        ACTION_BTN_H,
         SWP_NOZORDER,
     )
         .ok();
-    y += HDR_H + 8;
+    y += ACTION_BTN_H + 8;
 
     if !(*st).dividers.is_empty() {
         (&mut (*st).dividers)[0] = 0;
     }
 
-    let browse_x = M + INNER_W - BROWSE_W;
-    let open_x = browse_x - PAD - BROWSE_W;
+    let browse_x = M + INNER_W - ACTION_BTN_W;
+    let open_x = browse_x - PAD - ACTION_BTN_W;
     let inp_w = INNER_W - FOLDER_ACTIONS_W - PAD;
 
     SetWindowPos(
@@ -595,8 +586,8 @@ unsafe fn layout_main(hwnd: HWND) {
         None,
         open_x,
         y,
-        BROWSE_W,
-        INP_H,
+        ACTION_BTN_W,
+        ACTION_BTN_H,
         SWP_NOZORDER,
     )
         .ok();
@@ -605,8 +596,8 @@ unsafe fn layout_main(hwnd: HWND) {
         None,
         browse_x,
         y,
-        BROWSE_W,
-        INP_H,
+        ACTION_BTN_W,
+        ACTION_BTN_H,
         SWP_NOZORDER,
     )
         .ok();
@@ -633,17 +624,23 @@ unsafe fn layout_main(hwnd: HWND) {
     )
         .ok();
     y += LBL_H + 4;
+    (*st).dest_path_rect = RECT {
+        left: M,
+        top: y,
+        right: M + INNER_W,
+        bottom: y + DEST_PATH_H,
+    };
     SetWindowPos(
         GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
         None,
-        M,
-        y,
-        INNER_W,
-        INP_H,
+        M + 8,
+        y + 6,
+        INNER_W - 16,
+        DEST_PATH_H - 12,
         SWP_NOZORDER,
     )
         .ok();
-    y += INP_H + SECT;
+    y += DEST_PATH_H + SECT;
 
     if (*st).dividers.len() > 1 {
         (&mut (*st).dividers)[1] = y - SECT / 2;
@@ -665,23 +662,58 @@ unsafe fn layout_main(hwnd: HWND) {
     let footer_top = client_h - (*st).bottom_bar_h;
     let activity_fixed_h = (*st).post_list_gap + (*st).sync_row_h + (*st).post_sync_sect;
     let new_lb_h = (footer_top - y - activity_fixed_h).max(MIN_ACTIVITY_LIST_H);
+    (*st).activity_list_rect = RECT {
+        left: M,
+        top: y,
+        right: M + INNER_W,
+        bottom: y + new_lb_h,
+    };
     SetWindowPos(
         GetDlgItem(hwnd, IDC_ACTIVITY_LIST as i32),
         None,
-        M,
-        y,
-        INNER_W,
-        new_lb_h,
+        M + 1,
+        y + 1,
+        INNER_W - 2,
+        new_lb_h - 2,
         SWP_NOZORDER,
     )
         .ok();
     y += new_lb_h + (*st).post_list_gap;
+    (*st).sync_footer_rect = RECT {
+        left: M,
+        top: y,
+        right: M + INNER_W,
+        bottom: y + (*st).sync_row_h,
+    };
+    let footer_pad_x = 10;
+    let footer_pad_y = 8;
+    let retry_btn_x = M + INNER_W - footer_pad_x - ACTION_BTN_W;
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_RETRY_FAILED as i32),
+        None,
+        retry_btn_x,
+        y + footer_pad_y,
+        ACTION_BTN_W,
+        ACTION_BTN_H,
+        SWP_NOZORDER,
+    )
+        .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
         None,
-        M,
-        y,
-        INNER_W,
+        M + footer_pad_x,
+        y + footer_pad_y,
+        retry_btn_x - M - footer_pad_x - PAD,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+        .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SYNC_ETA as i32),
+        None,
+        M + INNER_W - footer_pad_x - 76,
+        y + footer_pad_y,
+        76,
         LBL_H,
         SWP_NOZORDER,
     )
@@ -689,9 +721,9 @@ unsafe fn layout_main(hwnd: HWND) {
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32),
         None,
-        M,
-        y + LBL_H + 4,
-        INNER_W,
+        M + footer_pad_x,
+        y + footer_pad_y + LBL_H + 6,
+        INNER_W - footer_pad_x * 2,
         8,
         SWP_NOZORDER,
     )
@@ -734,22 +766,21 @@ unsafe fn layout_main(hwnd: HWND) {
         .ok();
     y += row_h;
 
-    let footer_h = LBL_H;
     let footer_y = y + 2;
-    let update_btn_w = 52i32;
-    let update_btn_h = 20i32;
-    let github_btn_w = 20i32;
+    let footer_btn_y = footer_y + (LBL_H - ACTION_BTN_H) / 2;
     let version_w = 72i32;
+    let author_w = 100i32;
     let version_x = M;
-    let github_btn_x = version_x + version_w + 4;
-    let update_btn_x = github_btn_x + github_btn_w + 4;
+    let github_btn_x = version_x + version_w + PAD;
+    let author_x = M + INNER_W - author_w;
+    let update_btn_x = author_x - ACTION_BTN_W - PAD;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_REPO as i32),
         None,
         version_x,
         footer_y,
         version_w,
-        footer_h,
+        LBL_H,
         SWP_NOZORDER,
     )
         .ok();
@@ -757,9 +788,9 @@ unsafe fn layout_main(hwnd: HWND) {
         GetDlgItem(hwnd, IDC_GITHUB as i32),
         None,
         github_btn_x,
-        footer_y,
-        github_btn_w,
-        footer_h,
+        footer_btn_y,
+        GITHUB_BTN_SIZE,
+        GITHUB_BTN_SIZE,
         SWP_NOZORDER,
     )
         .ok();
@@ -767,20 +798,19 @@ unsafe fn layout_main(hwnd: HWND) {
         GetDlgItem(hwnd, IDC_UPDATE_LINK as i32),
         None,
         update_btn_x,
-        footer_y + (footer_h - update_btn_h) / 2,
-        update_btn_w,
-        update_btn_h,
+        footer_btn_y,
+        ACTION_BTN_W,
+        ACTION_BTN_H,
         SWP_NOZORDER,
     )
         .ok();
     let author_h = 14i32;
-    let author_y = footer_y;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_AUTHOR as i32),
         None,
-        update_btn_x + update_btn_w + 12,
-        author_y,
-        200,
+        author_x,
+        footer_y,
+        author_w,
         author_h,
         SWP_NOZORDER,
     )

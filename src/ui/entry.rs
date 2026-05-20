@@ -93,20 +93,56 @@ unsafe extern "system" fn wnd_proc(
             if st.is_null() {
                 return LRESULT(GetStockObject(WHITE_BRUSH).0 as isize);
             }
-            if id == IDC_SERVER_STATUS {
+            if id == IDC_REMOTE_FOLDER {
                 SetTextColor(hdc, COLORREF(C_LABEL));
-                return LRESULT((*st).br_status_strip.0 as isize);
+                return LRESULT((*st).br_path_box.0 as isize);
+            }
+            if id == IDC_SYNC_STATUS {
+                SetTextColor(
+                    hdc,
+                    COLORREF(if (*st).sync_footer_busy {
+                        C_LABEL
+                    } else {
+                        C_STATUS_MUTED
+                    }),
+                );
+                let br = if (*st).sync_footer_busy {
+                    (*st).br_footer_busy
+                } else {
+                    (*st).br_footer_idle
+                };
+                return LRESULT(br.0 as isize);
+            }
+            if id == IDC_SYNC_ETA {
+                SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
+                let br = if (*st).sync_footer_busy {
+                    (*st).br_footer_busy
+                } else {
+                    (*st).br_footer_idle
+                };
+                return LRESULT(br.0 as isize);
             }
             let text_clr = match id {
                 IDC_DEST_CREATED => C_GREEN,
-                IDC_REPO | IDC_PAIR_DEVICE => C_BLUE,
+                IDC_REPO => C_BLUE,
                 IDC_AUTHOR => C_LABEL,
                 IDC_SERVER_HDR | IDC_ACTIVITY_HDR => 0x00888888,
                 IDC_SERVER_URL_LABEL => 0x00777777,
+                IDC_ORIGIN_LABEL | IDC_DEST_LABEL => 0x00555555,
                 _ => C_LABEL,
             };
             SetTextColor(hdc, COLORREF(text_clr));
             LRESULT((*st).br_win.0 as isize)
+        }
+
+        WM_CTLCOLORLISTBOX => {
+            let hdc = HDC(wparam.0 as *mut _);
+            let st = state_ptr(hwnd);
+            if st.is_null() {
+                return LRESULT(GetStockObject(WHITE_BRUSH).0 as isize);
+            }
+            SetBkColor(hdc, COLORREF(C_INPUT_BG));
+            LRESULT((*st).br_input.0 as isize)
         }
 
         WM_CTLCOLOREDIT => {
@@ -192,12 +228,17 @@ unsafe extern "system" fn wnd_proc(
                 tray::remove_tray_icon(hwnd);
                 DeleteObject((*st).br_win);
                 DeleteObject((*st).br_status_strip);
+                DeleteObject((*st).br_path_box);
+                DeleteObject((*st).br_footer_idle);
+                DeleteObject((*st).br_footer_busy);
                 DeleteObject((*st).br_sect);
                 DeleteObject((*st).br_input);
                 DeleteObject((*st).hfont);
                 DeleteObject((*st).hfont_hdr);
                 DeleteObject((*st).hfont_b);
                 DeleteObject((*st).hfont_small);
+                DeleteObject((*st).hfont_activity);
+                DeleteObject((*st).hfont_btn);
                 DeleteObject((*st).hfont_link);
                 drop(Box::from_raw(st));
             }

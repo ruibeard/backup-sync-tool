@@ -294,6 +294,8 @@ const IDC_DEST_LABEL: u16 = 214;
 const IDC_ACTIVITY_HDR: u16 = 215;
 const IDC_PAIR_DEVICE: u16 = 217;
 const IDC_SERVER_URL_LABEL: u16 = 218;
+const IDC_SYNC_ETA: u16 = 219;
+const IDC_RETRY_FAILED: u16 = 220;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -330,24 +332,38 @@ const GAP: i32 = 12; // medium gap (between rows)
 const SECT: i32 = 20; // section separator gap
 const INP_H: i32 = 26; // input height
 const BTN_H: i32 = 30; // bottom-bar primary button height
-const SMALL_BTN_H: i32 = 24; // compact secondary button height
 const HDR_H: i32 = 20; // section heading height
 const LBL_H: i32 = 18; // label text height
-const BROWSE_W: i32 = 64; // text button width
-const FOLDER_ACTIONS_W: i32 = BROWSE_W * 2 + PAD;
-const PAIR_LINK_W: i32 = 72;
-const STATUS_STRIP_H: i32 = 36;
+const ACTION_BTN_W: i32 = 76; // Open / Browse / Connect / Reconnect / footer buttons
+const ACTION_BTN_H: i32 = INP_H;
+const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
+const FOLDER_ACTIONS_W: i32 = ACTION_BTN_W * 2 + PAD;
+const CONTENT_TOP_PAD: i32 = 14; // mockup .body padding above status strip
+const STATUS_STRIP_H: i32 = 38;
 const STATUS_ACCENT_W: i32 = 4;
-const SYNC_FOOTER_H: i32 = 40;
+const DEST_PATH_H: i32 = 30;
+const SYNC_FOOTER_H: i32 = 44;
 const C_STATUS_BG: u32 = 0x00FFFFFF;
+const C_DEST_PATH_BG: u32 = C_FOOTER_IDLE_BG;
+const C_DEST_PATH_BORDER: u32 = C_FOOTER_IDLE_BORDER;
+const C_PANEL_BORDER: u32 = 0x00CCCCCC;
+const C_FOOTER_IDLE_BG: u32 = 0x00FAFAFA;
+const C_FOOTER_IDLE_BORDER: u32 = 0x00E0E0E0;
+const C_FOOTER_BUSY_BORDER: u32 = 0x00F5D9C5;
+const C_STATUS_MUTED: u32 = 0x00888888;
+const C_PROGRESS_TRACK: u32 = 0x00E0E0E0;
 
 const MIN_ACTIVITY_LIST_H: i32 = 96;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
 const MAX_ACTIVITY_ROWS: usize = 200;
 const ACTIVITY_ROW_H_DONE: i32 = 22;
-const ACTIVITY_ROW_H_ACTIVE: i32 = 34;
+const ACTIVITY_ROW_H_ACTIVE: i32 = 32;
+const ACTIVITY_ROW_H_ERROR: i32 = 36;
+const ACTIVITY_PAD_LEFT: i32 = 8;
+const ACTIVITY_PAD_RIGHT: i32 = 8;
+const ACTIVITY_STATUS_W: i32 = 36;
 const C_PROGRESS_MINI: u32 = 0x00FFA500; // #00A5FF BGR
-const C_PROGRESS_TRACK: u32 = 0x00E8E8E8;
+const C_ACTIVITY_TRACK: u32 = 0x00E8E8E8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActivityKind {
@@ -363,6 +379,10 @@ struct ActivityRow {
     label: String,
     kind: ActivityKind,
     pct: Option<u8>,
+    /// Short error detail for failed uploads.
+    detail: Option<String>,
+    /// Relative path under watch_folder (for retry).
+    relative_path: Option<String>,
     /// Match key for replacing in-flight rows (e.g. "upload:invoice.pdf").
     replace_key: Option<String>,
 }
@@ -390,13 +410,25 @@ struct WndState {
     status_dot_color: u32,
     server_status_rect: RECT,
     status_strip_rect: RECT,
+    status_strip_display: String,
+    /// Optional second segment on the status strip (usually empty; connection-only strip).
+    status_strip_secondary: String,
+    activity_list_rect: RECT,
+    dest_path_rect: RECT,
+    sync_footer_rect: RECT,
+    sync_footer_busy: bool,
     hfont: HFONT,
     hfont_hdr: HFONT,
     hfont_b: HFONT,
     hfont_small: HFONT,
+    hfont_activity: HFONT,
+    hfont_btn: HFONT,
     hfont_link: HFONT,
     br_win: HBRUSH,
     br_status_strip: HBRUSH,
+    br_path_box: HBRUSH,
+    br_footer_idle: HBRUSH,
+    br_footer_busy: HBRUSH,
     br_sect: HBRUSH,
     br_input: HBRUSH,
     focused_edit: u16,
@@ -424,6 +456,8 @@ struct WndState {
     auth_failure_notified: bool,
     activity_rows: Vec<ActivityRow>,
     activity_show_empty: bool,
+    /// Relative paths that failed in the last batch(es); cleared on successful upload.
+    failed_upload_paths: Vec<String>,
 }
 
 struct PairResult {

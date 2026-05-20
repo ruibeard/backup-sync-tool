@@ -6,6 +6,8 @@ unsafe fn on_create(hwnd: HWND) {
     let hfont_hdr = mkfont("Segoe UI", 10, FW_SEMIBOLD.0 as i32);
     let hfont_b = mkfont("Segoe UI", 12, FW_SEMIBOLD.0 as i32);
     let hfont_small = mkfont("Segoe UI", 9, FW_NORMAL.0 as i32);
+    let hfont_activity = mkfont("Segoe UI", 8, FW_NORMAL.0 as i32);
+    let hfont_btn = mkfont("Segoe UI", 11, FW_NORMAL.0 as i32);
     let hfont_link = mkfont_underline("Segoe UI", 9, FW_NORMAL.0 as i32);
 
     let mut cfg = crate::config::load();
@@ -48,13 +50,24 @@ unsafe fn on_create(hwnd: HWND) {
         status_dot_color: C_RED,
         server_status_rect: RECT::default(),
         status_strip_rect: RECT::default(),
+        status_strip_display: String::new(),
+        status_strip_secondary: String::new(),
+        activity_list_rect: RECT::default(),
+        dest_path_rect: RECT::default(),
+        sync_footer_rect: RECT::default(),
+        sync_footer_busy: false,
         hfont,
         hfont_hdr,
         hfont_b,
         hfont_small,
+        hfont_activity,
+        hfont_btn,
         hfont_link,
         br_win: CreateSolidBrush(COLORREF(C_WIN_BG)),
         br_status_strip: CreateSolidBrush(COLORREF(C_STATUS_BG)),
+        br_path_box: CreateSolidBrush(COLORREF(C_DEST_PATH_BG)),
+        br_footer_idle: CreateSolidBrush(COLORREF(C_FOOTER_IDLE_BG)),
+        br_footer_busy: CreateSolidBrush(COLORREF(C_STATUS_BG)),
         br_sect: CreateSolidBrush(COLORREF(C_WIN_BG)),
         br_input: CreateSolidBrush(COLORREF(C_INPUT_BG)),
         focused_edit: 0,
@@ -73,6 +86,7 @@ unsafe fn on_create(hwnd: HWND) {
         auth_failure_notified: false,
         activity_rows: Vec::new(),
         activity_show_empty: true,
+        failed_upload_paths: Vec::new(),
     });
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
 
@@ -85,6 +99,7 @@ unsafe fn on_create(hwnd: HWND) {
         hfont_hdr,
         hfont_b,
         hfont_small,
+        hfont_btn,
         hfont_link,
     );
     apply_server_readonly(hwnd);
@@ -130,10 +145,7 @@ unsafe fn on_create(hwnd: HWND) {
     if !cfg.webdav_url.is_empty() && !cfg.username.is_empty() && !pass.is_empty() {
         let cfg2 = cfg.clone();
         let pass2 = pass.clone();
-        let _ = SetWindowTextW(
-            GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-            &hstring("Connecting"),
-        );
+        set_status_strip_text(hwnd, "Connecting");
         std::thread::spawn(move || {
             let ok = crate::webdav::test_connection(&cfg2, &pass2).is_ok();
             PostMessageW(
@@ -177,42 +189,43 @@ unsafe fn build_ui(
     hf_hdr: HFONT,
     hf_b: HFONT,
     hf_small: HFONT,
+    hf_btn: HFONT,
     hf_link: HFONT,
 ) {
     let st = &mut *state_ptr(hwnd);
-    let mut y = 0;
+    let mut y = CONTENT_TOP_PAD;
 
     // ── STATUS STRIP + SERVER ───────────────────────────────────────────────────
     {
         st.status_strip_rect = RECT {
-            left: 0,
+            left: M,
             top: y,
-            right: WIN_W,
+            right: WIN_W - M,
             bottom: y + STATUS_STRIP_H,
         };
         let dot_size = 10i32;
         let dot_x = M + STATUS_ACCENT_W + 6;
         let dot_y = y + (STATUS_STRIP_H - dot_size) / 2;
         let text_x = dot_x + dot_size + 8;
+        let status_initial = if is_paired(cfg) {
+            "Connected".to_string()
+        } else {
+            "Not paired".to_string()
+        };
+        st.status_strip_display = status_initial;
+        st.status_strip_secondary.clear();
         mkstatic(
             hwnd,
             hi,
             IDC_SERVER_STATUS,
-            if is_paired(cfg) {
-                if !cfg.watch_folder.is_empty() && !cfg.remote_folder.is_empty() {
-                    "Checking..."
-                } else {
-                    "All synced \u{00B7} paired with server"
-                }
-            } else {
-                "Not paired"
-            },
+            "",
             text_x,
-            y + (STATUS_STRIP_H - LBL_H) / 2,
-            WIN_W - M - text_x,
-            LBL_H,
+            y,
+            1,
+            1,
             hf_b,
         );
+        ShowWindow(GetDlgItem(hwnd, IDC_SERVER_STATUS as i32), SW_HIDE);
         st.server_status_rect = RECT {
             left: dot_x,
             top: dot_y,
@@ -222,7 +235,7 @@ unsafe fn build_ui(
         install_server_tooltip(hwnd, hi);
         y += STATUS_STRIP_H + GAP;
 
-        let pair_x = WIN_W - M - PAIR_LINK_W;
+        let pair_x = WIN_W - M - ACTION_BTN_W;
         mkstatic(
             hwnd,
             hi,
@@ -231,7 +244,7 @@ unsafe fn build_ui(
             M,
             y,
             90,
-            HDR_H,
+            ACTION_BTN_H,
             hf_hdr,
         );
         mkstatic_align(
@@ -242,33 +255,33 @@ unsafe fn build_ui(
             M + 95,
             y,
             pair_x - M - 95 - PAD,
-            HDR_H,
+            ACTION_BTN_H,
             hf_small,
             SS_RIGHT,
         );
         let pair_label = if is_paired(cfg) {
-            "Pair again"
+            "Reconnect"
         } else {
-            "Pair"
+            "Connect"
         };
-        mklink(
+        mkbtn_grey(
             hwnd,
             hi,
             IDC_PAIR_DEVICE,
             pair_label,
             pair_x,
             y,
-            PAIR_LINK_W,
-            HDR_H,
-            hf_link,
+            ACTION_BTN_W,
+            ACTION_BTN_H,
+            hf_btn,
         );
-        y += HDR_H + 8;
+        y += ACTION_BTN_H + 8;
     }
 
     // ── FOLDERS ───────────────────────────────────────────────────────────────
     {
-        let browse_x = M + INNER_W - BROWSE_W;
-        let open_x = browse_x - PAD - BROWSE_W;
+        let browse_x = M + INNER_W - ACTION_BTN_W;
+        let open_x = browse_x - PAD - ACTION_BTN_W;
         let inp_w = INNER_W - FOLDER_ACTIONS_W - PAD;
 
         mkstatic(
@@ -301,9 +314,9 @@ unsafe fn build_ui(
             "Open",
             open_x,
             y,
-            BROWSE_W,
-            INP_H,
-            hf,
+            ACTION_BTN_W,
+            ACTION_BTN_H,
+            hf_btn,
         );
         mkbtn_grey(
             hwnd,
@@ -312,9 +325,9 @@ unsafe fn build_ui(
             "Browse",
             browse_x,
             y,
-            BROWSE_W,
-            INP_H,
-            hf,
+            ACTION_BTN_W,
+            ACTION_BTN_H,
+            hf_btn,
         );
         y += INP_H + GAP;
 
@@ -352,18 +365,24 @@ unsafe fn build_ui(
         );
         ShowWindow(GetDlgItem(hwnd, IDC_DEST_CREATED as i32), SW_HIDE);
         y += LBL_H + 4;
+        st.dest_path_rect = RECT {
+            left: M,
+            top: y,
+            right: M + INNER_W,
+            bottom: y + DEST_PATH_H,
+        };
         mkstatic(
             hwnd,
             hi,
             IDC_REMOTE_FOLDER,
             &destination_text,
-            M,
-            y,
-            INNER_W,
-            INP_H,
-            hf,
+            M + 10,
+            y + 7,
+            INNER_W - 20,
+            DEST_PATH_H - 14,
+            hf_small,
         );
-        y += INP_H + SECT;
+        y += DEST_PATH_H + SECT;
 
         st.dividers.push(y - SECT / 2);
     }
@@ -386,33 +405,75 @@ unsafe fn build_ui(
         let lb_h = 140i32;
         st.activity_list_top = y;
         st.activity_list_h = lb_h;
-        mklb(hwnd, hi, IDC_ACTIVITY_LIST, M, y, INNER_W, lb_h, hf_small);
+        st.activity_list_rect = RECT {
+            left: M,
+            top: y,
+            right: M + INNER_W,
+            bottom: y + lb_h,
+        };
+        mklb(hwnd, hi, IDC_ACTIVITY_LIST, M + 1, y + 1, INNER_W - 2, lb_h - 2, hf_small);
         refresh_activity_listbox(hwnd);
         y += lb_h;
         st.post_list_gap = PAD;
         y += PAD;
 
         st.sync_row_h = SYNC_FOOTER_H;
+        st.sync_footer_rect = RECT {
+            left: M,
+            top: y,
+            right: M + INNER_W,
+            bottom: y + SYNC_FOOTER_H,
+        };
+        let footer_pad_x = 10;
+        let footer_pad_y = 8;
+        let retry_btn_x = M + INNER_W - footer_pad_x - ACTION_BTN_W;
+        mkbtn_grey(
+            hwnd,
+            hi,
+            IDC_RETRY_FAILED,
+            "Retry failed",
+            retry_btn_x,
+            y + footer_pad_y,
+            ACTION_BTN_W,
+            ACTION_BTN_H,
+            hf_btn,
+        );
+        ShowWindow(GetDlgItem(hwnd, IDC_RETRY_FAILED as i32), SW_HIDE);
         mkstatic(
             hwnd,
             hi,
             IDC_SYNC_STATUS,
-            "Ready",
-            M,
-            y,
-            INNER_W,
+            "All synced",
+            M + footer_pad_x,
+            y + footer_pad_y,
+            retry_btn_x - M - footer_pad_x - PAD,
             LBL_H,
             hf_small,
         );
-        mkprogress(
+        mkstatic_align(
+            hwnd,
+            hi,
+            IDC_SYNC_ETA,
+            "",
+            M + INNER_W - footer_pad_x - 76,
+            y + footer_pad_y,
+            76,
+            LBL_H,
+            hf_small,
+            SS_RIGHT,
+        );
+        let prog = mkprogress(
             hwnd,
             hi,
             IDC_SYNC_PROGRESS,
-            M,
-            y + LBL_H + 4,
-            INNER_W,
+            M + footer_pad_x,
+            y + footer_pad_y + LBL_H + 6,
+            INNER_W - footer_pad_x * 2,
             8,
         );
+        SendMessageW(prog, PBM_SETBARCOLOR, WPARAM(0), LPARAM(C_BLUE as isize));
+        SendMessageW(prog, PBM_SETBKCOLOR, WPARAM(0), LPARAM(C_PROGRESS_TRACK as isize));
+        ShowWindow(prog, SW_HIDE);
         y += SYNC_FOOTER_H;
         st.post_sync_sect = SECT;
         y += SECT;
@@ -459,33 +520,38 @@ unsafe fn build_ui(
 
         y += row_h;
 
-        let footer_h = LBL_H;
         let footer_y = y + 2;
-        let update_btn_w = 52i32;
-        let update_btn_h = 20i32;
-        let github_btn_w = 20i32;
+        let footer_btn_y = footer_y + (LBL_H - ACTION_BTN_H) / 2;
         let version_w = 72i32;
+        let author_w = 100i32;
         let version_x = M;
-        let github_btn_x = version_x + version_w + 4;
-        let update_btn_x = github_btn_x + github_btn_w + 4;
-        let update_btn_y = footer_y + (footer_h - update_btn_h) / 2;
+        let github_btn_x = version_x + version_w + PAD;
+        let author_x = M + INNER_W - author_w;
+        let update_btn_x = author_x - ACTION_BTN_W - PAD;
         let ver_label = concat!("v", env!("CARGO_PKG_VERSION"));
 
         mklink(
-            hwnd, hi, IDC_REPO, ver_label, version_x, footer_y, version_w, footer_h, hf_link,
+            hwnd,
+            hi,
+            IDC_REPO,
+            ver_label,
+            version_x,
+            footer_y,
+            version_w,
+            LBL_H,
+            hf_link,
         );
 
-        // GitHub icon button (owner-drawn, draws GitHub octocat-like icon)
         mkbtn(
             hwnd,
             hi,
             IDC_GITHUB,
             "",
             github_btn_x,
-            footer_y,
-            github_btn_w,
-            footer_h,
-            hf_small,
+            footer_btn_y,
+            GITHUB_BTN_SIZE,
+            GITHUB_BTN_SIZE,
+            hf_btn,
         );
 
         mkbtn(
@@ -494,26 +560,25 @@ unsafe fn build_ui(
             IDC_UPDATE_LINK,
             "Update",
             update_btn_x,
-            update_btn_y,
-            update_btn_w,
-            update_btn_h,
-            hf_small,
+            footer_btn_y,
+            ACTION_BTN_W,
+            ACTION_BTN_H,
+            hf_btn,
         );
         ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
 
-        // Author credit row
         let author_h = LBL_H - 2;
-        let author_y = footer_y;
-        mklink(
+        mkstatic_align(
             hwnd,
             hi,
             IDC_AUTHOR,
             "Rui Almeida",
-            update_btn_x + update_btn_w + 12,
-            author_y,
-            200,
+            author_x,
+            footer_y,
+            author_w,
             author_h,
             hf_link,
+            SS_RIGHT | SS_NOTIFY,
         );
         st.bottom_bar_h = row_h + author_h + 4 + M;
     }
@@ -777,7 +842,7 @@ unsafe fn mklb(
     hf: HFONT,
 ) -> HWND {
     let c = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
+        WINDOW_EX_STYLE::default(),
         w!("LISTBOX"),
         w!(""),
         WS_CHILD

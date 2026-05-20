@@ -8,9 +8,9 @@ unsafe fn set_status_dot_color(hwnd: HWND, color: u32) {
 unsafe fn restore_pair_idle_controls(hwnd: HWND) {
     let st = stmut(hwnd);
     let label = if st.auth_failure_notified || is_paired(&st.config) {
-        "Pair again"
+        "Reconnect"
     } else {
-        "Pair"
+        "Connect"
     };
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring(label));
@@ -19,24 +19,17 @@ unsafe fn restore_pair_idle_controls(hwnd: HWND) {
 
 unsafe fn restore_server_status_after_pair_cancel(hwnd: HWND) {
     let st = stmut(hwnd);
-    let status = if st.auth_failure_notified {
-        "Pair again required"
-    } else if is_paired(&st.config) {
-        if st.connected {
-            "All synced \u{00B7} paired with server"
-        } else {
-            "Offline"
-        }
-    } else {
-        "Pair cancelled"
-    };
-    let color = if st.auth_failure_notified || !st.connected {
-        C_RED
-    } else {
-        C_GREEN
-    };
-    let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_SERVER_STATUS as i32), &hstring(status));
-    set_status_dot_color(hwnd, color);
+    if st.auth_failure_notified {
+        set_status_strip_text(hwnd, "Reconnect required");
+        set_status_dot_color(hwnd, C_RED);
+        return;
+    }
+    if is_paired(&st.config) {
+        set_status_strip_connection(hwnd);
+        return;
+    }
+    set_status_strip_text(hwnd, "Pair cancelled");
+    set_status_dot_color(hwnd, C_RED);
 }
 
 fn is_root_remote_folder(folder: &str) -> bool {
@@ -53,31 +46,77 @@ fn sync_is_busy(st: &WndState) -> bool {
         || st.sync_status_state == crate::sync::ActivityState::Syncing as usize
 }
 
+unsafe fn set_status_strip_display(hwnd: HWND, primary: &str, secondary: Option<&str>) {
+    let st = stmut(hwnd);
+    st.status_strip_display = primary.to_string();
+    st.status_strip_secondary = secondary.unwrap_or("").to_string();
+    InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+}
+
 unsafe fn set_status_strip_text(hwnd: HWND, text: &str) {
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-        &hstring(text),
-    );
+    set_status_strip_display(hwnd, text, None);
+}
+
+unsafe fn set_status_strip_connection(hwnd: HWND) {
+    let st = stmut(hwnd);
+    if st.auth_failure_notified {
+        return;
+    }
+    let (text, color) = if !is_paired(&st.config) {
+        if st.connected {
+            ("Connected".to_string(), C_GREEN)
+        } else {
+            ("Not paired".to_string(), C_AMBER)
+        }
+    } else if st.connected {
+        ("Connected".to_string(), C_GREEN)
+    } else {
+        ("Offline".to_string(), C_RED)
+    };
+    set_status_strip_text(hwnd, &text);
+    set_status_dot_color(hwnd, color);
+}
+
+unsafe fn idle_sync_footer_label(st: &WndState, failed: usize) -> String {
+    if failed > 0 {
+        if failed == 1 {
+            "1 upload failed".to_string()
+        } else {
+            format!("{failed} uploads failed")
+        }
+    } else if is_paired(&st.config) {
+        "All synced".to_string()
+    } else {
+        "Ready".to_string()
+    }
 }
 
 unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, usize)) {
     let status_hwnd = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
+    let eta_hwnd = GetDlgItem(hwnd, IDC_SYNC_ETA as i32);
     let prog_hwnd = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
     let is_checking = state == crate::sync::ActivityState::Checking as usize;
     let is_syncing = state == crate::sync::ActivityState::Syncing as usize;
     let is_busy = is_checking || is_syncing;
+    let st = stmut(hwnd);
+    let was_busy = st.sync_footer_busy;
+    st.sync_footer_busy = is_busy && (progress.1 > 0 || is_checking);
+    if was_busy != st.sync_footer_busy {
+        InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
+    }
 
     if is_busy && progress.1 > 0 {
         let done = progress.0.min(progress.1);
         let pct = (done * 100) / progress.1;
-        let st = stmut(hwnd);
-        let text = if let Some(eta_idx) = st.sync_status_text.find("ETA ") {
-            let eta = st.sync_status_text[eta_idx..].trim();
-            format!("{done} / {} files \u{00B7} {pct}% \u{00B7} {eta}", progress.1)
+        let main = format!("{done} / {} files \u{00B7} {pct}%", progress.1);
+        let _ = SetWindowTextW(status_hwnd, &hstring(&main));
+        let eta = st.sync_status_text.split("ETA ").nth(1).map(|s| s.trim());
+        if let Some(eta) = eta {
+            let _ = SetWindowTextW(eta_hwnd, &hstring(&format!("ETA {eta}")));
         } else {
-            format!("{done} / {} files \u{00B7} {pct}%", progress.1)
-        };
-        let _ = SetWindowTextW(status_hwnd, &hstring(&text));
+            let _ = SetWindowTextW(eta_hwnd, &hstring(""));
+        }
+        ShowWindow(prog_hwnd, SW_SHOW);
         SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(pct), LPARAM(0));
     } else if is_busy {
         let text = if is_checking {
@@ -86,53 +125,25 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
             "Syncing..."
         };
         let _ = SetWindowTextW(status_hwnd, &hstring(text));
+        let _ = SetWindowTextW(eta_hwnd, &hstring(""));
+        ShowWindow(prog_hwnd, SW_HIDE);
         SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
     } else {
-        let _ = SetWindowTextW(status_hwnd, &hstring("Ready"));
+        let st = stmut(hwnd);
+        let failed = progress.2.max(st.sync_last_failed);
+        let label = idle_sync_footer_label(st, failed);
+        let _ = SetWindowTextW(status_hwnd, &hstring(&label));
+        let _ = SetWindowTextW(eta_hwnd, &hstring(""));
+        ShowWindow(prog_hwnd, SW_HIDE);
         SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
+        update_retry_failed_button(hwnd);
     }
 }
 
 unsafe fn update_status_strip_after_sync(hwnd: HWND, state: usize, progress: (usize, usize, usize)) {
     let st = stmut(hwnd);
-    let is_checking = state == crate::sync::ActivityState::Checking as usize;
-    let is_syncing = state == crate::sync::ActivityState::Syncing as usize;
-    let is_idle = state == crate::sync::ActivityState::Idle as usize;
-    let failed = progress.2;
-
-    if is_checking {
-        set_status_strip_text(hwnd, "Checking...");
-        set_status_dot_color(hwnd, C_AMBER);
-    } else if is_syncing {
-        let text = if progress.1 > 0 {
-            let done = progress.0.min(progress.1);
-            let remaining = progress.1.saturating_sub(done);
-            if remaining == 1 {
-                "Syncing \u{00B7} 1 file remaining".to_string()
-            } else {
-                format!("Syncing \u{00B7} {remaining} files remaining")
-            }
-        } else {
-            "Syncing".to_string()
-        };
-        set_status_strip_text(hwnd, &text);
-        set_status_dot_color(hwnd, C_AMBER);
-    } else if is_idle && is_paired(&st.config) {
-        if failed > 0 {
-            let text = if failed == 1 {
-                "1 upload failed".to_string()
-            } else {
-                format!("{failed} uploads failed")
-            };
-            set_status_strip_text(hwnd, &text);
-            set_status_dot_color(hwnd, C_AMBER);
-        } else if st.connected {
-            set_status_strip_text(hwnd, "All synced \u{00B7} paired with server");
-            set_status_dot_color(hwnd, C_GREEN);
-        } else {
-            set_status_strip_text(hwnd, "Offline");
-            set_status_dot_color(hwnd, C_RED);
-        }
+    if !st.auth_failure_notified {
+        set_status_strip_connection(hwnd);
     }
     update_sync_footer(hwnd, state, progress);
 }
@@ -142,31 +153,13 @@ unsafe fn update_status_strip_from_connection(hwnd: HWND) {
     if sync_is_busy(st) || st.auth_failure_notified {
         return;
     }
-    if st.sync_last_failed > 0 {
-        let text = if st.sync_last_failed == 1 {
-            "1 upload failed".to_string()
-        } else {
-            format!("{} uploads failed", st.sync_last_failed)
-        };
-        set_status_strip_text(hwnd, &text);
-        set_status_dot_color(hwnd, C_AMBER);
-        return;
-    }
-    if is_paired(&st.config) {
-        if st.connected {
-            set_status_strip_text(hwnd, "All synced \u{00B7} paired with server");
-            set_status_dot_color(hwnd, C_GREEN);
-        } else {
-            set_status_strip_text(hwnd, "Offline");
-            set_status_dot_color(hwnd, C_RED);
-        }
-    } else if st.connected {
-        set_status_strip_text(hwnd, "Connected");
-        set_status_dot_color(hwnd, C_GREEN);
-    } else {
-        set_status_strip_text(hwnd, "Offline");
-        set_status_dot_color(hwnd, C_RED);
-    }
+    set_status_strip_connection(hwnd);
+    let progress = (
+        st.sync_progress_done,
+        st.sync_progress_total,
+        st.sync_last_failed,
+    );
+    update_sync_footer(hwnd, st.sync_status_state, progress);
 }
 
 fn required_pair_field(value: Option<String>, name: &str) -> std::result::Result<String, String> {
@@ -210,8 +203,10 @@ unsafe fn apply_server_readonly(hwnd: HWND) {
         "Destination folder"
     };
     let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_DEST_LABEL as i32), &hstring(label));
-    stmut(hwnd).min_client_h = required_client_height(stmut(hwnd));
+    let st = stmut(hwnd);
+    st.min_client_h = required_client_height(st);
     layout_main(hwnd);
+    InvalidateRect(hwnd, Some(&st.dest_path_rect), TRUE);
 }
 
 unsafe fn start_connection_check(hwnd: HWND) {
@@ -260,6 +255,87 @@ unsafe fn ensure_default_watch_folder(hwnd: HWND) {
 }
 
 /// Stop any running engine and start a new one when credentials and folders are set.
+unsafe fn do_retry_failed_uploads(hwnd: HWND) {
+    read_ctrls(hwnd, stmut(hwnd));
+    let paths = stmut(hwnd).failed_upload_paths.clone();
+    if paths.is_empty() {
+        notify_user(hwnd, "No failed uploads to retry.");
+        return;
+    }
+    {
+        let st = stmut(hwnd);
+        st.failed_upload_paths.clear();
+        st.sync_last_failed = 0;
+    }
+    update_retry_failed_button(hwnd);
+    let cfg = stmut(hwnd).config.clone();
+    let pass = stmut(hwnd).password_plain.clone();
+    if !is_sync_configured(&cfg, &pass) {
+        notify_user(hwnd, "Cannot retry: sync is not configured.");
+        return;
+    }
+    let count = paths.len();
+    let retry_msg = if count == 1 {
+        "Retrying 1 failed upload...".to_string()
+    } else {
+        format!("Retrying {count} failed uploads...")
+    };
+    notify_user(hwnd, &retry_msg);
+    set_status_strip_connection(hwnd);
+
+    let raw = hwnd.0 as isize;
+    let log: crate::sync::LogFn = Arc::new(move |m: String| {
+        logs::append(&m);
+        let s = Box::new(m);
+        unsafe {
+            PostMessageW(
+                HWND(raw as *mut _),
+                WM_APP_LOG,
+                WPARAM(0),
+                LPARAM(Box::into_raw(s) as isize),
+            )
+            .ok();
+        }
+    });
+    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
+        PostMessageW(
+            HWND(raw as *mut _),
+            WM_APP_SYNC_ACTIVITY,
+            WPARAM(info.state as usize),
+            LPARAM(
+                Box::into_raw(Box::new((
+                    info.completed,
+                    info.total,
+                    info.failed,
+                    info.failed_paths,
+                ))) as isize,
+            ),
+        )
+        .ok();
+    });
+    let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
+        PostMessageW(HWND(raw as *mut _), WM_APP_AUTH_FAILED, WPARAM(0), LPARAM(0)).ok();
+    });
+
+    std::thread::spawn(move || {
+        activity(crate::sync::ActivityInfo {
+            state: crate::sync::ActivityState::Syncing,
+            completed: 0,
+            total: count,
+            failed: 0,
+            failed_paths: Vec::new(),
+        });
+        let batch = crate::sync::retry_uploads(&cfg, &pass, &paths, &log, &activity, &auth_failed);
+        activity(crate::sync::ActivityInfo {
+            state: crate::sync::ActivityState::Idle,
+            completed: batch.succeeded,
+            total: batch.attempted,
+            failed: batch.failed,
+            failed_paths: batch.failed_paths,
+        });
+    });
+}
+
 unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     read_ctrls(hwnd, stmut(hwnd));
     ensure_default_watch_folder(hwnd);
@@ -302,7 +378,14 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
             HWND(raw as *mut _),
             WM_APP_SYNC_ACTIVITY,
             WPARAM(info.state as usize),
-            LPARAM(Box::into_raw(Box::new((info.completed, info.total, info.failed))) as isize),
+            LPARAM(
+                Box::into_raw(Box::new((
+                    info.completed,
+                    info.total,
+                    info.failed,
+                    info.failed_paths,
+                ))) as isize,
+            ),
         )
         .ok();
     });

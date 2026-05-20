@@ -48,12 +48,13 @@ Target layout reference: **`mockups.html`**.
 
 Paired window highlights:
 
-- Quiet status strip (left accent + short text) instead of the old full-width ribbon.
-- **Pair again** link on the server row; **Open** then **Browse** on the backup folder row.
+- Quiet status strip (left accent + dot + text) inset from the window edges with top padding (matches `mockups.html` `.body` / `.quiet-status` spacing). Shows **connection only** (**Connected** / **Offline** / **Not paired**; amber/red for errors such as reconnect required). Sync state (**All synced**, **Checking…**, **Syncing**, file progress `done/total · pct%`, upload failures) lives in the **sync footer** above the checkboxes — not duplicated in the strip. Failed uploads also appear as red rows at the top of Recent Activity; **Retry failed** appears in the sync footer when paths are known.
+- **Connect** / **Reconnect** button on the server row (grey, same style as Open/Browse); **Open** then **Browse** on the backup folder row.
 - Labels: “Backup folder on this PC”, “Server destination”, “Sync from server”.
+- **Server destination** is a read-only path panel (soft grey fill, light border) — not an editable field; only the backup folder row uses a real edit control.
 - **No Save button** — settings auto-save on browse + checkbox changes (`persist_settings` in `src/ui/commands.rs`).
 - Footer batch progress: `msctls_progress32` + `done/total · pct%` (+ ETA when syncing).
-- Recent activity: owner-draw list with inline mini bars (indeterminate while uploading; stepped 0–100% from sync logs).
+- Recent activity: owner-draw list with inline mini bars (indeterminate while uploading; stepped 0–100% from sync logs). Failed uploads appear at the top in red with the error detail; **Retry failed** in the sync footer re-queues those paths.
 
 ## Project Layout
 
@@ -308,7 +309,7 @@ Ongoing behavior:
 - Every 24 hours, `heal_missing_uploads` re-uploads local files missing or size-mismatched on the server (even when `sync_remote_changes` is off).
 - Optional remote-to-local sync polls remote state every 60 seconds when `sync_remote_changes` is enabled.
 - `.backupsynctool-manifest.json` is ignored by scanning and the file watcher.
-- Ribbon **All synced** means idle with zero failed uploads in the last batch; failures show amber **N upload(s) failed**.
+- Sync footer **All synced** means idle with zero failed uploads in the last batch; failures show **N upload(s) failed** in the footer (top strip stays **Connected** when online).
 
 ### Manifest files
 
@@ -344,7 +345,7 @@ On WebDAV **HTTP 401** only:
 
 - `WebDavError::AuthFailed` is raised; automatic sync is paused and the engine is stopped.
 - A local activity/log message says the credentials are invalid.
-- The UI shows **Pair again required** and asks the user/admin to pair again.
+- The UI shows **Reconnect required** and asks the user/admin to reconnect (pair again).
 - The app does not call `/api/device/credential-refresh/*`.
 
 **HTTP 403** is **not** treated as invalid credentials (common on Storage Box `MKCOL` when a folder already exists). `MKCOL` treats 403 and 405 as success; non-auth folder-create errors are logged and upload still attempts `PUT`.
@@ -385,7 +386,7 @@ Visible pairing states:
 | Unpaired | `Not paired` / connection status | `Pair` | `Destination folder` |
 | Pairing | `Waiting for approval` | `Waiting...` | `Destination folder` |
 | Paired | `Paired` / `All synced` | `Pair` | `Approved folder` |
-| Credential failure | `Pair again required` | `Pair again` | `Approved folder` |
+| Credential failure | `Reconnect required` | `Reconnect` | `Approved folder` |
 
 Visual rules:
 

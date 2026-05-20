@@ -18,6 +18,9 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
 
     let (bg, fg, bc) = if disabled {
         (C_GREY_BTN, 0x00AAAAAA_u32, C_GREY_BORDER)
+    } else if is_borderless {
+        let b = if pressed { C_GREY_HOV } else { C_WIN_BG };
+        (b, C_GREY_TXT, C_WIN_BG)
     } else if is_blue {
         let b = if pressed { C_BLUE_HOV } else { C_BLUE };
         (b, C_BLUE_TXT, b)

@@ -7,10 +7,11 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
 
 unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let progress = if lp.0 != 0 {
-        *Box::from_raw(lp.0 as *mut (usize, usize, usize))
+        *Box::from_raw(lp.0 as *mut (usize, usize, usize, Vec<String>))
     } else {
-        (0, 0, 0)
+        (0, 0, 0, Vec::new())
     };
+    let failed_paths = progress.3.clone();
     let (icon_name, mut status_text) = match wp.0 {
         x if x == crate::sync::ActivityState::Checking as usize => {
             (w!("APP_ICON_SYNCING"), "Checking...")
@@ -88,7 +89,14 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if !is_syncing {
         st.sync_status_text = status_text.to_string();
     }
-    update_status_strip_after_sync(hwnd, wp.0, progress);
+    let is_idle = wp.0 == crate::sync::ActivityState::Idle as usize;
+    if is_idle && progress.2 > 0 {
+        apply_sync_batch_failures(hwnd, &failed_paths);
+    } else if is_idle && progress.2 == 0 && was_syncing {
+        finalize_stuck_upload_rows(hwnd);
+        update_retry_failed_button(hwnd);
+    }
+    update_status_strip_after_sync(hwnd, wp.0, (progress.0, progress.1, progress.2));
     LRESULT(0)
 }
 
@@ -125,7 +133,8 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
         };
         tray::set_tray_icon_and_tip(hwnd, hicon, &tip);
     }
-    InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+    InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
+    InvalidateRect(hwnd, Some(&st.activity_list_rect), TRUE);
     let hlb = activity_list_hwnd(hwnd);
     if !hlb.0.is_null() {
         InvalidateRect(hlb, None, TRUE);
@@ -140,7 +149,7 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
     let conn_hwnd = GetDlgItem(hwnd, IDC_CONNECT as i32);
     if st.auth_failure_notified {
         set_status_dot_color(hwnd, C_RED);
-        set_status_strip_text(hwnd, "Pair again required");
+        set_status_strip_text(hwnd, "Reconnect required");
         restore_pair_idle_controls(hwnd);
         return LRESULT(0);
     }
@@ -167,9 +176,9 @@ unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
     restore_pair_idle_controls(hwnd);
     notify_user_status(
         hwnd,
-        "Pair again required",
+        "Reconnect required",
         C_RED,
-        "Credentials invalid. Automatic sync paused; pair again to continue.",
+        "Credentials invalid. Automatic sync paused; use Reconnect to continue.",
     );
     let _ = SetForegroundWindow(hwnd);
     LRESULT(0)
@@ -192,10 +201,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             restore_server_status_after_pair_cancel(hwnd);
             return LRESULT(0);
         }
-        let _ = SetWindowTextW(
-            GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-            &hstring("Pair failed"),
-        );
+        set_status_strip_text(hwnd, "Pair failed");
         notify_user_status(hwnd, "Pair failed", C_RED, &err.message);
         let _ = SetForegroundWindow(hwnd);
         return LRESULT(0);
@@ -296,8 +302,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         st.sync_status_state = crate::sync::ActivityState::Checking as usize;
         st.sync_status_text = "Checking...".to_string();
     }
-    set_status_strip_text(hwnd, "Checking...");
-    set_status_dot_color(hwnd, C_AMBER);
+    set_status_strip_connection(hwnd);
     apply_server_readonly(hwnd);
     start_connection_check(hwnd);
     let _ = SetForegroundWindow(hwnd);

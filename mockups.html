@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Backup Sync Tool — Target UI</title>
+<title>Backup Sync Tool — UI reference (shipped)</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -13,7 +13,7 @@
     line-height: 1.5;
   }
   h1 { text-align: center; margin-bottom: 6px; font-weight: 600; font-size: 22px; }
-  .subtitle { text-align: center; font-size: 12px; color: #666; margin-bottom: 28px; }
+  .subtitle { text-align: center; font-size: 12px; color: #666; margin-bottom: 28px; max-width: 640px; margin-left: auto; margin-right: auto; }
 
   .states {
     display: grid;
@@ -46,32 +46,38 @@
     font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase;
     letter-spacing: 0.4px;
   }
-  .row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
   .row.between { justify-content: space-between; }
   .label { color: #555; font-size: 11px; margin-bottom: 3px; }
+  /* Editable folder path — sunken field */
   input[type="text"] {
     flex: 1; border: 1px solid #ccc; padding: 5px 8px; font-size: 12px;
     border-radius: 3px; background: #fff; font-family: inherit; min-width: 0;
+    box-shadow: inset 1px 1px 2px rgba(0,0,0,0.08);
   }
+  /* All grey owner-draw buttons: 76×26 px in the app */
   .btn {
-    border: 1px solid #bbb; background: #e8e8e8; padding: 5px 12px; font-size: 11px;
-    border-radius: 4px; font-family: inherit; color: #333; white-space: nowrap;
+    width: 76px; height: 26px; flex-shrink: 0;
+    border: 1px solid #bbb; background: #e8e8e8; font-size: 11px;
+    border-radius: 4px; font-family: inherit; color: #333;
+    display: inline-flex; align-items: center; justify-content: center;
   }
-  .link-btn {
-    background: none; border: none; color: #2B4FA3; text-decoration: underline;
-    font-size: 11px; cursor: pointer; padding: 0; font-family: inherit;
-  }
+  .btn-icon { font-size: 14px; line-height: 1; }
+  .link { color: #2B4FA3; text-decoration: underline; cursor: pointer; }
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .dot.green { background: #287A28; }
+  /* Read-only server destination — flat panel, not an input */
   .path-value {
-    font-size: 12px; color: #333; padding: 6px 8px; background: #fff;
-    border: 1px solid #ddd; border-radius: 3px; margin-bottom: 10px; word-break: break-all;
+    font-size: 11px; color: #333; padding: 7px 10px;
+    background: #fafafa; border: 1px solid #e0e0e0; border-radius: 4px;
+    margin-bottom: 10px; word-break: break-all;
   }
   .quiet-status {
-    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 8px;
     background: #fff; border-left: 4px solid #287A28; margin-bottom: 12px; font-size: 12px;
   }
   .quiet-status.syncing { border-left-color: #00A5FF; }
+  .status-muted { color: #888; font-size: 11px; font-weight: normal; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .spinner {
     width: 12px; height: 12px; border: 2px solid #ddd; border-top-color: #2B4FA3;
@@ -80,6 +86,7 @@
   .listbox {
     border: 1px solid #ccc; background: #fff; min-height: 100px;
     border-radius: 2px; margin-bottom: 10px; overflow: hidden;
+    padding-right: 18px; /* room for scrollbar — text must not sit under it */
   }
   .listbox-empty {
     display: flex; align-items: center; justify-content: center;
@@ -90,8 +97,8 @@
   .listbox-item-top {
     display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 4px;
   }
-  .listbox-item-top .pct { margin-left: auto; color: #999; font-size: 10px; }
-  .listbox-item-top .done { margin-left: auto; color: #287A28; font-size: 10px; }
+  .listbox-item-top .pct { margin-left: auto; color: #888; font-size: 10px; padding-right: 2px; }
+  .listbox-item-top .done { margin-left: auto; color: #287A28; font-size: 10px; padding-right: 2px; }
   .mini-progress { height: 3px; background: #e8e8e8; border-radius: 2px; overflow: hidden; }
   .mini-progress .bar { height: 100%; background: #00A5FF; border-radius: 2px; }
   .sync-footer {
@@ -99,6 +106,10 @@
     padding: 8px 10px; margin-bottom: 10px;
   }
   .sync-footer.idle { border-color: #e0e0e0; background: #fafafa; }
+  .sync-footer.idle .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .listbox-item-top.failed { color: #c00; }
+  .listbox-item-top .failed-badge { margin-left: auto; color: #c00; font-size: 10px; padding-right: 2px; }
+  .listbox-item-detail { font-size: 10px; color: #888; padding-left: 22px; margin-top: 2px; }
   .progress-wrap { width: 100%; height: 8px; background: #e0e0e0; border-radius: 2px; overflow: hidden; margin-top: 6px; }
   .progress-wrap .bar { height: 100%; background: #2B4FA3; border-radius: 2px; }
   .footer { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 11px; color: #444; }
@@ -112,12 +123,10 @@
     font-size: 10px; color: #2B4FA3; font-weight: 700;
   }
   .meta-footer {
-    display: flex; justify-content: space-between; margin-top: 8px;
-    font-size: 11px; color: #666;
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 8px; font-size: 11px; color: #666;
   }
-  .link { color: #2B4FA3; text-decoration: underline; }
-
-  /* Implementation plan */
+  .meta-left { display: flex; align-items: center; gap: 8px; }
   .plan {
     max-width: 920px; margin: 0 auto; background: #fff; border-radius: 8px;
     padding: 24px 28px; box-shadow: 0 4px 20px rgba(0,0,0,0.08);
@@ -126,7 +135,7 @@
   .plan h2 { font-size: 18px; margin-bottom: 4px; color: #222; }
   .plan h3 { font-size: 14px; margin: 20px 0 8px; color: #333; }
   .plan p, .plan li { color: #444; margin-bottom: 8px; }
-  .plan ul, .plan ol { margin: 0 0 12px 20px; }
+  .plan ul { margin: 0 0 12px 20px; }
   .plan code { background: #f4f4f4; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
   .plan table {
     width: 100%; border-collapse: collapse; font-size: 12px; margin: 12px 0;
@@ -135,14 +144,12 @@
     border: 1px solid #ddd; padding: 8px 10px; text-align: left; vertical-align: top;
   }
   .plan th { background: #f5f5f5; }
-  .phase { display: inline-block; font-size: 10px; font-weight: 700; padding: 2px 8px;
-    border-radius: 3px; background: #e8f0fe; color: #2B4FA3; margin-right: 6px; }
 </style>
 </head>
 <body>
 
-<h1>Backup Sync Tool — Target UI</h1>
-<p class="subtitle">Practical Sync + inline row progress · system title bar · no Save button</p>
+<h1>Backup Sync Tool — UI reference</h1>
+<p class="subtitle">Matches the shipped Win32 UI · system title bar · no Save button · auto-save on browse/checkboxes</p>
 
 <div class="states">
   <div>
@@ -155,30 +162,35 @@
       <div class="body">
         <div class="quiet-status">
           <span class="dot green"></span>
-          <span><strong>All synced</strong> · paired with server</span>
+          <span><strong>Connected</strong></span>
         </div>
         <div class="row between" style="margin-bottom:10px;">
           <span class="section-title">Server</span>
           <span style="font-size:11px;color:#555;">u561272-sub1.your-storagebox.de</span>
-          <button class="link-btn">Pair again</button>
+          <button type="button" class="btn">Reconnect</button>
         </div>
         <div class="label">Backup folder on this PC</div>
         <div class="row">
-          <input type="text" value="C:\XDSoftware\backups" readonly>
-          <button class="btn">Open</button>
-          <button class="btn">Browse</button>
+          <input type="text" value="C:\XDSoftware\backups">
+          <button type="button" class="btn">Open</button>
+          <button type="button" class="btn">Browse</button>
         </div>
         <div class="label">Server destination</div>
         <div class="path-value">XDPT.59655-Palmeira-Minimercado</div>
         <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
         <div class="listbox"><div class="listbox-empty">No recent activity</div></div>
-        <div class="sync-footer idle"><span style="font-size:11px;color:#888;">Ready</span></div>
+        <div class="sync-footer idle">
+          <div class="row"><span style="font-size:11px;color:#555;"><strong>All synced</strong></span><button type="button" class="btn" style="display:none;">Retry failed</button></div>
+        </div>
         <div class="footer">
           <span class="check"><span class="check-box checked"></span> Start with Windows</span>
           <span class="check"><span class="check-box checked"></span> Sync from server</span>
         </div>
         <div class="meta-footer">
-          <span><span class="link">v2026.0.3</span></span>
+          <div class="meta-left">
+            <span class="link">v2026.0.3</span>
+            <button type="button" class="btn btn-icon" title="GitHub">⌾</button>
+          </div>
           <span class="link">Rui Almeida</span>
         </div>
       </div>
@@ -193,20 +205,20 @@
         <div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div>
       </div>
       <div class="body">
-        <div class="quiet-status syncing">
-          <span class="spinner"></span>
-          <span><strong>Syncing</strong> · 3 files remaining</span>
+        <div class="quiet-status">
+          <span class="dot green"></span>
+          <span><strong>Connected</strong></span>
         </div>
         <div class="row between" style="margin-bottom:10px;">
           <span class="section-title">Server</span>
           <span style="font-size:11px;color:#555;">u561272-sub1.your-storagebox.de</span>
-          <button class="link-btn">Pair again</button>
+          <button type="button" class="btn">Reconnect</button>
         </div>
         <div class="label">Backup folder on this PC</div>
         <div class="row">
-          <input type="text" value="C:\XDSoftware\backups" readonly>
-          <button class="btn">Open</button>
-          <button class="btn">Browse</button>
+          <input type="text" value="C:\XDSoftware\backups">
+          <button type="button" class="btn">Open</button>
+          <button type="button" class="btn">Browse</button>
         </div>
         <div class="label">Server destination</div>
         <div class="path-value">XDPT.59655-Palmeira-Minimercado</div>
@@ -214,21 +226,21 @@
         <div class="listbox">
           <div class="listbox-item-stacked">
             <div class="listbox-item-top">
-              <span>⬆</span><span>Uploading invoice_2024.pdf</span>
-              <span class="pct">67%</span>
+              <span>⬆</span><span>Uploading wRTF2PDF03.dll</span>
+              <span class="pct">0%</span>
             </div>
-            <div class="mini-progress"><div class="bar" style="width:67%"></div></div>
+            <div class="mini-progress"><div class="bar" style="width:35%"></div></div>
           </div>
           <div class="listbox-item-stacked">
             <div class="listbox-item-top">
-              <span>⬇</span><span>Downloading backup_003.zip</span>
-              <span class="pct">12%</span>
+              <span>⬆</span><span>Uploading wRTF2PDF01.dll</span>
+              <span class="pct">0%</span>
             </div>
-            <div class="mini-progress"><div class="bar" style="width:12%"></div></div>
+            <div class="mini-progress"><div class="bar" style="width:20%"></div></div>
           </div>
           <div class="listbox-item-stacked">
             <div class="listbox-item-top">
-              <span>✓</span><span>Uploaded settings.json</span>
+              <span>✓</span><span>Uploaded WebView2Loader.dll</span>
               <span class="done">Done</span>
             </div>
           </div>
@@ -245,7 +257,10 @@
           <span class="check"><span class="check-box checked"></span> Sync from server</span>
         </div>
         <div class="meta-footer">
-          <span><span class="link">v2026.0.3</span></span>
+          <div class="meta-left">
+            <span class="link">v2026.0.3</span>
+            <button type="button" class="btn btn-icon" title="GitHub">⌾</button>
+          </div>
           <span class="link">Rui Almeida</span>
         </div>
       </div>
@@ -254,93 +269,29 @@
 </div>
 
 <section class="plan">
-  <h2>Implementation plan (engineer handoff)</h2>
-  <p>Visual spec: mockups above. Stack: raw Win32 (<code>windows-rs</code>), no UI framework. Keep system title bar.</p>
+  <h2>Shipped UI notes (Win32)</h2>
+  <p>Authoritative product spec remains <code>README.md</code>. This page is the visual reference for the paired main window.</p>
 
-  <h3><span class="phase">Phase 1</span> Layout &amp; chrome</h3>
-  <ol>
-    <li><strong>Remove tall colour ribbon</strong> — stop painting full-width green/amber <code>ribbon_rect</code> in <code>src/ui/paint.rs</code>. Replace with a quiet status strip: white background, 4px left accent (<code>#287A28</code> idle, <code>#00A5FF</code> syncing, red on error). Reuse <code>IDC_SERVER_STATUS</code> static or a new owner-draw child for text + spinner.</li>
-    <li><strong>Server row</strong> — keep <code>IDC_SERVER_HDR</code> + <code>IDC_SERVER_URL_LABEL</code>; add <strong>Pair again</strong> as owner-draw link (same pattern as <code>IDC_REPO</code> / <code>IDC_AUTHOR</code> in <code>draw.rs</code>), not a grey <code>BS_PUSHBUTTON</code>. Wire to existing <code>do_pair_device</code>. Hide while pairing (same as today’s Re-pair button).</li>
-    <li><strong>Rename labels</strong> in <code>create.rs</code> / <code>messages.rs</code>:
-      <ul>
-        <li>“Local backup folder” → “Backup folder on this PC”</li>
-        <li>“Approved folder” → “Server destination”</li>
-        <li>“Download from server” → “Sync from server”</li>
-      </ul>
-    </li>
-    <li><strong>Button order</strong> — swap layout: <code>Open</code> then <code>Browse</code> (<code>IDC_OPEN_LOCAL_FOLDER</code> before <code>IDC_BROWSE_LOCAL</code> in <code>layout_window</code>).</li>
-    <li><strong>Remove Save button</strong> — hide/remove <code>IDC_SAVE</code> from <code>create.rs</code> and <code>layout_window</code>. Reclaim width in bottom bar.</li>
-    <li><strong>Footer sync strip</strong> — place above checkboxes:
-      <ul>
-        <li>Idle: static “Ready” (or hide strip).</li>
-        <li>Busy: text <code>{done}/{total} · {pct}%</code> + optional ETA (logic already in <code>on_app_sync_activity</code>).</li>
-        <li>Wire <code>mkprogress</code> → <code>IDC_SYNC_PROGRESS</code> (<code>msctls_progress32</code>); update via <code>PBM_SETPOS</code> in <code>on_app_sync_activity</code> when <code>progress.1 &gt; 0</code>.</li>
-      </ul>
-    </li>
-    <li><strong>Window height</strong> — update <code>calc_window_height</code> / <code>layout_window</code> in <code>commands.rs</code>: subtract <code>RIBBON_H</code>, add status-strip + sync-footer heights; adjust <code>WndState</code> layout fields in <code>common.rs</code>.</li>
-  </ol>
-
-  <h3><span class="phase">Phase 2</span> Auto-save (replaces Save)</h3>
-  <p>Extract <code>do_save</code> body in <code>commands.rs</code> into <code>persist_settings(hwnd) -&gt; Result&lt;(), String&gt;</code> (read ctrls, validate, lock paired fields, encrypt, <code>config::save</code>, <code>apply_startup</code>, <code>restart_sync_engine</code>).</p>
+  <h3>Controls</h3>
   <table>
-    <tr><th>Trigger</th><th>Action</th></tr>
-    <tr><td>Browse folder accepted</td><td><code>persist_settings</code> if path valid &amp; changed</td></tr>
-    <tr><td><code>IDC_START_WINDOWS</code> toggled</td><td><code>BN_CLICKED</code> → persist (compare bool first)</td></tr>
-    <tr><td><code>IDC_SYNC_REMOTE</code> toggled</td><td>same; restart engine when download pref changes</td></tr>
-    <tr><td>Pair success</td><td>unchanged — already saves in <code>on_app_pair_result</code></td></tr>
-  </table>
-  <p>On failure: <code>notify_user_status</code> ribbon/strip message — no <code>MessageBox</code>. On success after user edit: optional “Settings saved” in activity list (once).</p>
-  <p>Update README “When the engine starts” table: remove Save row; add Browse + checkbox triggers.</p>
-
-  <h3><span class="phase">Phase 3</span> Inline row progress (hard)</h3>
-  <p>Standard <code>LISTBOX</code> is single-line strings today (<code>WM_APP_LOG</code> → <code>LB_INSERTSTRING</code>). Mock shows <strong>two-line rows with mini bars</strong> — requires one of:</p>
-  <ul>
-    <li><strong>Option A (recommended):</strong> Replace activity list with owner-draw list (<code>LBS_OWNERDRAWFIXED</code>) or a child panel that paints rows in <code>WM_DRAWITEM</code> / <code>WM_PAINT</code>. Store <code>Vec&lt;ActivityRow&gt;</code> in <code>WndState</code> (icon, label, optional pct 0–100, done flag).</li>
-    <li><strong>Option B:</strong> Keep listbox for text; draw mini bars in parent client area under list — fragile on resize/scroll.</li>
-  </ul>
-  <p><strong>Data for per-row %:</strong> not emitted today. <code>sync.rs</code> logs <code>Uploading: path</code> but <code>ActivityInfo</code> only has batch <code>completed/total</code>. For real per-file bars:</p>
-  <ul>
-    <li>Extend upload path to report bytes sent / file size (or stepped 0/50/100).</li>
-    <li>Post per-file updates on <code>WM_APP_LOG</code> or new <code>WM_APP_FILE_PROGRESS</code>.</li>
-    <li>Until then: indeterminate mini bar (animated) on rows matching <code>activity_replaces</code> “Uploading …” — still improves UX vs text-only.</li>
-  </ul>
-
-  <h3><span class="phase">Phase 4</span> Status copy &amp; tray</h3>
-  <ul>
-    <li>Quiet strip text mirrors ribbon rules in <code>update_ribbon_after_sync</code> (<code>utils.rs</code>) — shorten for strip width (“All synced”, “Syncing · 3 left”).</li>
-    <li>Tray tooltip can keep detailed <code>{done}/{total} · ETA · {pct}%</code> from <code>on_app_sync_activity</code>.</li>
-    <li>Remove duplicate % from old ribbon-only placement once footer bar exists.</li>
-  </ul>
-
-  <h3>Files to touch (checklist)</h3>
-  <table>
-    <tr><th>File</th><th>Changes</th></tr>
-    <tr><td><code>src/ui/create.rs</code></td><td>Controls, labels, order, hide Save, add progress + link</td></tr>
-    <tr><td><code>src/ui/commands.rs</code></td><td><code>layout_window</code>, <code>persist_settings</code>, browse/checkbox handlers</td></tr>
-    <tr><td><code>src/ui/paint.rs</code></td><td>Remove ribbon fill; status strip accent if owner-draw</td></tr>
-    <tr><td><code>src/ui/draw.rs</code></td><td>Pair-again link colours; optional list row drawing</td></tr>
-    <tr><td><code>src/ui/messages.rs</code></td><td>Progress bar position; activity row model; pair label text</td></tr>
-    <tr><td><code>src/ui/utils.rs</code></td><td>Rename dest label helper; status strip updates</td></tr>
-    <tr><td><code>src/ui/common.rs</code></td><td>Layout constants, <code>WndState</code>, maybe <code>ActivityRow</code></td></tr>
-    <tr><td><code>src/ui/entry.rs</code></td><td><code>WM_DRAWITEM</code> for owner-draw list / link</td></tr>
-    <tr><td><code>src/sync.rs</code></td><td>(Phase 3) per-file progress callbacks</td></tr>
-    <tr><td><code>README.md</code></td><td>UI description, triggers, label names</td></tr>
+    <tr><th>Area</th><th>Implementation</th></tr>
+    <tr><td>Status strip</td><td>Painted in <code>paint.rs</code>, inset <code>M</code> horizontally with <code>CONTENT_TOP_PAD</code> (14px) above. Connection only (<strong>Connected</strong> / <strong>Offline</strong>).</td></tr>
+    <tr><td>Sync footer</td><td><strong>All synced</strong>, <strong>Checking…</strong>, batch <code>done/total · pct%</code>, failures, <strong>Retry failed</strong>.</td></tr>
+    <tr><td>Server row</td><td><code>IDC_SERVER_HDR</code>, <code>IDC_SERVER_URL_LABEL</code>, <code>IDC_PAIR_DEVICE</code> grey button (<code>Connect</code> / <code>Reconnect</code>).</td></tr>
+    <tr><td>Backup folder</td><td>Editable <code>IDC_WATCH_FOLDER</code> + <code>Open</code> + <code>Browse</code>.</td></tr>
+    <tr><td>Server destination</td><td><strong>Read-only</strong> — <code>dest_path_rect</code> painted panel (#fafafa / #e0e0e0) + <code>IDC_REMOTE_FOLDER</code> static text. Not an edit control.</td></tr>
+    <tr><td>Recent activity</td><td>Owner-draw <code>IDC_ACTIVITY_LIST</code>: 9pt rows, 8pt status, scrollbar gutter. Failed uploads pin to top (red, error detail). <code>Retry failed</code> in sync footer.</td></tr>
+    <tr><td>Sync footer</td><td><code>IDC_SYNC_STATUS</code>, <code>IDC_SYNC_PROGRESS</code>, <code>IDC_SYNC_ETA</code>.</td></tr>
+    <tr><td>Meta footer</td><td>Version link · GitHub icon button · <code>Update</code> (hidden until available) · <code>Rui Almeida</code> right.</td></tr>
   </table>
 
-  <h3>Acceptance criteria</h3>
-  <ul>
-    <li>Paired window matches mockup structure (idle + syncing screenshots).</li>
-    <li>No Save button; folder + checkbox changes persist and restart sync without extra click.</li>
-    <li>Batch progress visible as footer bar + fraction/ETA text while syncing.</li>
-    <li>Activity rows show mini progress for in-flight uploads (determinate when data available, else indeterminate).</li>
-    <li>Pair again works from link; paired server/destination fields stay locked.</li>
-    <li><code>cargo build --release</code> clean; manual test: pair, browse, toggle sync-from-server, watch footer bar + list during upload.</li>
-  </ul>
+  <h3>Shared button size</h3>
+  <p>All grey/owner-draw pushbuttons use <code>ACTION_BTN_W</code> × <code>ACTION_BTN_H</code> (76×26 px, height matches folder input).</p>
 
-  <h3>Out of scope</h3>
+  <h3>Auto-save (no Save)</h3>
   <ul>
-    <li>Custom borderless title bar (keep system caption).</li>
-    <li>egui / webview / third-party UI.</li>
+    <li><code>persist_settings</code> on Browse + checkbox toggles.</li>
+    <li>Pair success still saves and starts sync via <code>on_app_pair_result</code>.</li>
   </ul>
 </section>
 

@@ -247,10 +247,10 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         hi,
         IDC_PAIR_QR_CANCEL,
         "Cancel",
-        (PAIR_QR_CLIENT_W - 92) / 2,
+        (PAIR_QR_CLIENT_W - ACTION_BTN_W) / 2,
         452,
-        92,
-        BTN_H,
+        ACTION_BTN_W,
+        ACTION_BTN_H,
         st.hfont,
     );
 }
