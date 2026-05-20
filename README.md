@@ -27,10 +27,12 @@ Non-negotiables:
 - Watches one local folder recursively.
 - Local folder row includes quick actions to choose the folder and open it in Windows Explorer.
 - Uploads new and changed files to WebDAV.
+- **First-run baseline:** with no local manifest and **Download from server** off, startup uploads every file in the origin folder.
 - Streams uploads from disk.
 - Bounded parallel uploads with `parallel_uploads`.
+- Sync engine starts on app launch (when configured), **immediately after pairing**, and on Save.
 - Optional remote-to-local sync polling.
-- Local and remote manifest tracking with `.backupsynctool-manifest.json`.
+- Local and remote manifest tracking with `.backupsynctool-manifest.json` (local = last successful upload; remote = server snapshot from `PROPFIND`).
 - Pairing flow with server-approved customer folder.
 - Destination folder lock after pairing.
 - WebDAV auth failure pauses sync and asks the user/admin to pair again.
@@ -120,7 +122,7 @@ Important fields:
 | `credential_profile_id` | Optional server credential profile id |
 | `credential_version` | Optional server credential version |
 | `start_with_windows` | Defaults to `true` |
-| `sync_remote_changes` | Enables remote manifest polling/downloads |
+| `sync_remote_changes` | **Download from server** — enables remote polling and download-on-startup; when off, app is upload-primary |
 | `parallel_uploads` | Upload worker count, defaults to `10` |
 
 Secrets must never be written as plaintext.
@@ -181,7 +183,8 @@ sequenceDiagram
         API-->>App: pending/approved/rejected/expired/consumed/failed
     end
     API-->>App: device_token, credentials, approved remote_folder
-    App->>App: Validate and save approved config
+    App->>App: Validate, read origin folder, save approved config
+    App->>App: restart_sync_engine (start watcher + startup upload)
     App->>App: Lock server and destination fields
     App->>WebDAV: Sync using approved folder only
 ```
@@ -238,6 +241,7 @@ The app rejects approved pairing if:
 Once paired:
 
 - `device_token_enc` is present.
+- The sync engine starts immediately via `restart_sync_engine()` in `src/ui/utils.rs` (no Save click required).
 - Server URL, username, password, and destination folder become read-only.
 - Destination browse is hidden/disabled.
 - `Save` preserves the stored approved folder even if UI text changes.
@@ -248,19 +252,57 @@ The only supported way to change customer folder is to re-pair through the serve
 
 ## Sync Behavior
 
+### When the engine starts
+
+`restart_sync_engine()` in `src/ui/utils.rs` starts (or restarts) the sync engine when **all** of these are set: origin folder (`watch_folder`), WebDAV URL, username, password, and approved destination folder (`remote_folder`).
+
+It is called from:
+
+| Trigger | Location |
+| --- | --- |
+| App launch (config already complete) | `src/ui/create.rs` `on_create` |
+| Successful pairing | `src/ui/messages.rs` `on_app_pair_result` |
+| Save | `src/ui/commands.rs` `do_save` |
+
+If the origin folder is empty at pair/save time, `ensure_default_watch_folder()` uses `xd::default_watch_folder()` (`C:\XDSoftware\backups` when that directory exists).
+
+Pairing alone must never stop at “saved config” without starting the engine — that was a prior bug; the spec requires an immediate start after approval.
+
+### Watcher and startup
+
 The sync engine watches `watch_folder` recursively using `notify`.
 
-Main behavior:
+Startup flow (`sync_startup` in `src/sync.rs`):
 
-- Startup loads local manifest from `.backupsynctool-manifest.json`.
-- Startup fetches remote manifest from WebDAV.
-- When `sync_remote_changes` is enabled, startup and remote polling also scan the approved WebDAV folder with `PROPFIND` so files that exist on the server but are missing from the manifest can still be downloaded.
-- If there is no local manifest and `sync_remote_changes` is enabled, existing server files are downloaded as the first baseline before the app writes a new manifest.
+1. Load local manifest from `.backupsynctool-manifest.json` next to the origin folder (empty if missing).
+2. Log `Startup scan of {watch_folder}: N file(s)`.
+3. Branch on whether a local manifest file existed on disk (`had_local_manifest`).
+
+| Local manifest file | Download from server off (default) | Download from server on |
+| --- | --- | --- |
+| **Missing** | Upload **every** local file (first backup baseline). Log: `No local manifest, using local files as baseline`. | If remote manifest has entries, **download** server files as baseline instead of uploading. |
+| **Present** | `PROPFIND` lists the approved folder; upload if local changed since last success, or file missing/wrong size on server. | Same upload rules; also download when remote manifest differs. |
+
+Ongoing behavior:
+
+- Local manifest entries are updated **only after a successful PUT** (`upload_path` returns true).
+- The remote manifest JSON is **not** proof a file exists on the server; upload skip when a local manifest exists requires **both** unchanged local state **and** a matching entry from `PROPFIND` (or listing unavailable with no remote baseline).
+- Remote manifest JSON is rewritten from a fresh `PROPFIND` listing after upload batches (`save_remote_manifest_from_server`), not from a full local directory scan.
 - Local creates/modifies are queued and uploaded after a short debounce.
 - Uploads are bounded by `parallel_uploads`.
-- Manifest is uploaded after batches.
-- Optional remote-to-local sync polls remote state every 60 seconds.
-- Manifest file itself is ignored by scanning and event handling.
+- Every 24 hours, `heal_missing_uploads` re-uploads local files missing or size-mismatched on the server (even when `sync_remote_changes` is off).
+- Optional remote-to-local sync polls remote state every 60 seconds when `sync_remote_changes` is enabled.
+- `.backupsynctool-manifest.json` is ignored by scanning and the file watcher.
+- Ribbon **All synced** means idle with zero failed uploads in the last batch; failures show amber **N upload(s) failed**.
+
+### Manifest files
+
+| File | Location | Meaning |
+| --- | --- | --- |
+| **Local** | `{watch_folder}/.backupsynctool-manifest.json` | Per-path `{ size, mtime }` after last **successful** upload |
+| **Remote** | `{webdav_url}/{remote_folder}/.backupsynctool-manifest.json` | Optional server-side snapshot built from `PROPFIND`, not from local scan |
+
+Do not treat either manifest alone as “everything is on the server.” Server truth for existence is `PROPFIND` / PUT success.
 
 Remote URL construction:
 
@@ -283,12 +325,16 @@ The sync engine must always use the stored approved `remote_folder` for paired d
 
 Credential refresh is not part of the active desktop protocol.
 
-On WebDAV `401` or `403`:
+On WebDAV **HTTP 401** only:
 
-- Automatic sync is paused.
+- `WebDavError::AuthFailed` is raised; automatic sync is paused and the engine is stopped.
 - A local activity/log message says the credentials are invalid.
-- The UI asks the user/admin to pair again.
+- The UI shows **Pair again required** and asks the user/admin to pair again.
 - The app does not call `/api/device/credential-refresh/*`.
+
+**HTTP 403** is **not** treated as invalid credentials (common on Storage Box `MKCOL` when a folder already exists). `MKCOL` treats 403 and 405 as success; non-auth folder-create errors are logged and upload still attempts `PUT`.
+
+Re-pairing clears `auth_failure_notified` and restarts sync via `restart_sync_engine()`.
 
 ## UI Behavior
 
@@ -302,8 +348,9 @@ Implemented behavior:
 - Pair button opens the pairing popup immediately, then the background pairing worker adds the QR/code after `/api/pair/start` responds.
 - While pairing is pending, the server status shows an amber dot, `Waiting for approval`, and the Pair button changes to `Waiting...`.
 - The pairing QR window starts in a preparing state, then shows the approval code, expiry text, waiting-for-admin message, QR code, approval link, and a Cancel button.
-- Pairing approval saves the returned device token, WebDAV credentials, and approved folder automatically. The user does not need to click Save to complete pairing.
-- Save is for local settings such as the local backup folder, startup preference, and remote-download preference; it is hidden while pairing is pending.
+- Pairing approval saves the returned device token, WebDAV credentials, and approved folder automatically, then **starts the sync engine immediately** (no extra Save click required). If the origin folder is empty, XD’s default backup path is used when available.
+- Save is for changing local settings later (origin folder, startup preference, remote-download preference) and restarts sync; it is hidden while pairing is pending.
+- Routine status and errors use the ribbon + Recent Activity (`notify_user`) and do **not** block the UI with message boxes. The only modal dialog is **Update Available** (Yes/No before downloading).
 - UPDATE button is hidden until a newer GitHub release is found.
 - Server credentials are not editable in the UI; `backupsynctool.json` is the source for stored WebDAV settings.
 - Server status keeps the connected/paired/offline indicator; hovering it shows the configured server URL and approved destination folder.
@@ -313,6 +360,8 @@ Implemented behavior:
 - Recent Activity displays compact sync/log messages such as `Uploading backup.zip`, `Uploaded backup.zip`, and `Downloaded backup.zip`.
 - Sync progress is shown in the window and tray tooltip.
 - The remote-to-local checkbox is labeled `Download from server` and maps to `sync_remote_changes`; this is a label-only wording choice and does not remove the existing behavior.
+- After pairing, there is no success popup; ribbon shows **Paired • Checking…** then **Paired • Syncing…** while startup runs, and Recent Activity shows `Device paired. Uploading backup folder.`
+- Credential failure, pair/save errors, and validation hints also go to ribbon + Recent Activity (no blocking dialogs).
 
 Visible pairing states:
 
@@ -332,6 +381,28 @@ Visual rules:
 - Section headers: `#888888`, Segoe UI 10pt SemiBold, all caps
 - Blue action buttons: `#2B4FA3` with white text
 - Grey buttons: `#E8E8E8` with `#333333` text
+
+## Logs
+
+Logs are always written (no toggle). They live next to the exe:
+
+```text
+logs/YYYY-MM-DD.log
+```
+
+Typical messages when diagnosing sync:
+
+| Message | Meaning |
+| --- | --- |
+| `Sync engine started for {path}` | Engine running; watcher active |
+| `Pairing complete; initial sync started.` | Pair succeeded and engine started |
+| `Startup scan of {path}: N file(s)` | Local tree counted at startup |
+| `No local manifest, using local files as baseline` | First-run upload-all path |
+| `N file(s) to upload` | Startup batch queued |
+| `Uploading:` / `Uploaded:` | Per-file progress |
+| `N upload(s) failed` (ribbon) | Last batch had failures |
+
+Tray menu and Recent Activity surface the same log stream via `src/logs.rs`.
 
 ## Auto Update And Release
 
@@ -379,9 +450,15 @@ Hard isolation requires server-issued customer-scoped WebDAV credentials where e
 Before changing pairing, sync, config, or credential handling:
 
 - Check whether the device is paired using `device_token_enc`.
+- **After successful pairing, call `restart_sync_engine()`** — saving config alone is not enough.
+- Use `is_sync_configured()` before starting sync (origin folder, URL, user, password, destination).
 - Do not trust editable UI fields for server-owned values.
 - Do not allow `Save` to overwrite paired `remote_folder`.
 - Do not reintroduce credential refresh unless the protocol changes again.
+- Only treat WebDAV **401** as auth failure; do not map 403 to `AuthFailed`.
+- Local manifest: update per file only on successful PUT; do not overwrite with a full local scan on failed startup.
+- Remote manifest: build from `PROPFIND`, not `scan_local_state`.
+- First run (no local manifest, download off): upload all local files — do not require Save after pair.
 - Keep DPAPI encryption for token/password.
 - Keep sync URLs rooted at stored `webdav_url` + stored `remote_folder`.
 - Rebuild release, copy exe to root, relaunch from root after code changes.

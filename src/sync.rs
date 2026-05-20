@@ -16,6 +16,7 @@ use std::sync::{
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const REMOTE_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+const REMOTE_HEAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MANIFEST_NAME: &str = ".backupsynctool-manifest.json";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +53,14 @@ pub struct ActivityInfo {
     pub state: ActivityState,
     pub completed: usize,
     pub total: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UploadBatchResult {
+    pub attempted: usize,
+    pub succeeded: usize,
+    pub failed: usize,
 }
 
 pub type ActivityFn = Arc<dyn Fn(ActivityInfo) + Send + Sync>;
@@ -87,11 +96,12 @@ impl SyncEngine {
                 state: ActivityState::Checking,
                 completed: 0,
                 total: 0,
+                failed: 0,
             });
 
             let remote_manifest =
                 fetch_remote_state(&cfg_watcher, &pass_watcher, &log_clone, &auth_failed_clone);
-            sync_startup(
+            let startup_failed = sync_startup(
                 &cfg_watcher,
                 &pass_watcher,
                 &manifest,
@@ -107,9 +117,11 @@ impl SyncEngine {
                 state: ActivityState::Idle,
                 completed: 0,
                 total: 0,
+                failed: startup_failed,
             });
 
             let mut last_remote_sync = Instant::now();
+            let mut last_remote_heal = Instant::now();
             while !stop_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(500));
                 if stop_clone.load(Ordering::Relaxed) {
@@ -135,8 +147,9 @@ impl SyncEngine {
                         state: ActivityState::Syncing,
                         completed: 0,
                         total: due.len(),
+                        failed: 0,
                     });
-                    let completed = upload_paths_parallel(
+                    let batch = upload_paths_parallel(
                         &cfg_watcher,
                         &pass_watcher,
                         &due,
@@ -148,9 +161,30 @@ impl SyncEngine {
                     );
                     activity_clone(ActivityInfo {
                         state: ActivityState::Idle,
-                        completed,
-                        total: due.len(),
+                        completed: batch.succeeded,
+                        total: batch.attempted,
+                        failed: batch.failed,
                     });
+                }
+
+                if last_remote_heal.elapsed() >= REMOTE_HEAL_INTERVAL {
+                    let batch = heal_missing_uploads(
+                        &cfg_watcher,
+                        &pass_watcher,
+                        &manifest,
+                        &log_clone,
+                        &activity_clone,
+                        &auth_failed_clone,
+                    );
+                    if batch.attempted > 0 {
+                        activity_clone(ActivityInfo {
+                            state: ActivityState::Idle,
+                            completed: batch.succeeded,
+                            total: batch.attempted,
+                            failed: batch.failed,
+                        });
+                    }
+                    last_remote_heal = Instant::now();
                 }
 
                 if cfg_watcher.sync_remote_changes
@@ -230,8 +264,14 @@ fn sync_startup(
     log: &LogFn,
     activity: &ActivityFn,
     auth_failed: &AuthFailedFn,
-) {
+) -> usize {
+    let mut total_failed = 0usize;
     let local_state = scan_local_state(cfg);
+    log(format!(
+        "Startup scan of {}: {} file(s)",
+        cfg.watch_folder,
+        local_state.files.len()
+    ));
     let remote_manifest = remote_manifest.cloned().unwrap_or_default();
 
     if !had_local_manifest {
@@ -251,6 +291,7 @@ fn sync_startup(
                     state: ActivityState::Syncing,
                     completed: 0,
                     total: downloads.len(),
+                    failed: 0,
                 });
                 download_remote_paths(
                     cfg,
@@ -264,14 +305,8 @@ fn sync_startup(
                 );
             }
 
-            let refreshed = scan_local_state(cfg);
-            {
-                let mut guard = manifest.lock().unwrap();
-                *guard = refreshed.clone();
-                save_local_manifest(cfg, &guard);
-            }
-            save_remote_manifest(cfg, password, &refreshed, log, auth_failed);
-            return;
+            save_remote_manifest_from_server(cfg, password, log, auth_failed);
+            return total_failed;
         }
 
         log("No local manifest, using local files as baseline".to_string());
@@ -289,8 +324,9 @@ fn sync_startup(
                 state: ActivityState::Syncing,
                 completed: 0,
                 total: uploads.len(),
+                failed: 0,
             });
-            upload_paths_parallel(
+            let batch = upload_paths_parallel(
                 cfg,
                 password,
                 &uploads,
@@ -300,19 +336,16 @@ fn sync_startup(
                 Some(activity),
                 auth_failed,
             );
-            return;
+            total_failed += batch.failed;
+            return total_failed;
         }
 
-        {
-            let mut guard = manifest.lock().unwrap();
-            *guard = local_state.clone();
-            save_local_manifest(cfg, &guard);
-        }
-        save_remote_manifest(cfg, password, &local_state, log, auth_failed);
-        return;
+        save_remote_manifest_from_server(cfg, password, log, auth_failed);
+        return total_failed;
     }
 
     let local_manifest = manifest.lock().unwrap().clone();
+    let remote_on_server = remote_file_states(cfg, password, log, auth_failed);
 
     let mut uploads = Vec::new();
     let mut downloads = Vec::new();
@@ -323,8 +356,21 @@ fn sync_startup(
 
         let local_changed = local_baseline != Some(current_local);
         let remote_changed = remote_baseline != local_baseline;
+        let missing_on_server = remote_on_server
+            .as_ref()
+            .is_some_and(|present| !present.contains_key(relative));
+        let size_mismatch = remote_on_server.as_ref().and_then(|present| {
+            present
+                .get(relative)
+                .map(|remote| remote.size != current_local.size)
+        });
+        let listing_unavailable = remote_on_server.is_none();
 
-        if local_changed || remote_baseline.is_none() {
+        if local_changed
+            || (listing_unavailable && remote_baseline.is_none())
+            || missing_on_server
+            || size_mismatch == Some(true)
+        {
             uploads.push(local_path_for_relative(cfg, relative));
             continue;
         }
@@ -362,8 +408,9 @@ fn sync_startup(
             state: ActivityState::Syncing,
             completed: 0,
             total: uploads.len(),
+            failed: 0,
         });
-        upload_paths_parallel(
+        let batch = upload_paths_parallel(
             cfg,
             password,
             &uploads,
@@ -373,16 +420,11 @@ fn sync_startup(
             Some(activity),
             auth_failed,
         );
+        total_failed += batch.failed;
     }
 
-    let refreshed = scan_local_state(cfg);
-    {
-        let mut guard = manifest.lock().unwrap();
-        *guard = refreshed.clone();
-        save_local_manifest(cfg, &guard);
-    }
-
-    save_remote_manifest(cfg, password, &refreshed, log, auth_failed);
+    save_remote_manifest_from_server(cfg, password, log, auth_failed);
+    total_failed
 }
 
 fn apply_remote_manifest(
@@ -419,14 +461,7 @@ fn apply_remote_manifest(
         auth_failed,
     );
 
-    let refreshed = scan_local_state(cfg);
-    {
-        let mut guard = manifest.lock().unwrap();
-        *guard = refreshed;
-        save_local_manifest(cfg, &guard);
-    }
-    let snapshot = manifest.lock().unwrap().clone();
-    save_remote_manifest(cfg, password, &snapshot, log, auth_failed);
+    save_remote_manifest_from_server(cfg, password, log, auth_failed);
 }
 
 fn download_remote_paths(
@@ -490,28 +525,28 @@ fn upload_path(
     manifest: &Arc<Mutex<SyncManifest>>,
     log: &LogFn,
     auth_failed: &AuthFailedFn,
-) {
+) -> bool {
     if !path.is_file() || should_ignore_path(&cfg.watch_folder, path) {
-        return;
+        return false;
     }
 
     let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(err) => {
             log(format!("Read error {}: {}", path.display(), err));
-            return;
+            return false;
         }
     };
     let size = match file.metadata() {
         Ok(meta) => meta.len(),
         Err(err) => {
             log(format!("Read error {}: {}", path.display(), err));
-            return;
+            return false;
         }
     };
 
     let Some(relative) = relative_path_for_watch(&cfg.watch_folder, path) else {
-        return;
+        return false;
     };
     let remote_url = remote_file_url(cfg, &relative);
 
@@ -524,9 +559,9 @@ fn upload_path(
         ) {
             if err.is_auth_failed() {
                 auth_failed();
+                return false;
             }
             log(format!("Create folder failed {}: {}", relative, err));
-            return;
         }
     }
 
@@ -535,9 +570,6 @@ fn upload_path(
         Ok(_) => {
             let mtime = file_mtime_epoch(path);
             if let Err(err) = webdav::set_sar_last_modified(cfg, password, &remote_url, mtime) {
-                if err.is_auth_failed() {
-                    auth_failed();
-                }
                 log(format!("Timestamp preserve failed {}: {}", relative, err));
             }
             let mut guard = manifest.lock().unwrap();
@@ -550,12 +582,14 @@ fn upload_path(
             );
             save_local_manifest(cfg, &guard);
             log(format!("Uploaded: {}", relative));
+            true
         }
         Err(err) => {
             if err.is_auth_failed() {
                 auth_failed();
             }
             log(format!("Upload failed {}: {}", relative, err));
+            false
         }
     }
 }
@@ -569,36 +603,46 @@ fn upload_paths_parallel(
     max_parallel: usize,
     activity: Option<&ActivityFn>,
     auth_failed: &AuthFailedFn,
-) -> usize {
-    let width = max_parallel.max(1).min(paths.len().max(1));
-    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+) -> UploadBatchResult {
     let total = paths.len();
+    if total == 0 {
+        return UploadBatchResult::default();
+    }
+    let width = max_parallel.max(1).min(total);
+    let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let succeeded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let queue = Arc::new(Mutex::new(VecDeque::from(paths.to_vec())));
     std::thread::scope(|scope| {
         for _ in 0..width {
             let queue = queue.clone();
-            let completed = completed.clone();
+            let processed = processed.clone();
+            let succeeded = succeeded.clone();
             scope.spawn(move || loop {
                 let Some(path) = queue.lock().unwrap().pop_front() else {
                     break;
                 };
-                upload_path(cfg, password, &path, manifest, log, auth_failed);
-                let done = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if upload_path(cfg, password, &path, manifest, log, auth_failed) {
+                    succeeded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let done = processed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 if let Some(activity) = activity {
                     activity(ActivityInfo {
                         state: ActivityState::Syncing,
                         completed: done,
                         total,
+                        failed: 0,
                     });
                 }
             });
         }
     });
-    if total > 0 {
-        let snapshot = manifest.lock().unwrap().clone();
-        save_remote_manifest(cfg, password, &snapshot, log, auth_failed);
+    save_remote_manifest_from_server(cfg, password, log, auth_failed);
+    let ok = succeeded.load(std::sync::atomic::Ordering::SeqCst);
+    UploadBatchResult {
+        attempted: total,
+        succeeded: ok,
+        failed: total.saturating_sub(ok),
     }
-    completed.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 fn fetch_remote_manifest(
@@ -618,6 +662,109 @@ fn fetch_remote_manifest(
             None
         }
     }
+}
+
+fn remote_file_states(
+    cfg: &Config,
+    password: &str,
+    log: &LogFn,
+    auth_failed: &AuthFailedFn,
+) -> Option<HashMap<String, FileState>> {
+    match webdav::list_files_recursive(cfg, password, &remote_base_url(cfg)) {
+        Ok(files) => Some(
+            files
+                .into_iter()
+                .filter(|file| file.relative_path != MANIFEST_NAME)
+                .map(|file| {
+                    (
+                        file.relative_path,
+                        FileState {
+                            size: file.size,
+                            mtime: file.mtime,
+                        },
+                    )
+                })
+                .collect(),
+        ),
+        Err(err) => {
+            if err.is_auth_failed() {
+                auth_failed();
+            }
+            log(format!("Remote file listing unavailable: {}", err));
+            None
+        }
+    }
+}
+
+fn manifest_from_server_listing(
+    cfg: &Config,
+    password: &str,
+    log: &LogFn,
+    auth_failed: &AuthFailedFn,
+) -> Option<SyncManifest> {
+    let files = remote_file_states(cfg, password, log, auth_failed)?;
+    Some(SyncManifest { files })
+}
+
+fn save_remote_manifest_from_server(
+    cfg: &Config,
+    password: &str,
+    log: &LogFn,
+    auth_failed: &AuthFailedFn,
+) {
+    if let Some(manifest) = manifest_from_server_listing(cfg, password, log, auth_failed) {
+        save_remote_manifest(cfg, password, &manifest, log, auth_failed);
+    }
+}
+
+fn heal_missing_uploads(
+    cfg: &Config,
+    password: &str,
+    manifest: &Arc<Mutex<SyncManifest>>,
+    log: &LogFn,
+    activity: &ActivityFn,
+    auth_failed: &AuthFailedFn,
+) -> UploadBatchResult {
+    let Some(remote_on_server) = remote_file_states(cfg, password, log, auth_failed) else {
+        return UploadBatchResult::default();
+    };
+
+    let local_state = scan_local_state(cfg);
+    let mut uploads = Vec::new();
+    for (relative, current_local) in &local_state.files {
+        let needs_upload = match remote_on_server.get(relative) {
+            None => true,
+            Some(remote) => remote.size != current_local.size,
+        };
+        if needs_upload {
+            uploads.push(local_path_for_relative(cfg, relative));
+        }
+    }
+
+    if uploads.is_empty() {
+        return UploadBatchResult::default();
+    }
+
+    log(format!(
+        "{} file(s) missing or mismatched on server, re-uploading",
+        uploads.len()
+    ));
+    activity(ActivityInfo {
+        state: ActivityState::Syncing,
+        completed: 0,
+        total: uploads.len(),
+        failed: 0,
+    });
+    upload_paths_parallel(
+        cfg,
+        password,
+        &uploads,
+        manifest,
+        log,
+        cfg.parallel_uploads,
+        Some(activity),
+        auth_failed,
+    )
 }
 
 fn fetch_remote_state(
@@ -804,9 +951,10 @@ fn remote_base_url(cfg: &Config) -> String {
 }
 
 fn parent_folder_url(remote_url: &str) -> Option<String> {
-    let (base, file_name) = remote_url.rsplit_once('/')?;
-    if file_name.is_empty() || !file_name.contains('.') {
-        return Some(remote_url.trim_end_matches('/').to_string());
+    let trimmed = remote_url.trim_end_matches('/');
+    let (base, _) = trimmed.rsplit_once('/')?;
+    if base.is_empty() {
+        return None;
     }
     Some(base.to_string())
 }

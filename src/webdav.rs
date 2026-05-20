@@ -60,9 +60,7 @@ impl From<&str> for WebDavError {
 impl From<ureq::Error> for WebDavError {
     fn from(value: ureq::Error) -> Self {
         match value {
-            ureq::Error::Status(status, _) if status == 401 || status == 403 => {
-                WebDavError::AuthFailed(status)
-            }
+            ureq::Error::Status(status, _) if status == 401 => WebDavError::AuthFailed(status),
             ureq::Error::Status(status, _) => WebDavError::Http(status, "Request".to_string()),
             err => WebDavError::Other(err.to_string()),
         }
@@ -70,7 +68,7 @@ impl From<ureq::Error> for WebDavError {
 }
 
 fn http_error(status: u16, action: &str) -> WebDavError {
-    if status == 401 || status == 403 {
+    if status == 401 {
         WebDavError::AuthFailed(status)
     } else {
         WebDavError::Http(status, action.to_string())
@@ -204,13 +202,13 @@ pub fn mkcol(cfg: &Config, password: &str, remote_url: &str) -> Result<(), WebDa
     {
         Ok(resp) => {
             let status = resp.status();
-            if status < 400 || status == 405 {
+            if status < 400 || status == 405 || status == 403 {
                 Ok(())
             } else {
                 Err(http_error(status, "MKCOL"))
             }
         }
-        Err(ureq::Error::Status(405, _)) => Ok(()),
+        Err(ureq::Error::Status(405, _)) | Err(ureq::Error::Status(403, _)) => Ok(()),
         Err(err) => Err(WebDavError::from(err)),
     }
 }
@@ -534,4 +532,47 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += if month <= 2 { 1 } else { 0 };
     (year as i32, month as u32, day as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::secret;
+
+    fn test_config() -> (Config, String) {
+        let cfg_text = std::fs::read_to_string("backupsynctool.json").expect("config");
+        let cfg: Config = serde_json::from_str(&cfg_text).expect("json");
+        let pass = secret::decrypt(&cfg.password_enc).expect("decrypt");
+        (cfg, pass)
+    }
+
+    #[test]
+    fn test_connection_works() {
+        let (cfg, pass) = test_config();
+        test_connection(&cfg, &pass).expect("connection");
+    }
+
+    #[test]
+    fn mkcol_existing_folder_is_not_auth_failure() {
+        let (cfg, pass) = test_config();
+        let url = format!(
+            "{}/{}/St Johns Cambridge TEST APPs 2025.2.0.0/",
+            cfg.webdav_url.trim_end_matches('/'),
+            cfg.remote_folder.trim_matches('/')
+        );
+        mkcol(&cfg, &pass, &url).expect("existing folder mkcol should succeed");
+    }
+
+    #[test]
+    fn mkcol_on_file_path_is_not_auth_failure() {
+        let (cfg, pass) = test_config();
+        let url = format!(
+            "{}/{}/St Johns Cambridge TEST APPs 2025.2.0.0/american.adm/",
+            cfg.webdav_url.trim_end_matches('/'),
+            cfg.remote_folder.trim_matches('/')
+        );
+        let err = mkcol(&cfg, &pass, &url).unwrap_err();
+        assert!(!err.is_auth_failed());
+    }
 }

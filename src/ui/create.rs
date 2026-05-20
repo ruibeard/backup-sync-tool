@@ -16,11 +16,7 @@ unsafe fn on_create(hwnd: HWND) {
         }
     }
     let pass = secret::decrypt(&cfg.password_enc).unwrap_or_default();
-    let sync_configured = !cfg.watch_folder.is_empty()
-        && !cfg.webdav_url.is_empty()
-        && !cfg.username.is_empty()
-        && !pass.is_empty()
-        && !cfg.remote_folder.is_empty();
+    let sync_configured = is_sync_configured(&cfg, &pass);
 
     let state = Box::new(WndState {
         config: cfg.clone(),
@@ -40,6 +36,7 @@ unsafe fn on_create(hwnd: HWND) {
         },
         sync_progress_done: 0,
         sync_progress_total: 0,
+        sync_last_failed: 0,
         sync_started_at: None,
         sync_anim_frame: 0,
         sync_icon: HICON(std::ptr::null_mut()),
@@ -49,9 +46,8 @@ unsafe fn on_create(hwnd: HWND) {
         server_tooltip: HWND(std::ptr::null_mut()),
         server_tooltip_text: Vec::new(),
         status_dot_color: C_RED,
-        status_ok_icon: load_imageres_icon_resource(106),
-        status_warn_icon: load_stock_icon(SIID_WARNING, false),
-        status_error_icon: load_stock_icon(SIID_ERROR, false),
+        server_status_rect: RECT::default(),
+        ribbon_rect: RECT::default(),
         hfont,
         hfont_hdr,
         hfont_b,
@@ -102,51 +98,11 @@ unsafe fn on_create(hwnd: HWND) {
     tray::add_tray_icon(hwnd, hicon);
 
     let raw = hwnd.0 as isize;
-    let log: crate::sync::LogFn = Arc::new(move |m: String| {
-        logs::append(&m);
-        let s = Box::new(m);
-        unsafe {
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_LOG,
-                WPARAM(0),
-                LPARAM(Box::into_raw(s) as isize),
-            )
-            .ok();
-        }
-    });
-    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_SYNC_ACTIVITY,
-            WPARAM(info.state as usize),
-            LPARAM(Box::into_raw(Box::new((info.completed, info.total))) as isize),
-        )
-        .ok();
-    });
-    let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(HWND(raw as *mut _), WM_APP_AUTH_FAILED, WPARAM(0), LPARAM(0)).ok();
-    });
 
     if sync_configured {
-        match crate::sync::SyncEngine::start(
-            cfg.clone(),
-            pass.clone(),
-            log.clone(),
-            activity.clone(),
-            auth_failed.clone(),
-        ) {
-            Ok(engine) => stmut(hwnd).sync_engine = Some(engine),
-            Err(err) => {
-                let msg = Box::new(format!("Sync start failed: {err}"));
-                PostMessageW(
-                    HWND(raw as *mut _),
-                    WM_APP_LOG,
-                    WPARAM(0),
-                    LPARAM(Box::into_raw(msg) as isize),
-                )
-                .ok();
-            }
+        if let Err(err) = restart_sync_engine(hwnd) {
+            let msg = format!("Sync start failed: {err}");
+            logs::append(&msg);
         }
     }
 
@@ -169,7 +125,6 @@ unsafe fn on_create(hwnd: HWND) {
     }
 
     if !cfg.webdav_url.is_empty() && !cfg.username.is_empty() && !pass.is_empty() {
-        ShowWindow(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), SW_HIDE);
         let cfg2 = cfg.clone();
         let pass2 = pass.clone();
         let _ = SetWindowTextW(
@@ -222,17 +177,60 @@ unsafe fn build_ui(
     hf_link: HFONT,
 ) {
     let st = &mut *state_ptr(hwnd);
-    let mut y = M + 4;
+    let mut y = 0;
 
     // ── SERVER ────────────────────────────────────────────────────────────────
     {
-        let status_w = 16i32;
-        let pair_x = M + INNER_W - PAIR_BTN_W;
-        let server_status_w = SERVER_STATUS_W;
-        let server_status_x = pair_x - PAD - server_status_w;
-        let status_x = server_status_x - status_w - 6;
+        st.ribbon_rect = RECT {
+            left: 0,
+            top: y,
+            right: WIN_W,
+            bottom: y + RIBBON_H,
+        };
+        let pair_x = WIN_W - M - PAIR_BTN_W;
+        let dot_size = 10i32;
+        let dot_x = M;
+        let dot_y = y + (RIBBON_H - dot_size) / 2;
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_SERVER_STATUS,
+            if is_paired(cfg) {
+                if !cfg.watch_folder.is_empty() && !cfg.remote_folder.is_empty() {
+                    "Paired \u{2022} Checking..."
+                } else {
+                    "Paired \u{2022} Online"
+                }
+            } else {
+                "Not paired"
+            },
+            M + dot_size + 8,
+            y + (RIBBON_H - LBL_H) / 2,
+            pair_x - M - dot_size - 16,
+            LBL_H,
+            hf_b,
+        );
+        st.server_status_rect = RECT {
+            left: dot_x,
+            top: dot_y,
+            right: dot_x + dot_size,
+            bottom: dot_y + dot_size,
+        };
+        let pair_label = if is_paired(cfg) { "Re-pair" } else { "Pair" };
+        mkbtn_grey(
+            hwnd,
+            hi,
+            IDC_PAIR_DEVICE,
+            pair_label,
+            pair_x,
+            y + (RIBBON_H - SMALL_BTN_H) / 2,
+            PAIR_BTN_W,
+            SMALL_BTN_H,
+            hf_small,
+        );
+        install_server_tooltip(hwnd, hi);
+        y += RIBBON_H + 12;
 
-        let hdr_toggle_w = 90i32;
         mkstatic(
             hwnd,
             hi,
@@ -240,49 +238,23 @@ unsafe fn build_ui(
             "SERVER",
             M,
             y,
-            hdr_toggle_w,
+            90,
             HDR_H,
             hf_hdr,
         );
         mkstatic_align(
             hwnd,
             hi,
-            IDC_SERVER_STATUS,
-            "Not connected",
-            server_status_x,
+            IDC_SERVER_URL_LABEL,
+            &server_display_text(cfg),
+            M + 95,
             y,
-            server_status_w,
-            LBL_H,
+            INNER_W - 95,
+            HDR_H,
             hf_small,
             SS_RIGHT,
         );
-        mkstatic_align(
-            hwnd,
-            hi,
-            IDC_STATUS_TEXT,
-            "",
-            status_x,
-            y,
-            status_w,
-            LBL_H,
-            hf_small,
-            SS_ICON,
-        );
-        set_status_icon(hwnd, C_RED);
-        mkbtn_grey(
-            hwnd,
-            hi,
-            IDC_PAIR_DEVICE,
-            "Pair",
-            pair_x,
-            y + (HDR_H - SMALL_BTN_H) / 2,
-            PAIR_BTN_W,
-            SMALL_BTN_H,
-            hf_small,
-        );
-        install_server_tooltip(hwnd, hi);
-        y += HDR_H + PAD;
-        st.dividers.push(y - SECT / 2);
+        y += HDR_H + 8;
     }
 
     // ── FOLDERS ───────────────────────────────────────────────────────────────
@@ -314,26 +286,28 @@ unsafe fn build_ui(
             inp_w,
             hf,
         );
-        let browse_btn = mkiconbtn(
+        mkbtn_grey(
             hwnd,
             hi,
             IDC_BROWSE_LOCAL,
+            "Browse",
             browse_x,
             y,
-            34,
+            BROWSE_W,
             INP_H,
+            hf,
         );
-        set_button_icon(browse_btn, load_stock_icon(SIID_FOLDER, false));
-        let open_btn = mkiconbtn(
+        mkbtn_grey(
             hwnd,
             hi,
             IDC_OPEN_LOCAL_FOLDER,
+            "Open",
             open_x,
             y,
-            34,
+            BROWSE_W,
             INP_H,
+            hf,
         );
-        set_button_icon(open_btn, load_stock_icon(SIID_FOLDEROPEN, true));
         y += INP_H + GAP;
 
         let destination_text = destination_display_text(
@@ -408,64 +382,7 @@ unsafe fn build_ui(
         y += lb_h;
         st.post_list_gap = PAD;
         y += PAD;
-
-        // Sync status row (icon + text + progress) below activity list
-        let sync_icon_w = 16i32;
-        let sync_gap = 8i32;
-        let progress_h = 10;
-        let sync_row_h = progress_h + 4;
-        st.sync_row_h = sync_row_h;
-
-        // Store icon rect for WM_PAINT
-        st.sync_icon_rect = RECT {
-            left: M,
-            top: y + (sync_row_h - sync_icon_w) / 2,
-            right: M + sync_icon_w,
-            bottom: y + (sync_row_h - sync_icon_w) / 2 + sync_icon_w,
-        };
-
-        let initial_sync_configured = !cfg.watch_folder.is_empty()
-            && !cfg.webdav_url.is_empty()
-            && !cfg.username.is_empty()
-            && !pass.is_empty()
-            && !cfg.remote_folder.is_empty();
-        let initial_icon = if initial_sync_configured {
-            LoadIconW(hi, w!("APP_ICON_SYNCING")).unwrap_or_default()
-        } else {
-            LoadIconW(hi, w!("APP_ICON_IDLE")).unwrap_or_default()
-        };
-        st.sync_icon = initial_icon;
-
-        let status_x = M + sync_icon_w + sync_gap;
-        let status_w = 180i32;
-        mkstatic_align(
-            hwnd,
-            hi,
-            IDC_SYNC_STATUS,
-            &st.sync_status_text,
-            status_x,
-            y + (sync_row_h - LBL_H) / 2,
-            status_w,
-            LBL_H,
-            hf_small,
-            SS_LEFT,
-        );
-
-        // Progress bar to the right of status
-        let progress_x = status_x + status_w + sync_gap;
-        let progress_w = INNER_W - (progress_x - M);
-        mkprogress(
-            hwnd,
-            hi,
-            IDC_SYNC_PROGRESS,
-            progress_x,
-            y + (sync_row_h - progress_h) / 2,
-            progress_w,
-            progress_h,
-        );
-        ShowWindow(GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32), SW_HIDE);
-
-        y += sync_row_h;
+        st.sync_row_h = 0;
         st.post_sync_sect = SECT;
         y += SECT;
 
@@ -512,7 +429,7 @@ unsafe fn build_ui(
             cfg.sync_remote_changes,
         );
 
-        mkbtn_blue(
+        mkbtn_grey(
             hwnd, hi, IDC_SAVE, "Save", save_x, button_y, save_w, BTN_H, hf_b,
         );
 
@@ -567,7 +484,7 @@ unsafe fn build_ui(
             hwnd,
             hi,
             IDC_AUTHOR,
-            "Rui Almeida · ruialmeida.me",
+            "Rui Almeida",
             update_btn_x + update_btn_w + 12,
             author_y,
             200,
@@ -774,43 +691,6 @@ unsafe fn mkbtn(
     c
 }
 
-unsafe fn mkiconbtn(
-    hwnd: HWND,
-    hi: HINSTANCE,
-    id: u16,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-) -> HWND {
-    CreateWindowExW(
-        WINDOW_EX_STYLE::default(),
-        w!("BUTTON"),
-        w!(""),
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_ICON as u32),
-        x,
-        y,
-        w,
-        h,
-        hwnd,
-        HMENU(id as usize as *mut _),
-        hi,
-        None,
-    )
-}
-unsafe fn mkbtn_blue(
-    hwnd: HWND,
-    hi: HINSTANCE,
-    id: u16,
-    text: &str,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    hf: HFONT,
-) -> HWND {
-    mkbtn(hwnd, hi, id, text, x, y, w, h, hf)
-}
 unsafe fn mkbtn_grey(
     hwnd: HWND,
     hi: HINSTANCE,
@@ -938,7 +818,7 @@ unsafe fn install_server_tooltip(hwnd: HWND, hi: HINSTANCE) {
         .chain(std::iter::once(0))
         .collect();
 
-    for target_id in [IDC_SERVER_HDR, IDC_SERVER_STATUS, IDC_STATUS_TEXT] {
+    for target_id in [IDC_SERVER_HDR, IDC_SERVER_STATUS, IDC_SERVER_URL_LABEL] {
         let target = GetDlgItem(hwnd, target_id as i32);
         if target.0.is_null() {
             continue;
@@ -977,6 +857,18 @@ fn server_tooltip_text(cfg: &Config) -> String {
     format!("Server: {url}\nDestination: {folder}")
 }
 
+fn server_display_text(cfg: &Config) -> String {
+    if cfg.webdav_url.trim().is_empty() {
+        "Server not configured".to_string()
+    } else {
+        cfg.webdav_url
+            .trim()
+            .trim_start_matches("https://")
+            .trim_end_matches('/')
+            .to_string()
+    }
+}
+
 fn destination_display_text(
     cfg: &Config,
     remote_folder_from_xd: bool,
@@ -1008,7 +900,7 @@ unsafe fn update_server_tooltip(hwnd: HWND) {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    for target_id in [IDC_SERVER_HDR, IDC_SERVER_STATUS, IDC_STATUS_TEXT] {
+    for target_id in [IDC_SERVER_HDR, IDC_SERVER_STATUS, IDC_SERVER_URL_LABEL] {
         let target = GetDlgItem(hwnd, target_id as i32);
         if target.0.is_null() {
             continue;

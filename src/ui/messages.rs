@@ -32,9 +32,9 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
 
 unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let progress = if lp.0 != 0 {
-        *Box::from_raw(lp.0 as *mut (usize, usize))
+        *Box::from_raw(lp.0 as *mut (usize, usize, usize))
     } else {
-        (0, 0)
+        (0, 0, 0)
     };
     let (icon_name, mut status_text) = match wp.0 {
         x if x == crate::sync::ActivityState::Checking as usize => {
@@ -43,6 +43,10 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         x if x == crate::sync::ActivityState::Syncing as usize => {
             (w!("APP_ICON_SYNCING"), "Syncing...")
         }
+        _ if progress.2 > 0 => (
+            w!("APP_ICON_SYNCING"),
+            "Upload errors",
+        ),
         _ => (w!("APP_ICON_COMPLETE"), "All synced"),
     };
 
@@ -55,6 +59,7 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     st.sync_status_state = wp.0;
     st.sync_progress_done = progress.0;
     st.sync_progress_total = progress.1;
+    st.sync_last_failed = progress.2;
     if is_busy {
         if is_syncing && !was_syncing {
             st.sync_started_at = Some(std::time::Instant::now());
@@ -95,8 +100,6 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
                 hicon,
                 &format!("Backup Sync Tool - {}", status_text),
             );
-            st.sync_icon = hicon;
-            InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
         }
     } else {
         st.sync_started_at = None;
@@ -105,36 +108,12 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
         if !hicon.0.is_null() {
             tray::set_tray_icon_and_tip(hwnd, hicon, "Backup Sync Tool");
-            st.sync_icon = hicon;
-            InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
         }
     }
     if !is_syncing {
         st.sync_status_text = status_text.to_string();
     }
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
-        &hstring(&st.sync_status_text),
-    );
-    let progress_hwnd = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
-    if is_syncing && progress.1 > 0 {
-        let pct = ((progress.0.min(progress.1) * 100) / progress.1) as isize;
-        SendMessageW(progress_hwnd, PBM_SETPOS, WPARAM(pct as usize), LPARAM(0));
-        ShowWindow(progress_hwnd, SW_SHOW);
-        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _);
-        let tip_icon = LoadIconW(hi, w!("APP_ICON_SYNCING")).unwrap_or_default();
-        if !tip_icon.0.is_null() {
-            tray::set_tray_icon_and_tip(
-                hwnd,
-                tip_icon,
-                &format!("Backup Sync Tool - {}", st.sync_status_text),
-            );
-        }
-    } else {
-        SendMessageW(progress_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
-        ShowWindow(progress_hwnd, SW_HIDE);
-    }
-    InvalidateRect(GetDlgItem(hwnd, IDC_SYNC_STATUS as i32), None, TRUE);
+    update_ribbon_after_sync(hwnd, wp.0, progress);
     LRESULT(0)
 }
 
@@ -170,9 +149,8 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
             "Backup Sync Tool - Syncing".to_string()
         };
         tray::set_tray_icon_and_tip(hwnd, hicon, &tip);
-        st.sync_icon = hicon;
-        InvalidateRect(hwnd, Some(&st.sync_icon_rect), TRUE);
     }
+    InvalidateRect(hwnd, Some(&st.server_status_rect), TRUE);
     LRESULT(0)
 }
 
@@ -180,36 +158,20 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
     let connected = wp.0 == 1;
     let st = stmut(hwnd);
     st.connected = connected;
-    let paired = is_paired(&st.config);
-    let status_hwnd = GetDlgItem(hwnd, IDC_STATUS_TEXT as i32);
-    let status_label_hwnd = GetDlgItem(hwnd, IDC_SERVER_STATUS as i32);
     let conn_hwnd = GetDlgItem(hwnd, IDC_CONNECT as i32);
     if st.auth_failure_notified {
         set_status_dot_color(hwnd, C_RED);
-        let _ = SetWindowTextW(status_label_hwnd, &hstring("Pair again required"));
+        set_ribbon_status_text(hwnd, "Pair again required");
         restore_pair_idle_controls(hwnd);
-        ShowWindow(status_hwnd, SW_SHOW);
         return LRESULT(0);
     }
+    update_ribbon_from_connection(hwnd);
     if connected {
-        set_status_dot_color(hwnd, C_GREEN);
-        let _ = SetWindowTextW(
-            status_label_hwnd,
-            &hstring(if paired { "Paired" } else { "Connected" }),
-        );
         ShowWindow(conn_hwnd, SW_HIDE);
-        ShowWindow(status_hwnd, SW_SHOW);
     } else {
-        set_status_dot_color(hwnd, C_RED);
-        let _ = SetWindowTextW(
-            status_label_hwnd,
-            &hstring(if paired { "Paired" } else { "Offline" }),
-        );
         EnableWindow(conn_hwnd, true);
         ShowWindow(conn_hwnd, SW_HIDE);
-        ShowWindow(status_hwnd, SW_SHOW);
     }
-    InvalidateRect(status_hwnd, None, TRUE);
     LRESULT(0)
 }
 
@@ -223,31 +185,14 @@ unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
         st.sync_engine = None;
     }
     st.connected = false;
-    logs::append("WebDAV authentication failed. Automatic sync paused; pair again to continue.");
-    let msg = Box::new(
-        "WebDAV credentials are invalid. Automatic sync paused; pair again to continue."
-            .to_string(),
-    );
-    PostMessageW(
-        hwnd,
-        WM_APP_LOG,
-        WPARAM(0),
-        LPARAM(Box::into_raw(msg) as isize),
-    )
-    .ok();
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-        &hstring("Pair again required"),
-    );
     restore_pair_idle_controls(hwnd);
-    set_status_dot_color(hwnd, C_RED);
-    ShowWindow(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), SW_SHOW);
-    InvalidateRect(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), None, TRUE);
-    msgbox(
+    notify_user_status(
         hwnd,
-        "WebDAV credentials are invalid. Pair again to continue syncing.",
-        "Credentials Invalid",
+        "Pair again required",
+        C_RED,
+        "Credentials invalid. Automatic sync paused; pair again to continue.",
     );
+    let _ = SetForegroundWindow(hwnd);
     LRESULT(0)
 }
 
@@ -272,8 +217,8 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
             &hstring("Pair failed"),
         );
-        set_status_dot_color(hwnd, C_RED);
-        msgbox(hwnd, &err.message, "Pair Device");
+        notify_user_status(hwnd, "Pair failed", C_RED, &err.message);
+        let _ = SetForegroundWindow(hwnd);
         return LRESULT(0);
     }
 
@@ -291,10 +236,11 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match secret::encrypt(&pair.device_token) {
         Ok(enc) => st.config.device_token_enc = enc,
         Err(e) => {
-            msgbox(
+            notify_user_status(
                 hwnd,
+                "Pair failed",
+                C_RED,
                 &format!("Device token encrypt error: {e}"),
-                "Pair Device",
             );
             return LRESULT(0);
         }
@@ -316,10 +262,11 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             );
         }
         Err(e) => {
-            msgbox(
+            notify_user_status(
                 hwnd,
+                "Pair failed",
+                C_RED,
                 &format!("WebDAV password encrypt error: {e}"),
-                "Pair Device",
             );
             return LRESULT(0);
         }
@@ -332,29 +279,50 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         &hstring(&pair.remote_folder),
     );
     let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
+        &hstring(&server_display_text(&st.config)),
+    );
+    let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_DEST_LABEL as i32),
         &hstring("Approved folder"),
     );
     st.config.credential_profile_id = pair.credential_profile_id;
     st.config.credential_version = pair.credential_version;
+    read_ctrls(hwnd, st);
+    ensure_default_watch_folder(hwnd);
     if let Err(e) = crate::config::save(&st.config) {
-        msgbox(
+        notify_user_status(
             hwnd,
+            "Save failed",
+            C_RED,
             &format!("Pairing succeeded but save failed: {e}"),
-            "Pair Device",
         );
         return LRESULT(0);
     }
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-        &hstring("Paired"),
-    );
-    set_status_dot_color(hwnd, C_GREEN);
-    ShowWindow(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), SW_SHOW);
-    InvalidateRect(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), None, TRUE);
+    match restart_sync_engine(hwnd) {
+        Ok(()) => logs::append("Pairing complete; initial sync started."),
+        Err(err) => {
+            let msg = format!(
+                "Paired but sync did not start: {err}. Set origin folder and click Save."
+            );
+            notify_user_status(hwnd, "Sync not started", C_AMBER, &msg);
+            apply_server_readonly(hwnd);
+            start_connection_check(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            return LRESULT(0);
+        }
+    }
+    {
+        let st = stmut(hwnd);
+        st.sync_status_state = crate::sync::ActivityState::Checking as usize;
+        st.sync_status_text = "Paired \u{2022} Checking...".to_string();
+    }
+    set_ribbon_status_text(hwnd, "Paired \u{2022} Checking...");
+    set_status_dot_color(hwnd, C_AMBER);
     apply_server_readonly(hwnd);
     start_connection_check(hwnd);
-    msgbox(hwnd, "Device paired and saved.", "Pair Device");
+    let _ = SetForegroundWindow(hwnd);
+    notify_user(hwnd, "Device paired. Uploading backup folder.");
     LRESULT(0)
 }
 

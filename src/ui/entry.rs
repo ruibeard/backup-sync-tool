@@ -94,22 +94,15 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(GetStockObject(WHITE_BRUSH).0 as isize);
             }
             if id == IDC_SERVER_STATUS {
-                SetTextColor(hdc, COLORREF(C_LABEL));
-                return LRESULT((*st).br_win.0 as isize);
-            }
-            if id == IDC_SYNC_STATUS {
-                let clr = if (*st).sync_status_state == crate::sync::ActivityState::Idle as usize {
-                    C_GREEN
-                } else {
-                    C_LABEL
-                };
-                SetTextColor(hdc, COLORREF(clr));
-                return LRESULT((*st).br_win.0 as isize);
+                SetTextColor(hdc, COLORREF(0x00FFFFFF));
+                return LRESULT(GetStockObject(NULL_BRUSH).0 as isize);
             }
             let text_clr = match id {
                 IDC_DEST_CREATED => C_GREEN,
                 IDC_REPO => C_BLUE,
                 IDC_AUTHOR => C_LABEL,
+                IDC_SERVER_HDR | IDC_ACTIVITY_HDR => 0x00888888,
+                IDC_SERVER_URL_LABEL => 0x00777777,
                 _ => C_LABEL,
             };
             SetTextColor(hdc, COLORREF(text_clr));

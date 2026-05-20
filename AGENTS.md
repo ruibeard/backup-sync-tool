@@ -33,6 +33,26 @@ Always confirm:
 - Auto-update checks GitHub releases directly and replaces the exe in place.
 - `target/` is ignored and should not be committed.
 
+## Sync And Pairing (must match README)
+
+- **Start sync** via `restart_sync_engine()` in `src/ui/utils.rs` — on app launch (if configured), after successful pairing (`on_app_pair_result`), and on Save (`do_save`). Pairing must not end at config save without starting the engine.
+- **First backup:** no local `.backupsynctool-manifest.json` + `sync_remote_changes` false → startup uploads every file in `watch_folder`.
+- **Local manifest** (`{watch_folder}/.backupsynctool-manifest.json`): last successful upload per path only; updated in `upload_path` after PUT succeeds.
+- **Remote manifest:** written from `PROPFIND` (`save_remote_manifest_from_server`), never from a full local scan.
+- **Upload skip** (when local manifest exists): local unchanged since last success **and** file present on server with matching size (`remote_file_states`).
+- **Logs:** always on; daily files under `logs/` next to the exe (`src/logs.rs`).
+
+## WebDAV Errors
+
+- Only **HTTP 401** → `WebDavError::AuthFailed` → pause sync + pair-again UI.
+- **HTTP 403** on `MKCOL` → treat as folder exists (403/405); continue to PUT.
+- Do not show “Credentials Invalid” for Storage Box folder-create 403s.
+
+## UI Notices
+
+- Use `notify_user()` / `notify_user_status()` in `src/ui/utils.rs` for non-blocking ribbon + Recent Activity messages.
+- Do not add `MessageBox` for routine success/error; it freezes the UI thread. Reserve modals for actions that need explicit Yes/No (e.g. update install).
+
 ## Release
 
 Use `.\build-local.ps1` for normal local build/test cycles. It performs the required stop, release build, root exe copy, root launch, and running-process verification.

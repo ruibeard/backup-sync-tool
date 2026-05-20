@@ -1,5 +1,5 @@
 // ── WM_DRAWITEM ───────────────────────────────────────────────────────────────
-const BLUE_IDS: &[u16] = &[IDC_SAVE, IDC_UPDATE_LINK];
+const BLUE_IDS: &[u16] = &[IDC_UPDATE_LINK];
 const BORDERLESS_IDS: &[u16] = &[IDC_GITHUB];
 const GITHUB_IDS: &[u16] = &[IDC_GITHUB];
 

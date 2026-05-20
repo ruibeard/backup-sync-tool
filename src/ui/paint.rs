@@ -14,29 +14,59 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
         return;
     }
 
-    if !(*st).sync_icon.0.is_null() {
-        let r = (*st).sync_icon_rect;
-        let _ = DrawIconEx(
-            hdc,
-            r.left,
-            r.top,
-            (*st).sync_icon,
-            r.right - r.left,
-            r.bottom - r.top,
-            0,
-            HBRUSH(std::ptr::null_mut()),
-            DI_NORMAL,
-        );
+    let ribbon_color = if (*st).status_dot_color == C_GREEN {
+        C_GREEN
+    } else if (*st).status_dot_color == C_AMBER {
+        C_RIBBON_AMBER
+    } else {
+        C_RIBBON_RED
+    };
+    let rr = (*st).ribbon_rect;
+    if rr.right > rr.left && rr.bottom > rr.top {
+        let br_ribbon = CreateSolidBrush(COLORREF(ribbon_color));
+        FillRect(hdc, &rr, br_ribbon);
+        DeleteObject(br_ribbon);
+    }
+
+    // Server status dot (white on ribbon; spinner spoke when busy)
+    let sr = (*st).server_status_rect;
+    if sr.right > sr.left && sr.bottom > sr.top {
+        let br_dot = CreateSolidBrush(COLORREF(0x00FFFFFF));
+        let op_br = SelectObject(hdc, br_dot);
+        Ellipse(hdc, sr.left, sr.top, sr.right, sr.bottom);
+        SelectObject(hdc, op_br);
+        DeleteObject(br_dot);
+
+        let is_busy = (*st).sync_status_state == crate::sync::ActivityState::Checking as usize
+            || (*st).sync_status_state == crate::sync::ActivityState::Syncing as usize;
+        if is_busy {
+            let cx = (sr.left + sr.right) / 2;
+            let cy = (sr.top + sr.bottom) / 2;
+            let r = ((sr.right - sr.left) / 2) as f64;
+            let frame = (*st).sync_anim_frame as f64;
+            let angle = frame * std::f64::consts::PI / 3.0; // 60° steps
+            let x2 = cx + (r * angle.cos()) as i32;
+            let y2 = cy - (r * angle.sin()) as i32;
+            let pen = CreatePen(PS_SOLID, 2, COLORREF(ribbon_color));
+            let op_pen = SelectObject(hdc, pen);
+            let _ = MoveToEx(hdc, cx, cy, None);
+            let _ = LineTo(hdc, x2, y2);
+            SelectObject(hdc, op_pen);
+            DeleteObject(pen);
+        }
     }
 
     // Subtle divider lines between sections
     for &dy in &(*st).dividers {
+        if dy <= 0 {
+            continue;
+        }
         let hp = CreatePen(PS_SOLID, 1, COLORREF(C_DIVIDER));
         let op = SelectObject(hdc, hp);
-        MoveToEx(hdc, M, dy, None);
-        LineTo(hdc, WIN_W - M, dy);
+        let _ = MoveToEx(hdc, M, dy, None);
+        let _ = LineTo(hdc, WIN_W - M, dy);
         SelectObject(hdc, op);
-        DeleteObject(hp);
+        let _ = DeleteObject(hp);
     }
 }
 
@@ -97,4 +127,3 @@ unsafe extern "system" fn edit_sub(
         _ => DefSubclassProc(hwnd, msg, wp, lp),
     }
 }
-

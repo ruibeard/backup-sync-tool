@@ -34,11 +34,9 @@ use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging as wam;
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, ExtractIconExW, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW,
-    SetWindowSubclass, SHGetStockIconInfo, SHSTOCKICONID, SHSTOCKICONINFO,
+    DefSubclassProc, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW,
+    SetWindowSubclass,
     BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
-    SHGSI_ICON, SHGSI_LINKOVERLAY, SHGSI_SMALLICON, SIID_ERROR, SIID_FOLDER, SIID_FOLDEROPEN,
-    SIID_WARNING,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -268,6 +266,8 @@ const C_GREY_BORDER: u32 = 0x00BBBBBB;
 const C_GREEN: u32 = 0x00287A28; // connected
 const C_AMBER: u32 = 0x0000A5FF; // waiting / pending approval
 const C_RED: u32 = 0x000000CC; // not connected
+const C_RIBBON_AMBER: u32 = 0x000677D9;
+const C_RIBBON_RED: u32 = 0x001C1CB9;
 const C_DIVIDER: u32 = 0x00E0E0E0; // section separator line
 
 // ── Control IDs ──────────────────────────────────────────────────────────────
@@ -279,7 +279,6 @@ const IDC_USERNAME: u16 = 104;
 const IDC_PASSWORD: u16 = 105;
 const IDC_REMOTE_FOLDER: u16 = 106;
 const IDC_CONNECT: u16 = 108;
-const IDC_STATUS_TEXT: u16 = 109;
 const IDC_SERVER_STATUS: u16 = 123;
 const IDC_SAVE: u16 = 110;
 const IDC_SYNC_STATUS: u16 = 117;
@@ -297,6 +296,7 @@ const IDC_ORIGIN_LABEL: u16 = 213;
 const IDC_DEST_LABEL: u16 = 214;
 const IDC_ACTIVITY_HDR: u16 = 215;
 const IDC_PAIR_DEVICE: u16 = 217;
+const IDC_SERVER_URL_LABEL: u16 = 218;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -313,11 +313,6 @@ const SS_LEFT: u32 = 0x0000;
 const SS_CENTER: u32 = 0x0001;
 const SS_RIGHT: u32 = 0x0002;
 const SS_NOTIFY: u32 = 0x0100;
-const SS_ICON: u32 = 0x0003;
-const IMAGE_ICON: u32 = 1;
-const STM_SETIMAGE: u32 = 0x0172;
-const BM_SETIMAGE: u32 = 0x00F7;
-
 pub const CLASS_NAME: PCWSTR = w!("BackupSyncToolWnd");
 const REPO_URL: &str = "https://github.com/ruibeard/backup-sync-tool";
 const AUTHOR_URL: &str = "https://ruialmeida.me";
@@ -341,10 +336,11 @@ const BTN_H: i32 = 30; // bottom-bar primary button height
 const SMALL_BTN_H: i32 = 24; // compact secondary button height
 const HDR_H: i32 = 20; // section heading height
 const LBL_H: i32 = 18; // label text height
-const BROWSE_W: i32 = 34; // folder icon button width
+const BROWSE_W: i32 = 64; // text button width
 const FOLDER_ACTIONS_W: i32 = BROWSE_W * 2 + PAD;
 const PAIR_BTN_W: i32 = 82;
-const SERVER_STATUS_W: i32 = 58;
+const RIBBON_H: i32 = 40;
+
 const MIN_ACTIVITY_LIST_H: i32 = 96;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
 
@@ -359,6 +355,7 @@ struct WndState {
     sync_status_state: usize,
     sync_progress_done: usize,
     sync_progress_total: usize,
+    sync_last_failed: usize,
     sync_started_at: Option<std::time::Instant>,
     sync_anim_frame: usize,
     sync_icon: HICON,
@@ -368,9 +365,8 @@ struct WndState {
     server_tooltip: HWND,
     server_tooltip_text: Vec<u16>,
     status_dot_color: u32,
-    status_ok_icon: HICON,
-    status_warn_icon: HICON,
-    status_error_icon: HICON,
+    server_status_rect: RECT,
+    ribbon_rect: RECT,
     hfont: HFONT,
     hfont_hdr: HFONT,
     hfont_b: HFONT,

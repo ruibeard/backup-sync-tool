@@ -85,11 +85,11 @@ unsafe fn do_open_local_folder(hwnd: HWND) {
     let folder = gettext(hwnd, IDC_WATCH_FOLDER);
     let folder = folder.trim();
     if folder.is_empty() {
-        msgbox(hwnd, "Origin folder is empty.", "Open Folder");
+        notify_user(hwnd, "Origin folder is empty.");
         return;
     }
     if !Path::new(folder).is_dir() {
-        msgbox(hwnd, "Origin folder does not exist.", "Open Folder");
+        notify_user(hwnd, "Origin folder does not exist.");
         return;
     }
     let _ = windows::Win32::UI::Shell::ShellExecuteW(
@@ -119,7 +119,7 @@ unsafe fn do_connect(hwnd: HWND) {
     read_ctrls(hwnd, st);
     let cfg = st.config.clone();
     if let Err(err) = validate_webdav_url(&cfg.webdav_url) {
-        msgbox(hwnd, &err, "Connect");
+        notify_user_status(hwnd, "Invalid server URL", C_RED, &err);
         return;
     }
     let pass = st.password_plain.clone();
@@ -130,7 +130,6 @@ unsafe fn do_connect(hwnd: HWND) {
         GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
         &hstring("Connecting"),
     );
-    ShowWindow(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), SW_SHOW);
     let raw = hwnd.0 as isize;
     std::thread::spawn(move || {
         let ok = webdav::test_connection(&cfg, &pass).is_ok();
@@ -167,9 +166,8 @@ unsafe fn do_pair_device(hwnd: HWND) {
     set_status_dot_color(hwnd, C_AMBER);
     let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-        &hstring("Waiting for approval"),
+        &hstring("Pairing - waiting for approval"),
     );
-    ShowWindow(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), SW_SHOW);
 
     std::thread::spawn(move || {
         if detected_folder.is_none() {
@@ -320,86 +318,56 @@ unsafe fn do_save(hwnd: HWND) {
         );
     }
     if st.config.watch_folder.trim().is_empty() {
-        msgbox(hwnd, "Origin folder is required.", "Save");
+        notify_user(hwnd, "Origin folder is required.");
         return;
     }
     if st.config.webdav_url.trim().is_empty() {
-        msgbox(hwnd, "Server URL is required.", "Save");
+        notify_user(hwnd, "Server URL is required.");
         return;
     }
     if let Err(err) = validate_webdav_url(&st.config.webdav_url) {
-        msgbox(hwnd, &err, "Save");
+        notify_user_status(hwnd, "Save failed", C_RED, &err);
         return;
     }
     if st.config.remote_folder.trim().is_empty() {
-        msgbox(hwnd, "Destination folder is required.", "Save");
+        notify_user(hwnd, "Destination folder is required.");
         return;
     }
     match secret::encrypt(&st.password_plain) {
         Ok(enc) => st.config.password_enc = enc,
         Err(e) => {
-            msgbox(hwnd, &format!("Encrypt error: {e}"), "Error");
+            notify_user_status(hwnd, "Save failed", C_RED, &format!("Encrypt error: {e}"));
             return;
         }
     }
     if let Err(e) = crate::config::save(&st.config) {
-        msgbox(hwnd, &format!("Save error: {e}"), "Error");
+        notify_user_status(hwnd, "Save failed", C_RED, &format!("Save error: {e}"));
         return;
     }
     apply_startup(&st.config);
     let cfg = st.config.clone();
     let pass = st.password_plain.clone();
     let raw = hwnd.0 as isize;
-    let log: crate::sync::LogFn = Arc::new(move |m: String| {
-        logs::append(&m);
-        let s = Box::new(m);
-        unsafe {
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_LOG,
-                WPARAM(0),
-                LPARAM(Box::into_raw(s) as isize),
-            )
-                .ok();
-        }
-    });
-    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_SYNC_ACTIVITY,
-            WPARAM(info.state as usize),
-            LPARAM(Box::into_raw(Box::new((info.completed, info.total))) as isize),
-        )
-            .ok();
-    });
-    let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(HWND(raw as *mut _), WM_APP_AUTH_FAILED, WPARAM(0), LPARAM(0)).ok();
-    });
-    if st.sync_engine.is_some() {
-        st.sync_engine = None;
-    }
-    match crate::sync::SyncEngine::start(cfg.clone(), pass.clone(), log, activity, auth_failed) {
-        Ok(e) => {
+    match restart_sync_engine(hwnd) {
+        Ok(()) => {
             let st = stmut(hwnd);
-            st.sync_engine = Some(e);
-            let msg = Box::new("Settings saved. File watching is active.".to_string());
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_LOG,
-                WPARAM(0),
-                LPARAM(Box::into_raw(msg) as isize),
-            )
-                .ok();
-            msgbox(hwnd, "Settings saved. Sync is now active.", "Save");
+            st.sync_status_state = crate::sync::ActivityState::Checking as usize;
+            set_ribbon_status_text(
+                hwnd,
+                if is_paired(&st.config) {
+                    "Paired \u{2022} Checking..."
+                } else {
+                    "Checking..."
+                },
+            );
+            set_status_dot_color(hwnd, C_AMBER);
+            notify_user(hwnd, "Settings saved. Sync started.");
         }
-        Err(e) => {
-            msgbox(hwnd, &format!("Sync error: {e}"), "Error");
-        }
+        Err(e) => notify_user_status(hwnd, "Sync error", C_RED, &e),
     }
     if !cfg.webdav_url.is_empty() && !cfg.username.is_empty() && !pass.is_empty() {
         ShowWindow(GetDlgItem(hwnd, IDC_CONNECT as i32), SW_HIDE);
         set_status_dot_color(hwnd, C_AMBER);
-        ShowWindow(GetDlgItem(hwnd, IDC_STATUS_TEXT as i32), SW_SHOW);
         std::thread::spawn(move || {
             let ok = webdav::test_connection(&cfg, &pass).is_ok();
             PostMessageW(
@@ -487,9 +455,8 @@ unsafe fn do_open_logs(hwnd: HWND) {
 
 fn required_client_height(st: &WndState) -> i32 {
     let folders_h = (LBL_H + 4) + INP_H + GAP + (LBL_H + 4) + INP_H + SECT;
-    let activity_h =
-        HDR_H + PAD + MIN_ACTIVITY_LIST_H + st.post_list_gap + st.sync_row_h + st.post_sync_sect;
-    M + 4 + HDR_H + PAD + folders_h + activity_h + st.bottom_bar_h
+    let activity_h = HDR_H + PAD + MIN_ACTIVITY_LIST_H + st.post_list_gap + st.post_sync_sect;
+    RIBBON_H + 12 + HDR_H + 8 + folders_h + activity_h + st.bottom_bar_h
 }
 
 unsafe fn layout_main(hwnd: HWND) {
@@ -502,13 +469,46 @@ unsafe fn layout_main(hwnd: HWND) {
     GetClientRect(hwnd, &mut cr).ok();
     let client_h = cr.bottom - cr.top;
 
-    let mut y = M + 4;
+    let mut y = 0;
 
-    let status_w = 16i32;
-    let pair_x = M + INNER_W - PAIR_BTN_W;
-    let server_status_w = SERVER_STATUS_W;
-    let server_status_x = pair_x - PAD - server_status_w;
-    let status_x = server_status_x - status_w - 6;
+    let pair_x = WIN_W - M - PAIR_BTN_W;
+    let dot_size = 10i32;
+    let dot_x = M;
+    let dot_y = y + (RIBBON_H - dot_size) / 2;
+    (*st).ribbon_rect = RECT {
+        left: 0,
+        top: y,
+        right: WIN_W,
+        bottom: y + RIBBON_H,
+    };
+    (*st).server_status_rect = RECT {
+        left: dot_x,
+        top: dot_y,
+        right: dot_x + dot_size,
+        bottom: dot_y + dot_size,
+    };
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
+        None,
+        M + dot_size + 8,
+        y + (RIBBON_H - LBL_H) / 2,
+        pair_x - M - dot_size - 16,
+        LBL_H,
+        SWP_NOZORDER,
+    )
+        .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32),
+        None,
+        pair_x,
+        y + (RIBBON_H - SMALL_BTN_H) / 2,
+        PAIR_BTN_W,
+        SMALL_BTN_H,
+        SWP_NOZORDER,
+    )
+        .ok();
+    y += RIBBON_H + 12;
+
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SERVER_HDR as i32),
         None,
@@ -518,41 +518,21 @@ unsafe fn layout_main(hwnd: HWND) {
         HDR_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     SetWindowPos(
-        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
+        GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
         None,
-        server_status_x,
+        M + 95,
         y,
-        server_status_w,
-        LBL_H,
+        INNER_W - 95,
+        HDR_H,
         SWP_NOZORDER,
     )
-        .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_STATUS_TEXT as i32),
-        None,
-        status_x,
-        y,
-        status_w,
-        LBL_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32),
-        None,
-        pair_x,
-        y + (HDR_H - SMALL_BTN_H) / 2,
-        PAIR_BTN_W,
-        SMALL_BTN_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += HDR_H + PAD;
+    .ok();
+    y += HDR_H + 8;
 
     if !(*st).dividers.is_empty() {
-        (&mut (*st).dividers)[0] = y - SECT / 2;
+        (&mut (*st).dividers)[0] = 0;
     }
 
     let open_x = M + INNER_W - BROWSE_W;
@@ -585,21 +565,21 @@ unsafe fn layout_main(hwnd: HWND) {
         None,
         browse_x,
         y,
-        34,
+        BROWSE_W,
         INP_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_OPEN_LOCAL_FOLDER as i32),
         None,
         open_x,
         y,
-        34,
+        BROWSE_W,
         INP_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     y += INP_H + GAP;
 
     SetWindowPos(
@@ -653,7 +633,7 @@ unsafe fn layout_main(hwnd: HWND) {
     (*st).activity_list_top = y;
 
     let footer_top = client_h - (*st).bottom_bar_h;
-    let activity_fixed_h = (*st).post_list_gap + (*st).sync_row_h + (*st).post_sync_sect;
+    let activity_fixed_h = (*st).post_list_gap + (*st).post_sync_sect;
     let new_lb_h = (footer_top - y - activity_fixed_h).max(MIN_ACTIVITY_LIST_H);
     SetWindowPos(
         GetDlgItem(hwnd, IDC_ACTIVITY_LIST as i32),
@@ -666,44 +646,7 @@ unsafe fn layout_main(hwnd: HWND) {
     )
         .ok();
     y += new_lb_h + (*st).post_list_gap;
-
-    let sync_icon_w = 16i32;
-    let sync_gap = 8i32;
-    let progress_h = 10i32;
-    let sync_row_h = (*st).sync_row_h;
-    (*st).sync_icon_rect = RECT {
-        left: M,
-        top: y + (sync_row_h - sync_icon_w) / 2,
-        right: M + sync_icon_w,
-        bottom: y + (sync_row_h - sync_icon_w) / 2 + sync_icon_w,
-    };
-
-    let status_x = M + sync_icon_w + sync_gap;
-    let status_w = 180i32;
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
-        None,
-        status_x,
-        y + (sync_row_h - LBL_H) / 2,
-        status_w,
-        LBL_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-
-    let progress_x = status_x + status_w + sync_gap;
-    let progress_w = INNER_W - (progress_x - M);
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32),
-        None,
-        progress_x,
-        y + (sync_row_h - progress_h) / 2,
-        progress_w,
-        progress_h,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += sync_row_h + (*st).post_sync_sect;
+    y += (*st).post_sync_sect;
 
     let div_idx = (*st).divider_activity_idx;
     if div_idx < (*st).dividers.len() {
