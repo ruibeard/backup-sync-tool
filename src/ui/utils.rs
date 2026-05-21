@@ -517,22 +517,6 @@ unsafe fn state_ptr(hwnd: HWND) -> *mut WndState {
     GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState
 }
 
-unsafe fn mkfont(name: &str, pt: i32, weight: i32) -> HFONT {
-    let hdc = GetDC(None);
-    let dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(None, hdc);
-    let h = -(pt * dpi / 72);
-    let nw: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut lf = LOGFONTW {
-        lfHeight: h,
-        lfWeight: weight,
-        ..Default::default()
-    };
-    let n = nw.len().min(lf.lfFaceName.len());
-    lf.lfFaceName[..n].copy_from_slice(&nw[..n]);
-    CreateFontIndirectW(&lf)
-}
-
 /// Match mockup CSS `font-size: Npx` (character height in device pixels).
 unsafe fn mkfont_px(name: &str, px: i32, weight: i32) -> HFONT {
     let nw: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();

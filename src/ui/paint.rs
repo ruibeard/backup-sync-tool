@@ -22,7 +22,7 @@ unsafe fn png_bytes_to_hbitmap(bytes: &[u8], target_px: i32) -> HBITMAP {
         return HBITMAP(std::ptr::null_mut());
     }
 
-    let mut bmi = BITMAPINFO {
+    let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: w,
@@ -116,83 +116,6 @@ unsafe fn blit_hbitmap_alpha(hdc_dest: HDC, dest: &RECT, hbmp: HBITMAP) {
 
 unsafe fn draw_bridge_icon_png(hdc: HDC, rc: &RECT, hbmp: HBITMAP) {
     blit_hbitmap_alpha(hdc, rc, hbmp);
-}
-
-unsafe fn draw_bridge_node_name(
-    hdc: HDC,
-    rc: &RECT,
-    name: &str,
-    hf: HFONT,
-    connection: Option<bool>,
-) {
-    let of = SelectObject(hdc, hf);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, COLORREF(C_LABEL));
-
-    let Some(connected) = connection else {
-        draw_text_w(
-            hdc,
-            rc,
-            name,
-            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
-        );
-        SelectObject(hdc, of);
-        return;
-    };
-
-    let sym = if connected { "\u{2713}" } else { "\u{2717}" };
-    let sym_color = if connected { C_GREEN } else { C_RED };
-    let gap = 5;
-
-    let mut name_w: Vec<u16> = name.encode_utf16().collect();
-    let mut sym_w: Vec<u16> = sym.encode_utf16().collect();
-    let mut name_rc = RECT::default();
-    let mut sym_rc = RECT::default();
-    DrawTextW(
-        hdc,
-        &mut name_w,
-        &mut name_rc,
-        DT_LEFT | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
-    );
-    DrawTextW(
-        hdc,
-        &mut sym_w,
-        &mut sym_rc,
-        DT_LEFT | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
-    );
-    let name_w_px = name_rc.right - name_rc.left;
-    let sym_w_px = sym_rc.right - sym_rc.left;
-    let total_w = name_w_px + gap + sym_w_px;
-    let row_w = rc.right - rc.left;
-    let start_x = rc.left + (row_w - total_w) / 2;
-
-    let name_draw = RECT {
-        left: start_x,
-        top: rc.top,
-        right: start_x + name_w_px,
-        bottom: rc.bottom,
-    };
-    draw_text_w(
-        hdc,
-        &name_draw,
-        name,
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
-    );
-
-    SetTextColor(hdc, COLORREF(sym_color));
-    let sym_draw = RECT {
-        left: start_x + name_w_px + gap,
-        top: rc.top,
-        right: start_x + total_w,
-        bottom: rc.bottom,
-    };
-    draw_text_w(
-        hdc,
-        &sym_draw,
-        sym,
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
-    );
-    SelectObject(hdc, of);
 }
 
 unsafe fn fill_rect_color(hdc: HDC, rc: &RECT, color: u32) {
@@ -671,10 +594,6 @@ fn bridge_pc_path(st: &WndState) -> String {
     } else {
         path.to_string()
     }
-}
-
-fn bridge_server_path(st: &WndState) -> String {
-    customer_slug_label(st)
 }
 
 fn bridge_server_name(st: &WndState) -> String {

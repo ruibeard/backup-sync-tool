@@ -349,23 +349,18 @@ const ACTION_BTN_W: i32 = 94; // Open / Browse / Connect / Reconnect / footer bu
 const ACTION_BTN_H: i32 = INP_H;
 const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
 const META_ICON_GAP: i32 = 5; // gap between version link and GitHub icon
-const FOLDER_ACTIONS_W: i32 = ACTION_BTN_W * 2 + PAD;
 const CONTENT_TOP_PAD: i32 = 20;
 const BRIDGE_PAD_Y: i32 = 0;
 const BRIDGE_NODE_GAP: i32 = 24;
 const BRIDGE_ICO: i32 = 40;
 const BRIDGE_ICO_TILE: i32 = 52;
-const BRIDGE_ICO_GAP: i32 = 10;
 const BRIDGE_BTN_H: i32 = 30;
 const BRIDGE_HEADER_H: i32 = BRIDGE_ICO_TILE + 5 + BRIDGE_NAME_H + 2 + BRIDGE_PATH_H;
-const BRIDGE_TEXT_GAP: i32 = 10;
 const BRIDGE_OPEN_BTN_W: i32 = 58;
 const BRIDGE_BROWSE_BTN_W: i32 = 82;
 const BRIDGE_PAIR_BTN_W: i32 = 150;
 const BRIDGE_DIVIDER_VPAD: i32 = 12;
-const BRIDGE_NODE_PAD: i32 = 0;
 const BRIDGE_NAME_H: i32 = 20;
-const BRIDGE_NAME_GAP: i32 = 4;
 const BRIDGE_CONN_LABEL_H: i32 = 18;
 const SYNC_BAR_H: i32 = 10;
 const SYNC_BAND_H: i32 = 44;
@@ -376,17 +371,7 @@ const BRIDGE_CONTENT_H: i32 = BRIDGE_HEADER_H
     + BRIDGE_DIVIDER_VPAD
     + 1;
 const BRIDGE_H: i32 = BRIDGE_PAD_Y + BRIDGE_CONTENT_H + BRIDGE_PAD_Y;
-const FOOTER_PANEL_BG: u32 = C_WIN_BG;
-const C_FOOTER_SLUG_BG: u32 = 0x00F0F0F0;
-const C_FOOTER_SLUG_BORDER: u32 = 0x00E0E0E0;
 const STATUS_ROW_H: i32 = 0;
-
-struct BridgeGeom {
-    node_w: i32,
-    left_x: i32,
-    mid_x: i32,
-    right_x: i32,
-}
 
 struct BridgeLayout {
     height: i32,
@@ -406,17 +391,6 @@ struct BridgeLayout {
     right_name: RECT,
     left_path: RECT,
     right_conn: RECT,
-}
-
-fn bridge_geom(inner_w: i32) -> BridgeGeom {
-    let node_w = (inner_w - BRIDGE_NODE_GAP) / 2;
-    let left_x = M;
-    BridgeGeom {
-        node_w,
-        left_x,
-        mid_x: 0,
-        right_x: left_x + node_w + BRIDGE_NODE_GAP,
-    }
 }
 
 fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
@@ -494,20 +468,14 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
     }
 }
 
-const C_BRIDGE_BG: u32 = 0x00FFFFFF;
-const C_BRIDGE_BORDER: u32 = 0x00E0E0E0;
 const C_BRIDGE_ICO_BG: u32 = 0x00FBF3EE; // #eef3fb
 const C_BRIDGE_ICO_BORDER: u32 = 0x00F0DCD0; // #d0dcf0
-const C_BRIDGE_SVR_ICO_BG: u32 = 0x00FFF4F0; // #f0f4ff
 const C_PILL_GREEN_BG: u32 = 0x00E9F5E8; // #e8f5e9
 const C_PILL_SYNC_BG: u32 = 0x00FDF2E3; // #e3f2fd
 const C_PILL_SYNC_TXT: u32 = 0x00C06515; // #1565c0
-const C_FLOW_TRACK: u32 = 0x00E0E0E0;
-const C_FLOW_SYNC: u32 = C_BLUE;
 const SYNC_FOOTER_H: i32 = 44;
 const C_STATUS_BG: u32 = 0x00FFFFFF;
 const C_DEST_PATH_BG: u32 = C_FOOTER_IDLE_BG;
-const C_DEST_PATH_BORDER: u32 = C_FOOTER_IDLE_BORDER;
 const C_PANEL_BORDER: u32 = 0x00CCCCCC;
 const C_FOOTER_IDLE_BG: u32 = 0x00FAFAFA;
 const C_FOOTER_IDLE_BORDER: u32 = 0x00E0E0E0;
@@ -644,14 +612,6 @@ struct WndState {
 
 fn config_is_paired(cfg: &Config) -> bool {
     !cfg.device_token_enc.trim().is_empty()
-}
-
-fn customer_slug_label(st: &WndState) -> String {
-    let folder = st.config.remote_folder.trim();
-    if !folder.is_empty() && !is_root_remote_folder(folder) {
-        return folder.to_string();
-    }
-    "Not paired".to_string()
 }
 
 fn is_root_remote_folder(folder: &str) -> bool {

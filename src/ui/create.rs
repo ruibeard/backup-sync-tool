@@ -861,7 +861,7 @@ unsafe fn footer_meta_layout(footer_y: i32, hf_link: HFONT, slug: &str) -> Foote
     }
 }
 
-unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout, slug: &str) {
+unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout, _slug: &str) {
     let ver_label = concat!("v", env!("CARGO_PKG_VERSION"));
     SetWindowPos(
         GetDlgItem(hwnd, IDC_REPO as i32),

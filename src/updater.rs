@@ -129,3 +129,49 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     }
     parse(candidate) > parse(current)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_newer_year_semver() {
+        assert!(is_newer("2026.0.4", "2026.0.3"));
+        assert!(!is_newer("2026.0.3", "2026.0.4"));
+        assert!(!is_newer("2026.0.4", "2026.0.4"));
+        assert!(is_newer("2026.1.0", "2026.0.99"));
+        assert!(is_newer("v2026.0.4", "2026.0.3"));
+    }
+
+    #[test]
+    fn is_newer_old_scheme_to_year_scheme() {
+        assert!(is_newer("2026.0.1", "0.3.0"));
+        assert!(!is_newer("0.9.0", "2026.0.1"));
+    }
+
+    #[test]
+    #[ignore = "hits GitHub API"]
+    fn check_detects_update_when_behind() {
+        match check("2026.0.0") {
+            CheckResult::UpdateAvailable(info) => {
+                assert!(!info.url.is_empty());
+                assert!(info.url.ends_with(".exe"));
+                assert!(is_newer(&info.version, "2026.0.0"));
+            }
+            CheckResult::UpToDate => panic!("expected update from 2026.0.0"),
+            CheckResult::Error(e) => panic!("GitHub API error: {e}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "hits GitHub API"]
+    fn check_up_to_date_at_current_version() {
+        match check(env!("CARGO_PKG_VERSION")) {
+            CheckResult::UpToDate => {}
+            CheckResult::UpdateAvailable(info) => {
+                panic!("unexpected update v{} while running v{}", info.version, env!("CARGO_PKG_VERSION"))
+            }
+            CheckResult::Error(e) => panic!("GitHub API error: {e}"),
+        }
+    }
+}
