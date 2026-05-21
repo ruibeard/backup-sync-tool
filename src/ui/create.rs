@@ -59,7 +59,10 @@ unsafe fn on_create(hwnd: HWND) {
         status_subtitle: String::new(),
         bridge_rect: RECT::default(),
         bridge_progress_rect: RECT::default(),
-        bridge_mid_label: String::new(),
+        bridge_sync_head: String::new(),
+        bridge_sync_meta: String::new(),
+        bridge_conn_label: String::new(),
+        bridge_conn_ok: false,
         bridge_btn_y: 0,
         bridge_icon_pc,
         bridge_icon_cloud,
@@ -210,31 +213,12 @@ unsafe fn build_ui(
     let st = &mut *state_ptr(hwnd);
     let mut y = CONTENT_TOP_PAD;
 
-    // ── STATUS ROW + SYNC BRIDGE (H5 integrated actions) ───────────────────────
+    // ── H6 hero bridge (connection + sync in card) ─────────────────────────────
     {
-        st.status_strip_rect = RECT {
-            left: M,
-            top: y,
-            right: M + st.inner_w,
-            bottom: y + STATUS_ROW_H,
-        };
+        st.status_strip_rect = RECT::default();
         st.server_status_rect = RECT::default();
-        let status_initial = if is_paired(cfg) {
-            "Connected".to_string()
-        } else {
-            "Not paired".to_string()
-        };
-        st.status_strip_display = status_initial;
-        st.status_subtitle = if is_paired(cfg) {
-            "All synced".to_string()
-        } else {
-            String::new()
-        };
-        st.bridge_mid_label = if is_paired(cfg) {
-            "\u{2713}".to_string()
-        } else {
-            String::new()
-        };
+        st.status_strip_display.clear();
+        st.status_subtitle.clear();
         mkstatic(
             hwnd,
             hi,
@@ -248,9 +232,9 @@ unsafe fn build_ui(
         );
         ShowWindow(GetDlgItem(hwnd, IDC_SERVER_STATUS as i32), SW_HIDE);
         install_server_tooltip(hwnd, hi);
-        y += STATUS_ROW_H + 8;
 
         y = layout_bridge_section(hwnd, hi, cfg, y, hf_bridge);
+        update_bridge_display(hwnd);
     }
 
     // Hidden legacy controls (still used for read_ctrls / tooltips)
@@ -474,25 +458,6 @@ unsafe fn build_ui(
         );
         st.bottom_bar_h = row_h + (LBL_H - 2) + 4 + M;
     }
-
-    // Size window to fit content
-    st.min_client_h = required_client_height(st);
-    let mut wr = RECT::default();
-    GetWindowRect(hwnd, &mut wr).ok();
-    let mut cr = RECT::default();
-    GetClientRect(hwnd, &mut cr).ok();
-    let dh = (wr.bottom - wr.top) - (cr.bottom - cr.top);
-    let dw = (wr.right - wr.left) - (cr.right - cr.left);
-    SetWindowPos(
-        hwnd,
-        None,
-        0,
-        0,
-        WIN_W + dw,
-        st.min_client_h + dh,
-        SWP_NOMOVE | SWP_NOZORDER,
-    )
-    .ok();
 
     layout_main(hwnd);
 }
@@ -942,12 +907,14 @@ unsafe fn layout_bridge_section(
     let actions_w = BRIDGE_BTN_OPEN_W + BRIDGE_BTN_GAP + BRIDGE_BTN_BROWSE_W;
 
     let layout = bridge_layout_at(y, inner_w);
+    let show_progress = bridge_show_progress_block(&*st);
+    let card_h = layout.height + if show_progress { BRIDGE_SYNC_PROGRESS_H } else { 0 };
 
     (*st).bridge_rect = RECT {
         left: M,
         top: y,
         right: M + inner_w,
-        bottom: y + layout.height,
+        bottom: y + card_h,
     };
 
     (*st).bridge_btn_y = layout.btn_y;
@@ -972,25 +939,20 @@ unsafe fn layout_bridge_section(
     place_btn(hwnd, hi, IDC_BROWSE_LOCAL, "Browse", browse_x, BRIDGE_BTN_BROWSE_W);
     place_btn(hwnd, hi, IDC_PAIR_DEVICE, pair_label, pair_x, pair_w);
 
-    y += layout.height + 10;
+    if show_progress {
+        (*st).bridge_progress_rect = RECT {
+            left: M + BRIDGE_PAD_X,
+            top: y + layout.height + 2,
+            right: M + inner_w - BRIDGE_PAD_X,
+            bottom: y + card_h - 6,
+        };
+    } else {
+        (*st).bridge_progress_rect = RECT::default();
+    }
 
-    (*st).bridge_progress_rect = RECT {
-        left: M,
-        top: y,
-        right: M + inner_w,
-        bottom: y + BRIDGE_PROGRESS_H,
-    };
     let prog = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
     if prog.0.is_null() {
-        let prog_hwnd = mkprogress(
-            hwnd,
-            hi,
-            IDC_SYNC_PROGRESS,
-            M,
-            y,
-            inner_w,
-            BRIDGE_PROGRESS_H,
-        );
+        let prog_hwnd = mkprogress(hwnd, hi, IDC_SYNC_PROGRESS, 0, 0, 1, 1);
         SendMessageW(prog_hwnd, PBM_SETBARCOLOR, WPARAM(0), LPARAM(C_BLUE as isize));
         SendMessageW(
             prog_hwnd,
@@ -1000,10 +962,12 @@ unsafe fn layout_bridge_section(
         );
         ShowWindow(prog_hwnd, SW_HIDE);
     } else {
-        SetWindowPos(prog, None, M, y, inner_w, BRIDGE_PROGRESS_H, SWP_NOZORDER).ok();
+        ShowWindow(prog, SW_HIDE);
+        SetWindowPos(prog, None, 0, 0, 1, 1, SWP_NOZORDER).ok();
     }
 
-    y + GAP
+    y += card_h + GAP;
+    y
 }
 
 fn bridge_pair_btn_w(label: &str) -> i32 {

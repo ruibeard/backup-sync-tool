@@ -1,14 +1,4 @@
-<!-- Server bridge tile: box-rui-cam shield-check (public/favicon.svg) on mockup H5 tile -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
-  <rect width="40" height="40" rx="8" fill="#f0f4ff" stroke="#c5d9f5"/>
-  <defs>
-    <linearGradient id="g" x1="12" y1="10" x2="28" y2="32" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#166534"/>
-      <stop offset="1" stop-color="#15803D"/>
-    </linearGradient>
-  </defs>
-  <g transform="translate(6.5, 5.5) scale(0.42)">
-    <path d="M32 7 14 13v15c0 11.7 8 22.2 18 24.8C42 50.2 50 39.7 50 28V13L32 7Z" fill="url(#g)"/>
-    <path d="m24.5 31.5 5 5 10-11" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.5"/>
-  </g>
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="32" height="32" fill="#016630"/>
+    <path d="M13 16.0003L15 18.0003L19 14.0003M24.618 9.98434C21.4561 10.1523 18.3567 9.05895 16 6.94434C13.6433 9.05895 10.5439 10.1523 7.382 9.98434C7.12754 10.9695 6.99918 11.9829 7 13.0003C7 18.5913 10.824 23.2903 16 24.6223C21.176 23.2903 25 18.5923 25 13.0003C25 11.9583 24.867 10.9483 24.618 9.98434Z" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

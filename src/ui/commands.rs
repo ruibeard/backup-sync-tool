@@ -438,19 +438,59 @@ fn client_inner_w(hwnd: HWND) -> i32 {
 }
 
 fn required_client_height(st: &WndState) -> i32 {
-    let bridge_h = BRIDGE_H + 10 + GAP;
+    let bridge_h = bridge_section_total_h(st);
     let activity_h = HDR_H
         + PAD
         + MIN_ACTIVITY_LIST_H
         + st.post_list_gap
         + st.sync_row_h
         + st.post_sync_sect;
-    CONTENT_TOP_PAD + STATUS_ROW_H + 8 + bridge_h + activity_h + st.bottom_bar_h
+    CONTENT_TOP_PAD + bridge_h + activity_h + st.bottom_bar_h
+}
+
+/// Grow the window when content (e.g. idle progress block) needs more height.
+/// Returns true when a resize was applied; WM_SIZE will have laid out recursively.
+unsafe fn ensure_client_height(hwnd: HWND) -> bool {
+    let st = state_ptr(hwnd);
+    if st.is_null() {
+        return false;
+    }
+
+    let needed = required_client_height(&*st);
+    (*st).min_client_h = needed;
+
+    let mut cr = RECT::default();
+    GetClientRect(hwnd, &mut cr).ok();
+    let current_h = cr.bottom - cr.top;
+    if current_h >= needed {
+        return false;
+    }
+
+    let mut wr = RECT::default();
+    GetWindowRect(hwnd, &mut wr).ok();
+    GetClientRect(hwnd, &mut cr).ok();
+    let dh = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+    let dw = (wr.right - wr.left) - (cr.right - cr.left);
+    SetWindowPos(
+        hwnd,
+        None,
+        0,
+        0,
+        WIN_W + dw,
+        needed + dh,
+        SWP_NOMOVE | SWP_NOZORDER,
+    )
+    .ok();
+    true
 }
 
 unsafe fn layout_main(hwnd: HWND) {
     let st = state_ptr(hwnd);
     if st.is_null() {
+        return;
+    }
+
+    if ensure_client_height(hwnd) {
         return;
     }
 
@@ -461,13 +501,7 @@ unsafe fn layout_main(hwnd: HWND) {
     let mut y = CONTENT_TOP_PAD;
 
     (*st).inner_w = client_inner_w(hwnd);
-    (*st).status_strip_rect = RECT {
-        left: M,
-        top: y,
-        right: M + (*st).inner_w,
-        bottom: y + STATUS_ROW_H,
-    };
-    y += STATUS_ROW_H + 8;
+    (*st).status_strip_rect = RECT::default();
 
     (*st).inner_w = client_inner_w(hwnd);
     y = layout_bridge_section(
@@ -497,7 +531,12 @@ unsafe fn layout_main(hwnd: HWND) {
 
     let footer_top = client_h - (*st).bottom_bar_h;
     let activity_fixed_h = (*st).post_list_gap + (*st).sync_row_h + (*st).post_sync_sect;
-    let new_lb_h = (footer_top - y - activity_fixed_h).max(MIN_ACTIVITY_LIST_H);
+    let available = footer_top - y - activity_fixed_h;
+    let new_lb_h = if available >= MIN_ACTIVITY_LIST_H {
+        available
+    } else {
+        available.max(0)
+    };
     (*st).activity_list_rect = RECT {
         left: M,
         top: y,

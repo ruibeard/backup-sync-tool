@@ -1,11 +1,4 @@
 {
   "version": 1,
-  "hooks": {
-    "stop": [
-      {
-        "command": "powershell -NoProfile -Command \"$p=ConvertFrom-Json ([Console]::In.ReadToEnd());$window=200000;if($null -ne $p.context_window_size){$window=[double]$p.context_window_size};$usage=0;if($null -ne $p.context_usage_percent){$usage=[double]$p.context_usage_percent}elseif($null -ne $p.input_tokens){$usage=100*[double]$p.input_tokens/$window};if($p.status -eq 'completed' -and $usage -ge 35){@{followup_message='/summarize'}|ConvertTo-Json -Compress}else{'{}'}\"",
-        "loop_limit": null
-      }
-    ]
-  }
+  "hooks": {}
 }

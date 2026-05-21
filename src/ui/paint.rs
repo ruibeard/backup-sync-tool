@@ -324,102 +324,329 @@ unsafe fn draw_status_pill_row(
     }
 }
 
-unsafe fn draw_sync_bridge(
-    hdc: HDC,
-    br: &RECT,
-    pc_path: &str,
-    server_path: &str,
-    mid_label: &str,
-    idle: bool,
-    anim_frame: usize,
-    syncing: bool,
-    server_connected: bool,
-    icon_pc: HBITMAP,
-    icon_cloud: HBITMAP,
-    hf_name: HFONT,
-    hf_path: HFONT,
-    hf_mid: HFONT,
-    hf_check: HFONT,
-) {
+unsafe fn draw_bridge_icon_badge(hdc: HDC, ico: &RECT, ok: bool, hf: HFONT) {
+    let badge = 16;
+    let cx = ico.right - 4;
+    let cy = ico.bottom - 4;
+    let rc = RECT {
+        left: cx - badge / 2,
+        top: cy - badge / 2,
+        right: cx + badge / 2,
+        bottom: cy + badge / 2,
+    };
+    let color = if ok { C_BRIDGE_CONN_OK } else { C_BRIDGE_CONN_FAIL };
+    round_rect_color(hdc, &rc, color, color, badge / 2);
+    let sym = if ok { "\u{2713}" } else { "\u{2717}" };
+    let of = SelectObject(hdc, hf);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COLORREF(0x00FFFFFF));
+    draw_text_w(
+        hdc,
+        &rc,
+        sym,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+    );
+    SelectObject(hdc, of);
+}
+
+unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
     round_rect_color(hdc, br, C_BRIDGE_BG, C_BRIDGE_BORDER, 8);
 
     let inner_w = br.right - br.left;
     let layout = bridge_layout_at(br.top, inner_w);
+    let hf_name = st.hfont_bridge_name;
+    let hf_path = st.hfont_bridge_path;
+    let hf_mid = st.hfont_bridge_mid;
+    let hf_caption = st.hfont_small;
+
+    let syncing = st.sync_status_state == crate::sync::ActivityState::Checking as usize
+        || st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
+    let flow_idle = !syncing && st.bridge_sync_head == "All synced";
 
     let of_name = SelectObject(hdc, hf_name);
     SetBkMode(hdc, TRANSPARENT);
 
-    draw_bridge_icon_png(hdc, &layout.left_ico, icon_pc);
-    draw_bridge_icon_png(hdc, &layout.right_ico, icon_cloud);
+    draw_bridge_icon_png(hdc, &layout.left_ico, st.bridge_icon_pc);
+    draw_bridge_icon_png(hdc, &layout.right_ico, st.bridge_icon_cloud);
+    draw_bridge_icon_badge(hdc, &layout.right_ico, st.bridge_conn_ok, st.hfont_small);
 
     draw_bridge_node_name(hdc, &layout.left_name, "This PC", hf_name, None);
-    draw_bridge_node_name(
-        hdc,
-        &layout.right_name,
-        "Server",
-        hf_name,
-        Some(server_connected),
-    );
+    draw_bridge_node_name(hdc, &layout.right_name, "Server", hf_name, None);
 
     let of_s = SelectObject(hdc, hf_path);
     SetTextColor(hdc, COLORREF(C_BRIDGE_PATH_TXT));
     draw_text_w(
         hdc,
         &layout.left_path,
-        pc_path,
+        &bridge_pc_path(st),
         DT_CENTER | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
     draw_text_w(
         hdc,
         &layout.right_path,
-        server_path,
+        &bridge_server_path(st),
         DT_CENTER | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX,
+    );
+    SetTextColor(
+        hdc,
+        COLORREF(if st.bridge_conn_ok {
+            C_BRIDGE_CONN_OK
+        } else {
+            C_BRIDGE_CONN_FAIL
+        }),
+    );
+    draw_text_w(
+        hdc,
+        &layout.right_conn,
+        &st.bridge_conn_label,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
     SelectObject(hdc, of_s);
     SelectObject(hdc, of_name);
 
-    draw_bridge_mid(hdc, &layout.mid, mid_label, idle, anim_frame, syncing, hf_mid, hf_check);
+    draw_bridge_mid_h6(
+        hdc,
+        &layout.mid,
+        &st.bridge_sync_head,
+        &st.bridge_sync_meta,
+        flow_idle,
+        st.sync_anim_frame,
+        syncing,
+        hf_mid,
+        hf_caption,
+    );
+
+    if bridge_show_progress_block(st) {
+        draw_bridge_batch_progress(hdc, &st.bridge_progress_rect, st, hf_path, hf_mid);
+    }
 }
 
-unsafe fn draw_bridge_mid(
+unsafe fn draw_bridge_mid_h6(
     hdc: HDC,
     mid: &RECT,
-    mid_label: &str,
-    idle: bool,
+    head: &str,
+    meta: &str,
+    flow_idle: bool,
     anim_frame: usize,
     syncing: bool,
-    hf_mid: HFONT,
-    hf_check: HFONT,
+    hf_head: HFONT,
+    hf_meta: HFONT,
 ) {
-    let mid_h = mid.bottom - mid.top;
-    let label_h = if mid_label.is_empty() { 0 } else { 18 };
-    let label_gap = if mid_label.is_empty() { 0 } else { 6 };
-    let block_h = BRIDGE_FLOW_H + label_gap + label_h;
-    let block_top = mid.top + (mid_h - block_h) / 2 - 2;
+    let head_h = 14;
+    let gap = 4;
+    let block_top = mid.top + 6;
 
-    let line_y = block_top;
-    draw_bridge_flow(hdc, mid.left, mid.right, line_y, idle, anim_frame, syncing);
+    let head_color = if syncing {
+        C_BRIDGE_SYNC_HEAD_ACTIVE
+    } else if flow_idle {
+        C_BRIDGE_SYNC_HEAD_OK
+    } else {
+        C_BRIDGE_SYNC_HEAD_IDLE
+    };
+    let of_h = SelectObject(hdc, hf_head);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COLORREF(head_color));
+    let head_rc = RECT {
+        left: mid.left,
+        top: block_top,
+        right: mid.right,
+        bottom: block_top + head_h,
+    };
+    draw_text_w(
+        hdc,
+        &head_rc,
+        head,
+        DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+    );
+    SelectObject(hdc, of_h);
 
-    if !mid_label.is_empty() {
-        let is_check = mid_label == "\u{2713}";
-        let hf_lbl = if is_check { hf_check } else { hf_mid };
-        let of_s = SelectObject(hdc, hf_lbl);
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, COLORREF(C_BLUE));
-        let lbl = RECT {
-            left: mid.left,
-            top: line_y + BRIDGE_FLOW_H + label_gap,
-            right: mid.right,
-            bottom: line_y + BRIDGE_FLOW_H + label_gap + label_h,
+    let line_y = block_top + head_h + gap;
+    draw_bridge_flow(hdc, mid.left, mid.right, line_y, flow_idle, anim_frame, syncing);
+
+    let of_m = SelectObject(hdc, hf_meta);
+    SetTextColor(hdc, COLORREF(C_BRIDGE_PATH_TXT));
+    let meta_rc = RECT {
+        left: mid.left,
+        top: line_y + BRIDGE_FLOW_H + gap,
+        right: mid.right,
+        bottom: (line_y + BRIDGE_FLOW_H + gap + BRIDGE_META_H).min(mid.bottom),
+    };
+    let meta_text = meta.replace("\r\n", "\n");
+    draw_text_w(
+        hdc,
+        &meta_rc,
+        &meta_text,
+        DT_CENTER | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL,
+    );
+    SelectObject(hdc, of_m);
+}
+
+unsafe fn draw_bridge_batch_progress(
+    hdc: HDC,
+    rc: &RECT,
+    st: &WndState,
+    hf_detail: HFONT,
+    hf_pct: HFONT,
+) {
+    if rc.bottom <= rc.top || rc.right <= rc.left {
+        return;
+    }
+
+    let syncing = bridge_syncing_progress(st);
+    let all_synced = st.bridge_sync_head == "All synced";
+    let (pct, bar_color, detail, eta, verb, pct_color) = if syncing {
+        let done = st.sync_progress_done.min(st.sync_progress_total);
+        let total = st.sync_progress_total;
+        let pct = if total > 0 {
+            (done * 100) / total
+        } else {
+            0
         };
+        let file = st
+            .activity_rows
+            .iter()
+            .find(|row| row.kind == ActivityKind::Uploading || row.kind == ActivityKind::Downloading)
+            .map(|row| row.label.as_str())
+            .unwrap_or("...");
+        let detail = if total > 0 {
+            format!("{done} of {total} files · {file}")
+        } else {
+            file.to_string()
+        };
+        let eta = st
+            .sync_status_text
+            .split("ETA ")
+            .nth(1)
+            .and_then(|s| s.split('\u{00B7}').next())
+            .map(|eta| format!("ETA {eta}"))
+            .unwrap_or_default();
+        let verb = if st
+            .activity_rows
+            .iter()
+            .any(|row| row.kind == ActivityKind::Downloading)
+        {
+            "Downloading"
+        } else {
+            "Uploading"
+        };
+        (
+            pct,
+            C_BLUE,
+            detail,
+            eta,
+            verb.to_string(),
+            C_BRIDGE_SYNC_HEAD_ACTIVE,
+        )
+    } else if all_synced {
+        (
+            100,
+            C_GREEN,
+            String::new(),
+            String::new(),
+            "Up to date".to_string(),
+            C_BRIDGE_SYNC_HEAD_OK,
+        )
+    } else if st.bridge_sync_head == "Checking" {
+        (
+            0,
+            C_PROGRESS_TRACK,
+            String::new(),
+            String::new(),
+            "Checking".to_string(),
+            C_BRIDGE_SYNC_HEAD_IDLE,
+        )
+    } else {
+        (
+            0,
+            C_PROGRESS_TRACK,
+            String::new(),
+            String::new(),
+            String::new(),
+            C_BRIDGE_SYNC_HEAD_IDLE,
+        )
+    };
+
+    let divider = RECT {
+        left: rc.left,
+        top: rc.top,
+        right: rc.right,
+        bottom: rc.top + 1,
+    };
+    fill_rect_color(hdc, &divider, 0x00F5E8EE);
+
+    let row1 = RECT {
+        left: rc.left,
+        top: rc.top + 6,
+        right: rc.right,
+        bottom: rc.top + 20,
+    };
+    let of_d = SelectObject(hdc, hf_detail);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COLORREF(C_LABEL));
+    if !detail.is_empty() {
         draw_text_w(
             hdc,
-            &lbl,
-            mid_label,
-            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+            &row1,
+            &detail,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
         );
-        SelectObject(hdc, of_s);
     }
+    let pct_text = format!("{pct}%");
+    SetTextColor(hdc, COLORREF(pct_color));
+    let of_p = SelectObject(hdc, hf_pct);
+    if pct > 0 || all_synced {
+        draw_text_w(
+            hdc,
+            &row1,
+            &pct_text,
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
+        );
+    }
+    SelectObject(hdc, of_d);
+
+    let bar_y = rc.top + 22;
+    let track = RECT {
+        left: rc.left,
+        top: bar_y,
+        right: rc.right,
+        bottom: bar_y + BRIDGE_PROGRESS_H,
+    };
+    round_rect_color(hdc, &track, C_PROGRESS_TRACK, C_PROGRESS_TRACK, 2);
+    if pct > 0 {
+        let fill_w = ((track.right - track.left) * pct as i32).max(1) / 100;
+        let fill = RECT {
+            left: track.left,
+            top: track.top,
+            right: track.left + fill_w,
+            bottom: track.bottom,
+        };
+        round_rect_color(hdc, &fill, bar_color, bar_color, 2);
+    }
+
+    let row2 = RECT {
+        left: rc.left,
+        top: (rc.bottom - 16).max(bar_y + BRIDGE_PROGRESS_H + 4),
+        right: rc.right,
+        bottom: rc.bottom - 2,
+    };
+    SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
+    if !eta.is_empty() {
+        draw_text_w(
+            hdc,
+            &row2,
+            &eta,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+        );
+    }
+    if !verb.is_empty() {
+        draw_text_w(
+            hdc,
+            &row2,
+            &verb,
+            DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
+        );
+    }
+    SelectObject(hdc, of_p);
 }
 
 unsafe fn draw_bridge_flow(
@@ -427,7 +654,7 @@ unsafe fn draw_bridge_flow(
     left: i32,
     right: i32,
     line_y: i32,
-    idle: bool,
+    flow_idle: bool,
     anim_frame: usize,
     syncing: bool,
 ) {
@@ -440,13 +667,18 @@ unsafe fn draw_bridge_flow(
     };
     round_rect_color(hdc, &track, C_FLOW_TRACK, C_FLOW_TRACK, 2);
 
-    let flow_color = if idle { C_GREEN } else { C_FLOW_SYNC };
-    let flow_w = if idle {
+    let flow_w = if flow_idle {
         line_w
-    } else {
+    } else if syncing {
         (line_w * 45) / 100
+    } else {
+        0
     };
-    let offset = if idle || !syncing {
+    if flow_w <= 0 {
+        return;
+    }
+    let flow_color = if flow_idle { C_GREEN } else { C_FLOW_SYNC };
+    let offset = if flow_idle || !syncing {
         0
     } else {
         let span = (line_w - flow_w + 1).max(1) as usize;
@@ -477,16 +709,16 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
     let status_subtitle = (*st).status_subtitle.clone();
     let hf = (*st).hfont;
     let hf_pill = (*st).hfont_b;
-    let hf_name = (*st).hfont_bridge_name;
-    let hf_path = (*st).hfont_bridge_path;
-    let hf_mid = (*st).hfont_bridge_mid;
-    let hf_check = (*st).hfont_bridge_check;
     let hf_caption = (*st).hfont_small;
-    let syncing = (*st).sync_status_state == crate::sync::ActivityState::Checking as usize
-        || (*st).sync_status_state == crate::sync::ActivityState::Syncing as usize;
 
     let sr = (*st).status_strip_rect;
-    if sr.right > sr.left && sr.bottom > sr.top && !status_text.is_empty() {
+    if STATUS_ROW_H > 0
+        && sr.right > sr.left
+        && sr.bottom > sr.top
+        && !status_text.is_empty()
+    {
+        let syncing = (*st).sync_status_state == crate::sync::ActivityState::Checking as usize
+            || (*st).sync_status_state == crate::sync::ActivityState::Syncing as usize;
         draw_status_pill_row(
             hdc,
             &sr,
@@ -501,30 +733,7 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
 
     let br = (*st).bridge_rect;
     if br.right > br.left && br.bottom > br.top {
-        let pc_path = bridge_pc_path(&*st);
-        let server_path = bridge_server_path(&*st);
-        let idle = !syncing
-            && (*st).sync_status_state == crate::sync::ActivityState::Idle as usize
-            && (*st).sync_last_failed == 0;
-        let server_connected =
-            (*st).connected && is_paired(&(*st).config) && !(*st).auth_failure_notified;
-        draw_sync_bridge(
-            hdc,
-            &br,
-            &pc_path,
-            &server_path,
-            &(*st).bridge_mid_label,
-            idle,
-            (*st).sync_anim_frame,
-            syncing,
-            server_connected,
-            (*st).bridge_icon_pc,
-            (*st).bridge_icon_cloud,
-            hf_name,
-            hf_path,
-            hf_mid,
-            hf_check,
-        );
+        draw_sync_bridge(hdc, &br, &*st);
     }
 
     let ar = (*st).activity_list_rect;
@@ -572,6 +781,9 @@ fn bridge_pc_path(st: &WndState) -> String {
 }
 
 fn bridge_server_path(st: &WndState) -> String {
+    if !is_paired(&st.config) {
+        return "Not paired".to_string();
+    }
     if let Some(name) = st
         .detected_customer
         .as_deref()

@@ -13,35 +13,65 @@ unsafe fn invalidate_bridge(hwnd: HWND) {
     }
 }
 
-unsafe fn update_bridge_mid_label(hwnd: HWND) {
+unsafe fn update_bridge_display(hwnd: HWND) {
     let st = stmut(hwnd);
+    let paired = is_paired(&st.config);
+    let auth_fail = st.auth_failure_notified;
     let is_checking = st.sync_status_state == crate::sync::ActivityState::Checking as usize;
     let is_syncing = st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
-    st.bridge_mid_label = if is_syncing {
-        st.sync_status_text
-            .split("ETA ")
-            .nth(1)
-            .and_then(|s| s.split('\u{00B7}').next())
-            .map(|eta| format!("~{eta}"))
-            .unwrap_or_else(|| {
-                if st.sync_progress_total > 0 {
-                    let done = st.sync_progress_done.min(st.sync_progress_total);
-                    let pct = (done * 100) / st.sync_progress_total;
-                    format!("{pct}%")
-                } else {
-                    String::new()
-                }
-            })
-    } else if is_checking {
-        "...".to_string()
-    } else if st.sync_last_failed > 0 {
-        String::new()
-    } else if is_paired(&st.config) {
-        "\u{2713}".to_string()
+
+    st.bridge_conn_ok = paired && st.connected && !auth_fail;
+    st.bridge_conn_label = if !paired {
+        "Not connected".to_string()
+    } else if auth_fail {
+        "Reconnect required".to_string()
+    } else if st.connected {
+        "Paired · live".to_string()
     } else {
-        String::new()
+        "Offline".to_string()
     };
+
+    st.bridge_sync_head = if auth_fail && !is_syncing && !is_checking {
+        "Sync paused".to_string()
+    } else if !paired {
+        "Not syncing".to_string()
+    } else if is_syncing {
+        "Syncing".to_string()
+    } else if is_checking {
+        "Checking".to_string()
+    } else if st.sync_last_failed > 0 {
+        "Sync paused".to_string()
+    } else {
+        "All synced".to_string()
+    };
+
+    let uploading = st
+        .activity_rows
+        .iter()
+        .any(|row| row.kind == ActivityKind::Downloading);
+    st.bridge_sync_meta = if auth_fail && !is_syncing && !is_checking {
+        "Credentials invalid\r\nreconnect to resume".to_string()
+    } else if !paired {
+        "Pair with server\r\nto start backup".to_string()
+    } else if is_syncing {
+        if uploading {
+            "Downloading\r\nServer → PC".to_string()
+        } else {
+            "Uploading\r\nPC → Server".to_string()
+        }
+    } else if is_checking {
+        "Checking...".to_string()
+    } else {
+        "Synced".to_string()
+    };
+
     invalidate_bridge(hwnd);
+
+    let want_progress = bridge_show_progress_block(st);
+    let has_progress = st.bridge_progress_rect.bottom > st.bridge_progress_rect.top;
+    if want_progress != has_progress {
+        layout_main(hwnd);
+    }
 }
 
 unsafe fn restore_pair_idle_controls(hwnd: HWND) {
@@ -89,18 +119,24 @@ fn sync_is_busy(st: &WndState) -> bool {
 unsafe fn set_status_strip_text(hwnd: HWND, text: &str) {
     let st = stmut(hwnd);
     st.status_strip_display = text.to_string();
-    InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+    if STATUS_ROW_H > 0 {
+        InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+    }
+    update_bridge_display(hwnd);
 }
 
 unsafe fn set_status_subtitle(hwnd: HWND, text: &str) {
     let st = stmut(hwnd);
     st.status_subtitle = text.to_string();
-    InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+    if STATUS_ROW_H > 0 {
+        InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+    }
 }
 
 unsafe fn set_status_strip_connection(hwnd: HWND) {
     let st = stmut(hwnd);
     if st.auth_failure_notified {
+        update_bridge_display(hwnd);
         return;
     }
     let (text, color) = if !is_paired(&st.config) {
@@ -141,57 +177,39 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     let is_busy = is_checking || is_syncing;
     let st = stmut(hwnd);
     let was_busy = st.sync_footer_busy;
+    let had_progress = bridge_show_progress_block(st);
     st.sync_footer_busy = is_busy && (progress.1 > 0 || is_checking);
     let show_fail_footer = !is_busy && progress.2.max(st.sync_last_failed) > 0;
     let footer_h = if show_fail_footer { SYNC_FOOTER_H } else { 0 };
-    if st.sync_row_h != footer_h {
+    let has_progress = bridge_show_progress_block(st);
+    if st.sync_row_h != footer_h || had_progress != has_progress {
         st.sync_row_h = footer_h;
         layout_main(hwnd);
-    }
-    if was_busy != st.sync_footer_busy {
+    } else if was_busy != st.sync_footer_busy {
         InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
     }
 
     if is_busy && progress.1 > 0 {
         let done = progress.0.min(progress.1);
         let pct = (done * 100) / progress.1;
-        set_status_strip_text(
-            hwnd,
-            if is_checking { "Checking" } else { "Syncing" },
-        );
-        set_status_subtitle(hwnd, &format!("{done} / {} \u{00B7} {pct}%", progress.1));
-        ShowWindow(prog_hwnd, SW_SHOW);
-        SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(pct), LPARAM(0));
-    } else if is_busy {
-        set_status_strip_text(
-            hwnd,
-            if is_checking { "Checking" } else { "Syncing" },
-        );
+        let _ = pct;
         set_status_subtitle(hwnd, "");
-        ShowWindow(prog_hwnd, SW_HIDE);
-        SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
+    } else if is_busy {
+        set_status_subtitle(hwnd, "");
     } else {
         let st = stmut(hwnd);
         let failed = progress.2.max(st.sync_last_failed);
         let label = idle_sync_footer_label(st, failed);
         set_status_subtitle(hwnd, &label);
-        if st.auth_failure_notified {
-            set_status_strip_text(hwnd, "Reconnect required");
-        } else if !is_paired(&st.config) {
-            set_status_strip_connection(hwnd);
-        } else {
-            set_status_strip_text(hwnd, "Connected");
-            set_status_dot_color(hwnd, if st.connected { C_GREEN } else { C_RED });
-        }
-        ShowWindow(prog_hwnd, SW_HIDE);
-        SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
         let _ = SetWindowTextW(status_hwnd, &hstring(&label));
         let _ = SetWindowTextW(eta_hwnd, &hstring(""));
         update_retry_failed_button(hwnd);
     }
 
-    update_bridge_mid_label(hwnd);
-    invalidate_bridge(hwnd);
+    ShowWindow(prog_hwnd, SW_HIDE);
+    SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
+
+    update_bridge_display(hwnd);
 
     let footer_hwnd = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
     ShowWindow(footer_hwnd, if show_fail_footer { SW_SHOW } else { SW_HIDE });

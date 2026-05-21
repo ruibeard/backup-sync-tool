@@ -270,9 +270,9 @@ Auth header: `Basic base64(username:password)`.
 
 - Raw Win32; owner-draw children must be **direct** children of main window (`WM_DRAWITEM`).
 - No **Save** — auto-save browse + checkboxes.
-- Main layout (**mockups H5 — integrated actions**): compact status pill row (Connected/Syncing + subtitle); sync bridge card (PC + Server nodes with paths, animated mid connector, Open/Browse under PC, Reconnect under Server); progress bar below bridge when syncing; Recent Activity; failure retry row only when uploads failed.
+- Main layout (**mockups H6 — hero card**): single white bridge card — PC node (path + Open/Browse) ↔ centre sync state (head + flow line + meta) ↔ Server node (path + connection label + Reconnect/Connect). Server icon carries a green ✓ or red ✕ badge. When **idle/all synced**, a full-width 100% green progress bar sits at the bottom of the hero card. When **syncing**, no duplicate batch bar in the hero — centre shows Syncing + direction; file % and ETA live in Recent Activity only.
 - Bridge icons: baked PNGs at **120×120** (3× logical tile) in `assets/bridge-pc.png` and `assets/bridge-cloud.png`; server SVG from `assets/bridge-server.svg` (box-rui-cam shield) rasterized with `resvg`, downscaled to 40×40 at draw time with HALFTONE. Regenerate via `python scripts/render_bridge_icons.py` (requires `pip install resvg-cli`).
-- **Typography** (Segoe UI, pixel heights): 13px body; 12px captions/paths/activity status; 12px semibold emphasis (pill, bridge names); 11px bold section headings; 13px buttons; 12px links; 18px bridge ✓. Muted text `#666666`.
+- **Typography** (Segoe UI, pixel heights): 13px body; 12px captions/paths/activity status; 12px semibold bridge names and sync head; 11px bold section headings; 13px buttons; 12px links. Muted text `#666666`.
 - Notices: `notify_user()` / `notify_user_status()` — no `MessageBox` except update Yes/No.
 - Labels: backup folder path shown in bridge (Browse to change); server destination read-only in bridge.
 - Colours: window `#F0F0F0`, bridge card `#FFFFFF`, accent `#2B4FA3` → `COLORREF(0x00A34F2B)`.

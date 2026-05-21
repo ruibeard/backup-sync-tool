@@ -350,15 +350,15 @@ const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
 const META_ICON_GAP: i32 = 4; // gap between version link and GitHub icon
 const FOLDER_ACTIONS_W: i32 = ACTION_BTN_W * 2 + PAD;
 const CONTENT_TOP_PAD: i32 = 14; // mockup .body padding above status strip
-const STATUS_ROW_H: i32 = 26; // H5 pill row (Connected / Syncing + subtitle)
-const STATUS_STRIP_H: i32 = STATUS_ROW_H; // legacy alias for status row height
+const STATUS_ROW_H: i32 = 0; // H6: connection + sync live in the hero card
+const STATUS_STRIP_H: i32 = 26; // legacy pill height (unused when STATUS_ROW_H == 0)
 const STATUS_ACCENT_W: i32 = 4;
 const DEST_PATH_H: i32 = 30;
 const BRIDGE_PAD_Y: i32 = 14;
 const BRIDGE_PAD_X: i32 = 10;
 const BRIDGE_ICO: i32 = 40;
 const BRIDGE_ICO_GAP: i32 = 6; // mockup .ico margin-bottom
-const BRIDGE_MID_W: i32 = 72;
+const BRIDGE_MID_W: i32 = 108;
 const BRIDGE_BTN_H: i32 = 26;
 const BRIDGE_BTN_OPEN_W: i32 = 52;
 const BRIDGE_BTN_BROWSE_W: i32 = 58;
@@ -368,15 +368,21 @@ const BRIDGE_BTN_GAP: i32 = 6;
 const BRIDGE_NODE_PAD: i32 = 4;
 const BRIDGE_NAME_H: i32 = 15;
 const BRIDGE_NAME_GAP: i32 = 3;
+const BRIDGE_CONN_GAP: i32 = 2;
+const BRIDGE_CONN_LABEL_H: i32 = 14;
 const BRIDGE_ACTIONS_GAP: i32 = 8;
 const BRIDGE_FLOW_H: i32 = 3;
 const BRIDGE_PROGRESS_H: i32 = 8;
-const BRIDGE_PATH_H: i32 = 32;
+const BRIDGE_SYNC_PROGRESS_H: i32 = 58;
+const BRIDGE_PATH_H: i32 = 28;
+const BRIDGE_META_H: i32 = 36;
 const BRIDGE_CONTENT_H: i32 = BRIDGE_ICO
     + BRIDGE_ICO_GAP
     + BRIDGE_NAME_H
     + BRIDGE_NAME_GAP
     + BRIDGE_PATH_H
+    + BRIDGE_CONN_GAP
+    + BRIDGE_CONN_LABEL_H
     + BRIDGE_ACTIONS_GAP
     + BRIDGE_BTN_H;
 const BRIDGE_H: i32 = BRIDGE_PAD_Y + BRIDGE_CONTENT_H + BRIDGE_PAD_Y;
@@ -397,6 +403,7 @@ struct BridgeLayout {
     right_name: RECT,
     left_path: RECT,
     right_path: RECT,
+    right_conn: RECT,
     mid: RECT,
 }
 
@@ -429,7 +436,8 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
     };
     let name_y = left_ico.bottom + BRIDGE_ICO_GAP;
     let path_y = name_y + BRIDGE_NAME_H + BRIDGE_NAME_GAP;
-    let btn_y = path_y + BRIDGE_PATH_H + BRIDGE_ACTIONS_GAP;
+    let conn_y = path_y + BRIDGE_PATH_H + BRIDGE_CONN_GAP;
+    let btn_y = conn_y + BRIDGE_CONN_LABEL_H + BRIDGE_ACTIONS_GAP;
     let height = btn_y + BRIDGE_BTN_H + BRIDGE_PAD_Y - top;
     BridgeLayout {
         height,
@@ -460,6 +468,12 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
             right: g.right_x + g.node_w - BRIDGE_NODE_PAD,
             bottom: path_y + BRIDGE_PATH_H,
         },
+        right_conn: RECT {
+            left: g.right_x + BRIDGE_NODE_PAD,
+            top: conn_y,
+            right: g.right_x + g.node_w - BRIDGE_NODE_PAD,
+            bottom: conn_y + BRIDGE_CONN_LABEL_H,
+        },
         mid: RECT {
             left: g.mid_x,
             top: top + BRIDGE_PAD_Y,
@@ -488,6 +502,11 @@ const C_FOOTER_IDLE_BG: u32 = 0x00FAFAFA;
 const C_FOOTER_IDLE_BORDER: u32 = 0x00E0E0E0;
 const C_FOOTER_BUSY_BORDER: u32 = 0x00F5D9C5;
 const C_STATUS_MUTED: u32 = 0x00666666;
+const C_BRIDGE_CONN_OK: u32 = C_GREEN;
+const C_BRIDGE_CONN_FAIL: u32 = C_RED;
+const C_BRIDGE_SYNC_HEAD_OK: u32 = C_GREEN;
+const C_BRIDGE_SYNC_HEAD_ACTIVE: u32 = C_PILL_SYNC_TXT;
+const C_BRIDGE_SYNC_HEAD_IDLE: u32 = C_STATUS_MUTED;
 const C_BRIDGE_PATH_TXT: u32 = 0x00666666;
 const C_PROGRESS_TRACK: u32 = 0x00E0E0E0;
 
@@ -550,7 +569,10 @@ struct WndState {
     status_subtitle: String,
     bridge_rect: RECT,
     bridge_progress_rect: RECT,
-    bridge_mid_label: String,
+    bridge_sync_head: String,
+    bridge_sync_meta: String,
+    bridge_conn_label: String,
+    bridge_conn_ok: bool,
     bridge_btn_y: i32,
     bridge_icon_pc: HBITMAP,
     bridge_icon_cloud: HBITMAP,
@@ -603,6 +625,33 @@ struct WndState {
     activity_show_empty: bool,
     /// Relative paths that failed in the last batch(es); cleared on successful upload.
     failed_upload_paths: Vec<String>,
+}
+
+fn config_is_paired(cfg: &Config) -> bool {
+    !cfg.device_token_enc.trim().is_empty()
+}
+
+fn bridge_show_progress_block(st: &WndState) -> bool {
+    if !config_is_paired(&st.config) || st.auth_failure_notified {
+        return false;
+    }
+    st.sync_status_state != crate::sync::ActivityState::Checking as usize
+        && st.sync_status_state != crate::sync::ActivityState::Syncing as usize
+}
+
+fn bridge_syncing_progress(st: &WndState) -> bool {
+    st.sync_status_state == crate::sync::ActivityState::Syncing as usize
+        && st.sync_progress_total > 0
+}
+
+fn bridge_section_total_h(st: &WndState) -> i32 {
+    BRIDGE_H
+        + if bridge_show_progress_block(st) {
+            BRIDGE_SYNC_PROGRESS_H
+        } else {
+            0
+        }
+        + GAP
 }
 
 struct PairResult {
