@@ -336,7 +336,7 @@ const IDC_PAIR_QR_LINK: u16 = 303;
 const IDC_PAIR_QR_CANCEL: u16 = 304;
 
 // ── Layout — 8/12/20 rhythm ──────────────────────────────────────────────────
-const WIN_W: i32 = 560;
+const WIN_W: i32 = 520;
 const M: i32 = 24;
 const PAD: i32 = 10;
 const GAP: i32 = 14;
@@ -521,7 +521,7 @@ const C_BRIDGE_SYNC_HEAD_IDLE: u32 = C_STATUS_MUTED;
 const C_BRIDGE_PATH_TXT: u32 = 0x008B7464;
 const C_PROGRESS_TRACK: u32 = 0x00E0E0E0;
 
-const MIN_ACTIVITY_LIST_H: i32 = 112;
+const MIN_ACTIVITY_LIST_H: i32 = 152;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
 const MAX_ACTIVITY_ROWS: usize = 200;
 const ACTIVITY_ROW_H_DONE: i32 = 30;

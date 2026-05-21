@@ -1,0 +1,14 @@
+{
+  "watch_folder": "C:\\XDSoftware\\backups",
+  "webdav_url": "https://u561272-sub1.your-storagebox.de",
+  "username": "u561272-sub1",
+  "password_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAKAtvQrn/30qyyTANxKS/4gAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAPHNvTM3gzNfLYGQsHyZfIYoWjOYYrlzSK/X3RbMwEGJAAAAAA6AAAAAAgAAIAAAAAwLeGUVeBHdfJuTJsUJlJWBLoi51dlgX2ymgHV+P28MIAAAAMcJVwfDO1pRb7DsMOgs5X9j/G2KBNRf0y3CKv+g92ijQAAAAOX2FItB927u2e2h9rjcvJE6pB9K+UMCsEJjERcJsDDxWb1Rzy1Rq8s3kWr2wagMgPXhFCVGYxIF44zYYN+Qd2w=",
+  "remote_folder": "XDPT.59655-Palmeira-Minimercado",
+  "pair_api_base": "https://box.rui.cam",
+  "device_token_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAKAtvQrn/30qyyTANxKS/4gAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAOpaxvvCMvNJ8IfXwK5QJyZnr3i2v0OeM8Kk+l9Jr9+TAAAAAA6AAAAAAgAAIAAAABQa3MAdxrHN4tw6sStHNEuCXRd4Zj59ioWLP2txTTPmUAAAAM259/CkLHm/LRV5RcXUeskms1RG574pamwZtQQoGfK1afSP+d8l4LzBGuui7wLbWLv9L8HLIoAljDfNDc0fuKLDeKSss1cT7VYq6yDIAWaMQAAAAB196jGXwgjmkIxEmbNs2pgDyoRi6cLipAW6TAbmM0R9ltiflkeHqA74659RIoFDV3LV7Df82ydTCLor0uZYIww=",
+  "credential_profile_id": null,
+  "credential_version": null,
+  "start_with_windows": true,
+  "sync_remote_changes": true,
+  "parallel_uploads": 10
+}
