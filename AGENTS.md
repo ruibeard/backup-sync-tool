@@ -1,6 +1,6 @@
 # Agent Instructions
 
-`README.md` is the single project spec and handoff document. Do not add separate feature/spec markdown files for implemented behavior; update `README.md` instead.
+`SPEC.md` is the technical spec. `README.md` is the GitHub-facing summary. Do not add separate feature/spec markdown for implemented behavior; update `SPEC.md` instead.
 
 ## Build & Launch Rules
 
@@ -33,7 +33,7 @@ Always confirm:
 - Auto-update checks GitHub releases directly and replaces the exe in place.
 - `target/` is ignored and should not be committed.
 
-## Sync And Pairing (must match README)
+## Sync And Pairing (must match SPEC.md)
 
 - **Start sync** via `restart_sync_engine()` in `src/ui/utils.rs` — on app launch (if configured), after successful pairing (`on_app_pair_result`), and on Save (`do_save`). Pairing must not end at config save without starting the engine.
 - **First backup:** no local `.backupsynctool-manifest.json` + `sync_remote_changes` false → startup uploads every file in `watch_folder`.
