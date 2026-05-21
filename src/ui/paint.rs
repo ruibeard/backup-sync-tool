@@ -1,4 +1,200 @@
 // ── Background paint ──────────────────────────────────────────────────────────
+const BRIDGE_PC_PNG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bridge-pc.png"));
+const BRIDGE_CLOUD_PNG: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bridge-cloud.png"));
+
+unsafe fn png_bytes_to_hbitmap(bytes: &[u8], target_px: i32) -> HBITMAP {
+    let img = match image::load_from_memory(bytes) {
+        Ok(img) => {
+            let px = target_px.max(BRIDGE_ICO) as u32;
+            if img.width() != px || img.height() != px {
+                img.resize_exact(px, px, image::imageops::FilterType::Lanczos3)
+                    .to_rgba8()
+            } else {
+                img.to_rgba8()
+            }
+        }
+        Err(_) => return HBITMAP(std::ptr::null_mut()),
+    };
+    let w = img.width() as i32;
+    let h = img.height() as i32;
+    if w <= 0 || h <= 0 {
+        return HBITMAP(std::ptr::null_mut());
+    }
+
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    let screen = GetDC(None);
+    let hbmp = CreateDIBSection(Some(screen), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
+        .unwrap_or(HBITMAP(std::ptr::null_mut()));
+    ReleaseDC(None, screen);
+    if hbmp.0.is_null() || bits.is_null() {
+        return HBITMAP(std::ptr::null_mut());
+    }
+
+    let dst = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let px = img.get_pixel(x as u32, y as u32);
+            let i = ((y * w + x) * 4) as usize;
+            dst[i] = px[2];
+            dst[i + 1] = px[1];
+            dst[i + 2] = px[0];
+            dst[i + 3] = px[3];
+        }
+    }
+    hbmp
+}
+
+unsafe fn load_bridge_icons(hwnd: HWND) -> (HBITMAP, HBITMAP) {
+    let hdc = GetDC(Some(hwnd));
+    let dpi = if hdc.0.is_null() {
+        96
+    } else {
+        GetDeviceCaps(hdc, LOGPIXELSY)
+    };
+    if !hdc.0.is_null() {
+        ReleaseDC(Some(hwnd), hdc);
+    }
+    let target_px = (BRIDGE_ICO * dpi + 48) / 96;
+    (
+        png_bytes_to_hbitmap(BRIDGE_PC_PNG, target_px),
+        png_bytes_to_hbitmap(BRIDGE_CLOUD_PNG, target_px),
+    )
+}
+
+unsafe fn blit_hbitmap_alpha(hdc_dest: HDC, dest: &RECT, hbmp: HBITMAP) {
+    if hbmp.0.is_null() {
+        return;
+    }
+    let mem_dc = CreateCompatibleDC(Some(hdc_dest));
+    let old = SelectObject(mem_dc, hbmp);
+    let mut bm = BITMAP::default();
+    let _ = GetObjectW(
+        hbmp.into(),
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut bm as *mut _ as *mut _),
+    );
+    let dest_w = dest.right - dest.left;
+    let dest_h = dest.bottom - dest.top;
+    let old_mode = SetStretchBltMode(hdc_dest, HALFTONE);
+    let _ = SetBrushOrgEx(hdc_dest, dest.left % 8, dest.top % 8, None);
+    let bf = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let _ = GdiAlphaBlend(
+        hdc_dest,
+        dest.left,
+        dest.top,
+        dest_w,
+        dest_h,
+        mem_dc,
+        0,
+        0,
+        bm.bmWidth,
+        bm.bmHeight,
+        bf,
+    );
+    SetStretchBltMode(hdc_dest, STRETCH_BLT_MODE(old_mode));
+    SelectObject(mem_dc, old);
+    DeleteDC(mem_dc);
+}
+
+unsafe fn draw_bridge_icon_png(hdc: HDC, rc: &RECT, hbmp: HBITMAP) {
+    blit_hbitmap_alpha(hdc, rc, hbmp);
+}
+
+unsafe fn draw_bridge_node_name(
+    hdc: HDC,
+    rc: &RECT,
+    name: &str,
+    hf: HFONT,
+    connection: Option<bool>,
+) {
+    let of = SelectObject(hdc, hf);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COLORREF(C_LABEL));
+
+    let Some(connected) = connection else {
+        draw_text_w(
+            hdc,
+            rc,
+            name,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+        );
+        SelectObject(hdc, of);
+        return;
+    };
+
+    let sym = if connected { "\u{2713}" } else { "\u{2717}" };
+    let sym_color = if connected { C_GREEN } else { C_RED };
+    let gap = 5;
+
+    let mut name_w: Vec<u16> = name.encode_utf16().collect();
+    let mut sym_w: Vec<u16> = sym.encode_utf16().collect();
+    let mut name_rc = RECT::default();
+    let mut sym_rc = RECT::default();
+    DrawTextW(
+        hdc,
+        &mut name_w,
+        &mut name_rc,
+        DT_LEFT | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
+    );
+    DrawTextW(
+        hdc,
+        &mut sym_w,
+        &mut sym_rc,
+        DT_LEFT | DT_SINGLELINE | DT_CALCRECT | DT_NOPREFIX,
+    );
+    let name_w_px = name_rc.right - name_rc.left;
+    let sym_w_px = sym_rc.right - sym_rc.left;
+    let total_w = name_w_px + gap + sym_w_px;
+    let row_w = rc.right - rc.left;
+    let start_x = rc.left + (row_w - total_w) / 2;
+
+    let name_draw = RECT {
+        left: start_x,
+        top: rc.top,
+        right: start_x + name_w_px,
+        bottom: rc.bottom,
+    };
+    draw_text_w(
+        hdc,
+        &name_draw,
+        name,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+    );
+
+    SetTextColor(hdc, COLORREF(sym_color));
+    let sym_draw = RECT {
+        left: start_x + name_w_px + gap,
+        top: rc.top,
+        right: start_x + total_w,
+        bottom: rc.bottom,
+    };
+    draw_text_w(
+        hdc,
+        &sym_draw,
+        sym,
+        DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+    );
+    SelectObject(hdc, of);
+}
+
 unsafe fn fill_rect_color(hdc: HDC, rc: &RECT, color: u32) {
     let br = CreateSolidBrush(COLORREF(color));
     FillRect(hdc, rc, br);
@@ -15,65 +211,254 @@ unsafe fn frame_rect_color(hdc: HDC, rc: &RECT, color: u32) {
     DeleteObject(hp);
 }
 
-unsafe fn draw_status_strip_text(
+unsafe fn round_rect_color(hdc: HDC, rc: &RECT, color: u32, border: u32, radius: i32) {
+    let br = CreateSolidBrush(COLORREF(color));
+    let hp = CreatePen(PS_SOLID, 1, COLORREF(border));
+    let ob = SelectObject(hdc, br);
+    let op = SelectObject(hdc, hp);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(hdc, op);
+    SelectObject(hdc, ob);
+    DeleteObject(hp);
+    DeleteObject(br);
+}
+
+unsafe fn draw_text_w(
+    hdc: HDC,
+    rc: &RECT,
+    text: &str,
+    flags: DRAW_TEXT_FORMAT,
+) {
+    let mut w: Vec<u16> = text.encode_utf16().collect();
+    let mut tr = *rc;
+    DrawTextW(hdc, &mut w, &mut tr, flags | DT_NOPREFIX);
+}
+
+unsafe fn draw_status_pill_row(
     hdc: HDC,
     sr: &RECT,
-    dot_r: &RECT,
     primary: &str,
-    hf: HFONT,
-    hf_b: HFONT,
+    subtitle: &str,
+    dot_color: u32,
+    syncing: bool,
+    hf_pill: HFONT,
+    hf_small: HFONT,
 ) {
-    let mut tr = *sr;
-    tr.left = dot_r.right + 8;
-    tr.top += 6;
-    tr.bottom -= 6;
-
     SetBkMode(hdc, TRANSPARENT);
-    let of = SelectObject(hdc, hf_b);
-    SetTextColor(hdc, COLORREF(C_LABEL));
 
-    let draw_segment = |hdc: HDC, tr: &mut RECT, text: &str, font: HFONT, color: u32| -> i32 {
-        let prev = SelectObject(hdc, font);
-        SetTextColor(hdc, COLORREF(color));
-        let mut w: Vec<u16> = text.encode_utf16().collect();
-        let mut seg_rc = *tr;
-        DrawTextW(
-            hdc,
-            &mut w,
-            &mut seg_rc,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_CALCRECT,
-        );
-        let width = seg_rc.right - seg_rc.left;
-        seg_rc.right = tr.left + width;
-        DrawTextW(
-            hdc,
-            &mut w,
-            &mut seg_rc,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-        SelectObject(hdc, prev);
-        width
-    };
-
-    let (head, tail) = if let Some(idx) = primary.find('\u{00B7}') {
-        let (h, t) = primary.split_at(idx);
-        (h.trim(), Some(t.trim()))
+    let (pill_bg, pill_fg) = if syncing {
+        (C_PILL_SYNC_BG, C_PILL_SYNC_TXT)
+    } else if dot_color == C_GREEN {
+        (C_PILL_GREEN_BG, C_GREEN)
+    } else if dot_color == C_RED {
+        (0x00E6E6FF_u32, C_RED)
     } else {
-        (primary.trim(), None)
+        (0x00E6F0FF_u32, C_AMBER)
     };
 
-    let head_w_px = draw_segment(hdc, &mut tr, head, hf_b, C_LABEL);
-    if let Some(tail) = tail {
-        tr.left += head_w_px;
-        let _ = draw_segment(
+    let of_pill = SelectObject(hdc, hf_pill);
+    let mut primary_w: Vec<u16> = primary.encode_utf16().collect();
+    let mut pill_text_rc = RECT::default();
+    DrawTextW(
+        hdc,
+        &mut primary_w,
+        &mut pill_text_rc,
+        DT_LEFT | DT_SINGLELINE | DT_CALCRECT,
+    );
+    let dot_size = 10i32;
+    let pill_w = dot_size + 6 + (pill_text_rc.right - pill_text_rc.left) + 16;
+    let pill_h = 24i32;
+    let pill = RECT {
+        left: sr.left,
+        top: sr.top + (sr.bottom - sr.top - pill_h) / 2,
+        right: sr.left + pill_w,
+        bottom: sr.top + (sr.bottom - sr.top + pill_h) / 2,
+    };
+    round_rect_color(hdc, &pill, pill_bg, pill_bg, pill_h / 2);
+
+    let dot_y = pill.top + (pill_h - dot_size) / 2;
+    let dot = RECT {
+        left: pill.left + 8,
+        top: dot_y,
+        right: pill.left + 8 + dot_size,
+        bottom: dot_y + dot_size,
+    };
+    let br_dot = CreateSolidBrush(COLORREF(dot_color));
+    let op_br = SelectObject(hdc, br_dot);
+    Ellipse(hdc, dot.left, dot.top, dot.right, dot.bottom);
+    SelectObject(hdc, op_br);
+    DeleteObject(br_dot);
+
+    SetTextColor(hdc, COLORREF(pill_fg));
+    let mut text_rc = RECT {
+        left: dot.right + 6,
+        top: pill.top,
+        right: pill.right - 4,
+        bottom: pill.bottom,
+    };
+    DrawTextW(
+        hdc,
+        &mut primary_w,
+        &mut text_rc,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
+    SelectObject(hdc, of_pill);
+
+    if !subtitle.is_empty() {
+        let of_s = SelectObject(hdc, hf_small);
+        SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
+        let mut sub_rc = RECT {
+            left: sr.left,
+            top: sr.top,
+            right: sr.right,
+            bottom: sr.bottom,
+        };
+        let mut sub_w: Vec<u16> = subtitle.encode_utf16().collect();
+        DrawTextW(
             hdc,
-            &mut tr,
-            &format!(" \u{00B7} {tail}"),
-            hf,
-            C_LABEL,
+            &mut sub_w,
+            &mut sub_rc,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
+        SelectObject(hdc, of_s);
     }
-    SelectObject(hdc, of);
+}
+
+unsafe fn draw_sync_bridge(
+    hdc: HDC,
+    br: &RECT,
+    pc_path: &str,
+    server_path: &str,
+    mid_label: &str,
+    idle: bool,
+    anim_frame: usize,
+    syncing: bool,
+    server_connected: bool,
+    icon_pc: HBITMAP,
+    icon_cloud: HBITMAP,
+    hf_name: HFONT,
+    hf_path: HFONT,
+    hf_mid: HFONT,
+    hf_check: HFONT,
+) {
+    round_rect_color(hdc, br, C_BRIDGE_BG, C_BRIDGE_BORDER, 8);
+
+    let inner_w = br.right - br.left;
+    let layout = bridge_layout_at(br.top, inner_w);
+
+    let of_name = SelectObject(hdc, hf_name);
+    SetBkMode(hdc, TRANSPARENT);
+
+    draw_bridge_icon_png(hdc, &layout.left_ico, icon_pc);
+    draw_bridge_icon_png(hdc, &layout.right_ico, icon_cloud);
+
+    draw_bridge_node_name(hdc, &layout.left_name, "This PC", hf_name, None);
+    draw_bridge_node_name(
+        hdc,
+        &layout.right_name,
+        "Server",
+        hf_name,
+        Some(server_connected),
+    );
+
+    let of_s = SelectObject(hdc, hf_path);
+    SetTextColor(hdc, COLORREF(C_BRIDGE_PATH_TXT));
+    draw_text_w(
+        hdc,
+        &layout.left_path,
+        pc_path,
+        DT_CENTER | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX,
+    );
+    draw_text_w(
+        hdc,
+        &layout.right_path,
+        server_path,
+        DT_CENTER | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX,
+    );
+    SelectObject(hdc, of_s);
+    SelectObject(hdc, of_name);
+
+    draw_bridge_mid(hdc, &layout.mid, mid_label, idle, anim_frame, syncing, hf_mid, hf_check);
+}
+
+unsafe fn draw_bridge_mid(
+    hdc: HDC,
+    mid: &RECT,
+    mid_label: &str,
+    idle: bool,
+    anim_frame: usize,
+    syncing: bool,
+    hf_mid: HFONT,
+    hf_check: HFONT,
+) {
+    let mid_h = mid.bottom - mid.top;
+    let label_h = if mid_label.is_empty() { 0 } else { 18 };
+    let label_gap = if mid_label.is_empty() { 0 } else { 6 };
+    let block_h = BRIDGE_FLOW_H + label_gap + label_h;
+    let block_top = mid.top + (mid_h - block_h) / 2 - 2;
+
+    let line_y = block_top;
+    draw_bridge_flow(hdc, mid.left, mid.right, line_y, idle, anim_frame, syncing);
+
+    if !mid_label.is_empty() {
+        let is_check = mid_label == "\u{2713}";
+        let hf_lbl = if is_check { hf_check } else { hf_mid };
+        let of_s = SelectObject(hdc, hf_lbl);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(C_BLUE));
+        let lbl = RECT {
+            left: mid.left,
+            top: line_y + BRIDGE_FLOW_H + label_gap,
+            right: mid.right,
+            bottom: line_y + BRIDGE_FLOW_H + label_gap + label_h,
+        };
+        draw_text_w(
+            hdc,
+            &lbl,
+            mid_label,
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER,
+        );
+        SelectObject(hdc, of_s);
+    }
+}
+
+unsafe fn draw_bridge_flow(
+    hdc: HDC,
+    left: i32,
+    right: i32,
+    line_y: i32,
+    idle: bool,
+    anim_frame: usize,
+    syncing: bool,
+) {
+    let line_w = right - left;
+    let track = RECT {
+        left,
+        top: line_y,
+        right,
+        bottom: line_y + BRIDGE_FLOW_H,
+    };
+    round_rect_color(hdc, &track, C_FLOW_TRACK, C_FLOW_TRACK, 2);
+
+    let flow_color = if idle { C_GREEN } else { C_FLOW_SYNC };
+    let flow_w = if idle {
+        line_w
+    } else {
+        (line_w * 45) / 100
+    };
+    let offset = if idle || !syncing {
+        0
+    } else {
+        let span = (line_w - flow_w + 1).max(1) as usize;
+        ((anim_frame * 7) % span) as i32
+    };
+    let flow = RECT {
+        left: track.left + offset,
+        top: track.top,
+        right: track.left + offset + flow_w,
+        bottom: track.bottom,
+    };
+    round_rect_color(hdc, &flow, flow_color, flow_color, 2);
 }
 
 unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
@@ -89,44 +474,57 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
 
     let accent_color = (*st).status_dot_color;
     let status_text = (*st).status_strip_display.clone();
+    let status_subtitle = (*st).status_subtitle.clone();
     let hf = (*st).hfont;
-    let hf_b = (*st).hfont_b;
+    let hf_pill = (*st).hfont_b;
+    let hf_name = (*st).hfont_bridge_name;
+    let hf_path = (*st).hfont_bridge_path;
+    let hf_mid = (*st).hfont_bridge_mid;
+    let hf_check = (*st).hfont_bridge_check;
+    let hf_caption = (*st).hfont_small;
+    let syncing = (*st).sync_status_state == crate::sync::ActivityState::Checking as usize
+        || (*st).sync_status_state == crate::sync::ActivityState::Syncing as usize;
 
     let sr = (*st).status_strip_rect;
-    if sr.right > sr.left && sr.bottom > sr.top {
-        fill_rect_color(hdc, &sr, C_STATUS_BG);
-        let accent = RECT {
-            left: sr.left,
-            top: sr.top,
-            right: sr.left + STATUS_ACCENT_W,
-            bottom: sr.bottom,
-        };
-        fill_rect_color(hdc, &accent, accent_color);
-
-        let dot_r = (*st).server_status_rect;
-        if dot_r.right > dot_r.left {
-            let br_dot = CreateSolidBrush(COLORREF(accent_color));
-            let op_br = SelectObject(hdc, br_dot);
-            Ellipse(hdc, dot_r.left, dot_r.top, dot_r.right, dot_r.bottom);
-            SelectObject(hdc, op_br);
-            DeleteObject(br_dot);
-        }
-
-        if !status_text.is_empty() {
-            draw_status_strip_text(hdc, &sr, &dot_r, &status_text, hf, hf_b);
-        }
+    if sr.right > sr.left && sr.bottom > sr.top && !status_text.is_empty() {
+        draw_status_pill_row(
+            hdc,
+            &sr,
+            &status_text,
+            &status_subtitle,
+            accent_color,
+            syncing,
+            hf_pill,
+            hf_caption,
+        );
     }
 
-    let dr = (*st).dest_path_rect;
-    if dr.right > dr.left && dr.bottom > dr.top {
-        fill_rect_color(hdc, &dr, C_DEST_PATH_BG);
-        let hp = CreatePen(PS_SOLID, 1, COLORREF(C_DEST_PATH_BORDER));
-        let op = SelectObject(hdc, hp);
-        let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, dr.left, dr.top, dr.right, dr.bottom, 4, 4);
-        SelectObject(hdc, op);
-        SelectObject(hdc, ob);
-        DeleteObject(hp);
+    let br = (*st).bridge_rect;
+    if br.right > br.left && br.bottom > br.top {
+        let pc_path = bridge_pc_path(&*st);
+        let server_path = bridge_server_path(&*st);
+        let idle = !syncing
+            && (*st).sync_status_state == crate::sync::ActivityState::Idle as usize
+            && (*st).sync_last_failed == 0;
+        let server_connected =
+            (*st).connected && is_paired(&(*st).config) && !(*st).auth_failure_notified;
+        draw_sync_bridge(
+            hdc,
+            &br,
+            &pc_path,
+            &server_path,
+            &(*st).bridge_mid_label,
+            idle,
+            (*st).sync_anim_frame,
+            syncing,
+            server_connected,
+            (*st).bridge_icon_pc,
+            (*st).bridge_icon_cloud,
+            hf_name,
+            hf_path,
+            hf_mid,
+            hf_check,
+        );
     }
 
     let ar = (*st).activity_list_rect;
@@ -136,7 +534,10 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
     }
 
     let fr = (*st).sync_footer_rect;
-    if fr.right > fr.left && fr.bottom > fr.top {
+    if fr.right > fr.left
+        && fr.bottom > fr.top
+        && ((*st).sync_footer_busy || (*st).sync_last_failed > 0)
+    {
         if (*st).sync_footer_busy {
             fill_rect_color(hdc, &fr, C_STATUS_BG);
             frame_rect_color(hdc, &fr, C_FOOTER_BUSY_BORDER);
@@ -153,9 +554,60 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
         let hp = CreatePen(PS_SOLID, 1, COLORREF(C_DIVIDER));
         let op = SelectObject(hdc, hp);
         let _ = MoveToEx(hdc, M, dy, None);
-        let _ = LineTo(hdc, WIN_W - M, dy);
+        let _ = LineTo(hdc, M + (*st).inner_w, dy);
         SelectObject(hdc, op);
         DeleteObject(hp);
+    }
+
+    let _ = hf;
+}
+
+fn bridge_pc_path(st: &WndState) -> String {
+    let path = st.config.watch_folder.trim();
+    if path.is_empty() {
+        "C:\\XDSoftware\\backups".to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn bridge_server_path(st: &WndState) -> String {
+    if let Some(name) = st
+        .detected_customer
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return name.to_string();
+    }
+    let cfg = &st.config;
+    if !cfg.device_token_enc.trim().is_empty() {
+        return friendly_remote_name(&cfg.remote_folder);
+    }
+    if st.remote_folder_from_xd && !cfg.remote_folder.trim().is_empty() {
+        if let Some(customer) = st.detected_customer.as_deref() {
+            let trimmed = customer.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        return friendly_remote_name(&cfg.remote_folder);
+    }
+    "Waiting for pairing approval".to_string()
+}
+
+fn friendly_remote_name(folder: &str) -> String {
+    let trimmed = folder.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<&str> = trimmed.split('-').collect();
+    if parts.len() >= 2 {
+        parts[parts.len() - 2..]
+            .join(" ")
+            .replace('-', " ")
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -201,15 +653,16 @@ unsafe extern "system" fn edit_sub(
             } else {
                 C_INPUT_BORDER
             };
-
-            let hpen = CreatePen(PS_SOLID, 1, COLORREF(border_clr));
-            let op = SelectObject(hdc, hpen);
+            let br = CreateSolidBrush(COLORREF(C_INPUT_BG));
+            FillRect(hdc, &RECT { left: 0, top: 0, right: w, bottom: h }, br);
+            DeleteObject(br);
+            let hp = CreatePen(PS_SOLID, 1, COLORREF(border_clr));
+            let op = SelectObject(hdc, hp);
             let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
             Rectangle(hdc, 0, 0, w, h);
             SelectObject(hdc, op);
             SelectObject(hdc, ob);
-            DeleteObject(hpen);
-
+            DeleteObject(hp);
             ReleaseDC(hwnd, hdc);
             LRESULT(0)
         }

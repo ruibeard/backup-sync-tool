@@ -6,9 +6,9 @@ unsafe fn show_pair_qr_window(parent: HWND) {
     }
 
     let hinstance: HINSTANCE = GetModuleHandleW(None).unwrap().into();
-    let hfont = mkfont("Segoe UI", 11, FW_NORMAL.0 as i32);
-    let hfont_b = mkfont("Segoe UI", 12, FW_SEMIBOLD.0 as i32);
-    let hfont_code = mkfont("Segoe UI", 18, FW_SEMIBOLD.0 as i32);
+    let hfont = mkfont_px("Segoe UI", FONT_BODY_PX, FW_NORMAL.0 as i32);
+    let hfont_b = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
+    let hfont_code = mkfont_px("Segoe UI", 20, FW_SEMIBOLD.0 as i32);
     let state = Box::new(PairQrState {
         parent,
         code: String::new(),

@@ -5,6 +5,45 @@ unsafe fn set_status_dot_color(hwnd: HWND, color: u32) {
     InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
 }
 
+unsafe fn invalidate_bridge(hwnd: HWND) {
+    let st = stmut(hwnd);
+    InvalidateRect(hwnd, Some(&st.bridge_rect), TRUE);
+    if st.bridge_progress_rect.bottom > st.bridge_progress_rect.top {
+        InvalidateRect(hwnd, Some(&st.bridge_progress_rect), TRUE);
+    }
+}
+
+unsafe fn update_bridge_mid_label(hwnd: HWND) {
+    let st = stmut(hwnd);
+    let is_checking = st.sync_status_state == crate::sync::ActivityState::Checking as usize;
+    let is_syncing = st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
+    st.bridge_mid_label = if is_syncing {
+        st.sync_status_text
+            .split("ETA ")
+            .nth(1)
+            .and_then(|s| s.split('\u{00B7}').next())
+            .map(|eta| format!("~{eta}"))
+            .unwrap_or_else(|| {
+                if st.sync_progress_total > 0 {
+                    let done = st.sync_progress_done.min(st.sync_progress_total);
+                    let pct = (done * 100) / st.sync_progress_total;
+                    format!("{pct}%")
+                } else {
+                    String::new()
+                }
+            })
+    } else if is_checking {
+        "...".to_string()
+    } else if st.sync_last_failed > 0 {
+        String::new()
+    } else if is_paired(&st.config) {
+        "\u{2713}".to_string()
+    } else {
+        String::new()
+    };
+    invalidate_bridge(hwnd);
+}
+
 unsafe fn restore_pair_idle_controls(hwnd: HWND) {
     let st = stmut(hwnd);
     let label = if st.auth_failure_notified || is_paired(&st.config) {
@@ -15,6 +54,7 @@ unsafe fn restore_pair_idle_controls(hwnd: HWND) {
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring(label));
     ShowWindow(pair_hwnd, SW_SHOW);
+    layout_main(hwnd);
 }
 
 unsafe fn restore_server_status_after_pair_cancel(hwnd: HWND) {
@@ -49,6 +89,12 @@ fn sync_is_busy(st: &WndState) -> bool {
 unsafe fn set_status_strip_text(hwnd: HWND, text: &str) {
     let st = stmut(hwnd);
     st.status_strip_display = text.to_string();
+    InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+}
+
+unsafe fn set_status_subtitle(hwnd: HWND, text: &str) {
+    let st = stmut(hwnd);
+    st.status_subtitle = text.to_string();
     InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
 }
 
@@ -96,6 +142,12 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     let st = stmut(hwnd);
     let was_busy = st.sync_footer_busy;
     st.sync_footer_busy = is_busy && (progress.1 > 0 || is_checking);
+    let show_fail_footer = !is_busy && progress.2.max(st.sync_last_failed) > 0;
+    let footer_h = if show_fail_footer { SYNC_FOOTER_H } else { 0 };
+    if st.sync_row_h != footer_h {
+        st.sync_row_h = footer_h;
+        layout_main(hwnd);
+    }
     if was_busy != st.sync_footer_busy {
         InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
     }
@@ -103,35 +155,54 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     if is_busy && progress.1 > 0 {
         let done = progress.0.min(progress.1);
         let pct = (done * 100) / progress.1;
-        let main = format!("{done} / {} files \u{00B7} {pct}%", progress.1);
-        let _ = SetWindowTextW(status_hwnd, &hstring(&main));
-        let eta = st.sync_status_text.split("ETA ").nth(1).map(|s| s.trim());
-        if let Some(eta) = eta {
-            let _ = SetWindowTextW(eta_hwnd, &hstring(&format!("ETA {eta}")));
-        } else {
-            let _ = SetWindowTextW(eta_hwnd, &hstring(""));
-        }
+        set_status_strip_text(
+            hwnd,
+            if is_checking { "Checking" } else { "Syncing" },
+        );
+        set_status_subtitle(hwnd, &format!("{done} / {} \u{00B7} {pct}%", progress.1));
         ShowWindow(prog_hwnd, SW_SHOW);
         SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(pct), LPARAM(0));
     } else if is_busy {
-        let text = if is_checking {
-            "Checking..."
-        } else {
-            "Syncing..."
-        };
-        let _ = SetWindowTextW(status_hwnd, &hstring(text));
-        let _ = SetWindowTextW(eta_hwnd, &hstring(""));
+        set_status_strip_text(
+            hwnd,
+            if is_checking { "Checking" } else { "Syncing" },
+        );
+        set_status_subtitle(hwnd, "");
         ShowWindow(prog_hwnd, SW_HIDE);
         SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
     } else {
         let st = stmut(hwnd);
         let failed = progress.2.max(st.sync_last_failed);
         let label = idle_sync_footer_label(st, failed);
-        let _ = SetWindowTextW(status_hwnd, &hstring(&label));
-        let _ = SetWindowTextW(eta_hwnd, &hstring(""));
+        set_status_subtitle(hwnd, &label);
+        if st.auth_failure_notified {
+            set_status_strip_text(hwnd, "Reconnect required");
+        } else if !is_paired(&st.config) {
+            set_status_strip_connection(hwnd);
+        } else {
+            set_status_strip_text(hwnd, "Connected");
+            set_status_dot_color(hwnd, if st.connected { C_GREEN } else { C_RED });
+        }
         ShowWindow(prog_hwnd, SW_HIDE);
         SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
+        let _ = SetWindowTextW(status_hwnd, &hstring(&label));
+        let _ = SetWindowTextW(eta_hwnd, &hstring(""));
         update_retry_failed_button(hwnd);
+    }
+
+    update_bridge_mid_label(hwnd);
+    invalidate_bridge(hwnd);
+
+    let footer_hwnd = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
+    ShowWindow(footer_hwnd, if show_fail_footer { SW_SHOW } else { SW_HIDE });
+    ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
+    let fr = stmut(hwnd).sync_footer_rect;
+    ShowWindow(
+        GetDlgItem(hwnd, IDC_RETRY_FAILED as i32),
+        if show_fail_footer { SW_SHOW } else { SW_HIDE },
+    );
+    if show_fail_footer {
+        InvalidateRect(hwnd, Some(&fr), TRUE);
     }
 }
 
@@ -146,9 +217,11 @@ unsafe fn update_status_strip_after_sync(hwnd: HWND, state: usize, progress: (us
 unsafe fn update_status_strip_from_connection(hwnd: HWND) {
     let st = stmut(hwnd);
     if sync_is_busy(st) || st.auth_failure_notified {
+        invalidate_bridge(hwnd);
         return;
     }
     set_status_strip_connection(hwnd);
+    invalidate_bridge(hwnd);
     let progress = (
         st.sync_progress_done,
         st.sync_progress_total,
@@ -201,7 +274,7 @@ unsafe fn apply_server_readonly(hwnd: HWND) {
     let st = stmut(hwnd);
     st.min_client_h = required_client_height(st);
     layout_main(hwnd);
-    InvalidateRect(hwnd, Some(&st.dest_path_rect), TRUE);
+    invalidate_bridge(hwnd);
 }
 
 unsafe fn start_connection_check(hwnd: HWND) {
@@ -449,14 +522,24 @@ unsafe fn mkfont(name: &str, pt: i32, weight: i32) -> HFONT {
     CreateFontIndirectW(&lf)
 }
 
-unsafe fn mkfont_underline(name: &str, pt: i32, weight: i32) -> HFONT {
-    let hdc = GetDC(None);
-    let dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(None, hdc);
-    let h = -(pt * dpi / 72);
+/// Match mockup CSS `font-size: Npx` (character height in device pixels).
+unsafe fn mkfont_px(name: &str, px: i32, weight: i32) -> HFONT {
     let nw: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let mut lf = LOGFONTW {
-        lfHeight: h,
+        lfHeight: -px,
+        lfWeight: weight,
+        ..Default::default()
+    };
+    let n = nw.len().min(lf.lfFaceName.len());
+    lf.lfFaceName[..n].copy_from_slice(&nw[..n]);
+    CreateFontIndirectW(&lf)
+}
+
+/// Match mockup CSS `font-size: Npx` with underline.
+unsafe fn mkfont_px_underline(name: &str, px: i32, weight: i32) -> HFONT {
+    let nw: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut lf = LOGFONTW {
+        lfHeight: -px,
         lfWeight: weight,
         lfUnderline: 1,
         ..Default::default()

@@ -236,7 +236,14 @@ unsafe extern "system" fn wnd_proc(
                 DeleteObject((*st).hfont_small);
                 DeleteObject((*st).hfont_activity);
                 DeleteObject((*st).hfont_btn);
+                DeleteObject((*st).hfont_bridge);
+                DeleteObject((*st).hfont_bridge_name);
+                DeleteObject((*st).hfont_bridge_path);
+                DeleteObject((*st).hfont_bridge_mid);
+                DeleteObject((*st).hfont_bridge_check);
                 DeleteObject((*st).hfont_link);
+                DeleteObject((*st).bridge_icon_pc);
+                DeleteObject((*st).bridge_icon_cloud);
                 drop(Box::from_raw(st));
             }
             PostQuitMessage(0);

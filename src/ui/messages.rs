@@ -134,6 +134,8 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
         tray::set_tray_icon_and_tip(hwnd, hicon, &tip);
     }
     InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
+    InvalidateRect(hwnd, Some(&st.bridge_rect), TRUE);
+    InvalidateRect(hwnd, Some(&st.bridge_progress_rect), TRUE);
     InvalidateRect(hwnd, Some(&st.activity_list_rect), TRUE);
     let hlb = activity_list_hwnd(hwnd);
     if !hlb.0.is_null() {
@@ -150,9 +152,11 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
         set_status_dot_color(hwnd, C_RED);
         set_status_strip_text(hwnd, "Reconnect required");
         restore_pair_idle_controls(hwnd);
+        invalidate_bridge(hwnd);
         return LRESULT(0);
     }
     update_status_strip_from_connection(hwnd);
+    invalidate_bridge(hwnd);
     LRESULT(0)
 }
 
@@ -287,6 +291,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         st.sync_status_text = "Checking...".to_string();
     }
     set_status_strip_connection(hwnd);
+    invalidate_bridge(hwnd);
     apply_server_readonly(hwnd);
     start_connection_check(hwnd);
     let _ = SetForegroundWindow(hwnd);
@@ -348,6 +353,7 @@ unsafe fn on_app_remote_folder(hwnd: HWND, lp: LPARAM) -> LRESULT {
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
             &hstring(&display),
         );
+        invalidate_bridge(hwnd);
         update_server_tooltip(hwnd);
     }
     LRESULT(0)

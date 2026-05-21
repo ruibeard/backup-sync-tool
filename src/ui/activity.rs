@@ -604,8 +604,8 @@ unsafe fn on_draw_activity_item(lp: LPARAM) -> LRESULT {
         row,
         empty && di.itemID == 0,
         (*st).sync_anim_frame,
+        (*st).hfont,
         (*st).hfont_small,
-        (*st).hfont_activity,
     );
     LRESULT(1)
 }

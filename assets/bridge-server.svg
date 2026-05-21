@@ -1,0 +1,14 @@
+<!-- Server bridge tile: box-rui-cam shield-check (public/favicon.svg) on mockup H5 tile -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
+  <rect width="40" height="40" rx="8" fill="#f0f4ff" stroke="#c5d9f5"/>
+  <defs>
+    <linearGradient id="g" x1="12" y1="10" x2="28" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#166534"/>
+      <stop offset="1" stop-color="#15803D"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(6.5, 5.5) scale(0.42)">
+    <path d="M32 7 14 13v15c0 11.7 8 22.2 18 24.8C42 50.2 50 39.7 50 28V13L32 7Z" fill="url(#g)"/>
+    <path d="m24.5 31.5 5 5 10-11" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.5"/>
+  </g>
+</svg>

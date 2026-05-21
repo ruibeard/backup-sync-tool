@@ -565,6 +565,48 @@
     background: #f0f4ff; border-radius: 6px; border-left: 3px solid var(--blue); max-width: 800px;
   }
   .flow-key strong { color: var(--blue); }
+
+  /* H6 recommended: connection badge on server, sync state in centre, one progress bar */
+  .bridge-node .ico-wrap {
+    position: relative; width: 40px; height: 40px; margin: 0 auto 6px;
+  }
+  .bridge-node .ico-wrap .ico {
+    width: 40px; height: 40px; margin: 0;
+  }
+  .bridge-node .ico-wrap .ico img { width: 36px; height: 36px; display: block; }
+  .conn-badge {
+    position: absolute; right: -4px; bottom: -4px; width: 16px; height: 16px;
+    border-radius: 50%; border: 2px solid #fff; display: flex; align-items: center;
+    justify-content: center; font-size: 9px; font-weight: 700; line-height: 1;
+  }
+  .conn-badge.ok { background: var(--green); color: #fff; }
+  .conn-badge.fail { background: var(--red); color: #fff; }
+  .conn-badge.wait { background: #e8a317; color: #fff; }
+  .bridge-node .conn-label {
+    font-size: 9px; font-weight: 600; margin-top: 2px;
+  }
+  .bridge-node .conn-label.ok { color: var(--green); }
+  .bridge-node .conn-label.fail { color: var(--red); }
+  .bridge-node .conn-label.wait { color: #b8860b; }
+  .bridge-mid.wide { flex: 0 0 108px; }
+  .bridge-mid .sync-head {
+    font-size: 10px; font-weight: 700; margin-bottom: 4px; text-align: center;
+  }
+  .bridge-mid .sync-head.ok { color: var(--green); }
+  .bridge-mid .sync-head.active { color: #1565c0; }
+  .bridge-mid .sync-head.idle { color: #888; }
+  .bridge-mid .sync-meta {
+    font-size: 9px; color: #666; text-align: center; margin-top: 4px; line-height: 1.3;
+  }
+  .hero-card .sync-progress {
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid #e8eef5;
+  }
+  .hero-card .sync-progress .row-labels {
+    display: flex; justify-content: space-between; font-size: 10px; color: #555; margin-bottom: 4px;
+  }
+  .hero-card .sync-progress .row-labels .pct { font-weight: 700; color: #1565c0; }
+  .hero-card .sync-progress.idle .row-labels .pct { color: var(--green); }
+  .hero-card .sync-progress .progress-wrap { margin-top: 0; }
 </style>
 </head>
 <body>
@@ -578,16 +620,15 @@
       <a href="#layout1">1</a><a href="#layout2">2</a><a href="#layout3">3</a>
       <a href="#layout4">4</a><a href="#layout5">5</a><a href="#layout6">6</a><a href="#layout7">7</a>
       <span class="sep">|</span>
-      <a href="#h1">H1</a><a href="#h2">H2</a><a href="#h3">H3</a>
-      <a href="#h4">H4</a><a href="#h5">H5</a><a href="#h6">H6</a>
+      <a href="#h1">H1</a><a href="#h2">H2</a><a href="#h5">H5</a><a href="#h6">H6</a>
     </nav>
   </div>
-  <p class="nav-note" id="nav-note">Reference layouts 1–7 plus hero bridge variants H1–H6.</p>
+  <p class="nav-note" id="nav-note">Reference layouts 1–7 plus hero bridge variants H1–H2, H5–H6. H6 is the recommended direction for implementation.</p>
 </header>
 
 <main>
 <h1 style="text-align:center;font-size:22px;font-weight:600;margin:24px 0 6px;">Layout explorations</h1>
-<p class="page-sub">Reference layouts kept for comparison. Hero bridge section (H1–H6) builds on layout 4.</p>
+<p class="page-sub">Reference layouts kept for comparison. Hero bridge H6 is the target for code — Reconnect under server (aligned with Open/Browse under PC), one progress bar, connection badge on server.</p>
 
 <nav class="toc">
   <span class="lbl">Reference</span>
@@ -603,10 +644,8 @@
   <span class="lbl">Hero bridge</span>
   <a href="#h1">H1 · Horizontal</a>
   <a href="#h2">H2 · Banner</a>
-  <a href="#h3">H3 · Vertical</a>
-  <a href="#h4">H4 · Status-first</a>
   <a href="#h5">H5 · Actions</a>
-  <a href="#h6">H6 · Card</a>
+  <a href="#h6">H6 · Recommended</a>
 </nav>
 
 <!-- ═══════════════════ FEATURE INVENTORY ═══════════════════ -->
@@ -1197,8 +1236,8 @@
 </section>
 
 <hr class="doc-divider" id="hero-bridge">
-<h2 class="doc-title">Hero bridge explorations (H1–H6)</h2>
-<p class="doc-sub">Variants built around the layout 4 hero — PC ↔ cloud bridge at the top.</p>
+<h2 class="doc-title">Hero bridge explorations (H1–H2, H5–H6)</h2>
+<p class="doc-sub">H6 is the implementation target — connection vs sync are separate; one batch progress bar with % and ETA.</p>
 
 <!-- 1: Original horizontal bridge -->
 <section class="section-block" id="h1" data-note="Baseline from layout 4 — horizontal PC ↔ server diagram with animated flow line. Connection pill + Reconnect above; Open/Browse row below hero.">
@@ -1299,114 +1338,6 @@
   </div>
 </section>
 
-<!-- 3: Vertical flow -->
-<section class="section-block" id="h3" data-note="Same bridge metaphor, stacked vertically — PC on top, flow arrow down to cloud. Reads well in narrow windows; paths sit beside icons.">
-  <h2>3 · Vertical flow</h2>
-  <p class="states">Idle · Syncing</p>
-  <div class="layout-grid">
-    <div>
-      <div class="layout-tag"><span class="num">H3</span><span class="name">Idle</span></div>
-      <div class="window">
-        <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
-        <div class="body">
-          <div class="row between" style="margin-bottom:8px;"><span class="pill"><span class="dot green"></span> Connected</span><button class="btn sm">Reconnect</button></div>
-          <div class="sync-bridge vertical">
-            <div class="bridge-node"><div class="ico">💻</div><div><div class="name">This PC</div><div class="path">C:\XDSoftware\backups</div></div></div>
-            <div class="bridge-mid idle"><div class="bridge-line"><div class="flow"></div></div><div class="lbl">All synced</div></div>
-            <div class="bridge-node server"><div class="ico">☁</div><div><div class="name">Server · Palmeira Minimercado</div><div class="path">XDPT.59655-Palmeira-Minimercado</div></div></div>
-          </div>
-          <div class="row" style="margin-bottom:8px;"><button class="btn">Open</button><button class="btn">Browse</button></div>
-          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
-          <div class="listbox"><div class="listbox-empty">No recent activity</div></div>
-          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box"></span> Sync from server</span></div>
-          <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
-        </div>
-      </div>
-    </div>
-    <div>
-      <div class="layout-tag"><span class="num">H3</span><span class="name">Syncing</span></div>
-      <div class="window">
-        <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
-        <div class="body">
-          <div class="row between" style="margin-bottom:8px;"><span class="pill sync"><span class="dot green"></span> Syncing 45%</span><button class="btn sm">Reconnect</button></div>
-          <div class="sync-bridge vertical">
-            <div class="bridge-node"><div class="ico">💻</div><div><div class="name">This PC</div><div class="path">C:\XDSoftware\backups</div></div></div>
-            <div class="bridge-mid"><div class="bridge-line"><div class="flow"></div></div><div class="lbl">3 / 8 · ~2 min</div></div>
-            <div class="bridge-node server"><div class="ico">☁</div><div><div class="name">Server · Palmeira Minimercado</div><div class="path">XDPT.59655-Palmeira-Minimercado</div></div></div>
-          </div>
-          <div class="row" style="margin-bottom:8px;"><button class="btn">Open</button><button class="btn">Browse</button></div>
-          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
-          <div class="listbox">
-            <div class="listbox-item"><div class="listbox-item-top"><span>⬆</span><span>Uploading backup.zip</span><span class="pct">35%</span></div><div class="mini-progress"><div class="bar" style="width:35%"></div></div></div>
-          </div>
-          <div class="sync-footer"><div class="progress-wrap"><div class="bar" style="width:45%"></div></div></div>
-          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box"></span> Sync from server</span></div>
-          <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- 4: Status-first -->
-<section class="section-block" id="h4" data-note="Big status headline leads — &quot;All synced&quot; or &quot;Syncing&quot; is the first thing you read; bridge shrinks to a compact diagram underneath.">
-  <h2>4 · Status-first hero</h2>
-  <p class="states">Idle · Syncing</p>
-  <div class="layout-grid">
-    <div>
-      <div class="layout-tag"><span class="num">H4</span><span class="name">Idle</span></div>
-      <div class="window">
-        <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
-        <div class="body">
-          <div class="hero-status">
-            <h3>All synced</h3>
-            <p>Palmeira Minimercado · last backup 2 min ago</p>
-          </div>
-          <div class="sync-bridge compact">
-            <div class="bridge-node"><div class="ico">💻</div><div class="name">This PC</div></div>
-            <div class="bridge-mid idle"><div class="bridge-line"><div class="flow"></div></div></div>
-            <div class="bridge-node server"><div class="ico">☁</div><div class="name">Server</div></div>
-          </div>
-          <div class="row between" style="margin-bottom:8px;"><span style="font-size:10px;color:#888;">u561272-sub1.your-storagebox.de</span><button class="btn sm">Reconnect</button></div>
-          <div class="label">Backup folder on this PC</div>
-          <div class="row" style="margin-bottom:8px;"><input type="text" value="C:\XDSoftware\backups" style="flex:1;border:1px solid var(--input-border);padding:5px 8px;font-size:12px;border-radius:3px;"><button class="btn">Open</button><button class="btn">Browse</button></div>
-          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
-          <div class="listbox"><div class="listbox-empty">No recent activity</div></div>
-          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box"></span> Sync from server</span></div>
-          <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
-        </div>
-      </div>
-    </div>
-    <div>
-      <div class="layout-tag"><span class="num">H4</span><span class="name">Syncing</span></div>
-      <div class="window">
-        <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
-        <div class="body">
-          <div class="hero-status sync">
-            <h3>Syncing · 45%</h3>
-            <p>3 of 8 files · ETA ~2 min · backup.zip uploading</p>
-          </div>
-          <div class="sync-bridge compact">
-            <div class="bridge-node"><div class="ico">💻</div><div class="name">This PC</div></div>
-            <div class="bridge-mid"><div class="bridge-line"><div class="flow"></div></div></div>
-            <div class="bridge-node server"><div class="ico">☁</div><div class="name">Server</div></div>
-          </div>
-          <div class="progress-wrap" style="margin-bottom:8px;"><div class="bar" style="width:45%"></div></div>
-          <div class="row between" style="margin-bottom:8px;"><span style="font-size:10px;color:#888;">u561272-sub1.your-storagebox.de</span><button class="btn sm">Reconnect</button></div>
-          <div class="label">Backup folder on this PC</div>
-          <div class="row" style="margin-bottom:8px;"><input type="text" value="C:\XDSoftware\backups" style="flex:1;border:1px solid var(--input-border);padding:5px 8px;font-size:12px;border-radius:3px;"><button class="btn">Open</button><button class="btn">Browse</button></div>
-          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
-          <div class="listbox">
-            <div class="listbox-item"><div class="listbox-item-top"><span>⬆</span><span>Uploading backup.zip</span><span class="pct">35%</span></div><div class="mini-progress"><div class="bar" style="width:35%"></div></div></div>
-          </div>
-          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box"></span> Sync from server</span></div>
-          <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
 <!-- 5: Integrated actions in bridge -->
 <section class="section-block" id="h5" data-note="Open/Browse live under the PC node; Reconnect under server node — hero is self-contained, no separate action row.">
   <h2>5 · Integrated actions</h2>
@@ -1466,56 +1397,180 @@
   </div>
 </section>
 
-<!-- 6: Hero card with activity strip -->
-<section class="section-block" id="h6" data-note="Bridge wrapped in one hero card with connection pill inside. Activity shown as a compact strip under hero — full list always visible without scrolling past config.">
-  <h2>6 · Hero card + activity strip</h2>
-  <p class="states">Idle · Syncing</p>
+<!-- 6: Recommended hero card (implementation target) -->
+<section class="section-block" id="h6" data-note="H6 recommended: Reconnect under the server node (same alignment as Open/Browse under PC). Server badge = connection/pairing. Centre = sync state. One batch progress bar with % and ETA when syncing.">
+  <h2>6 · Hero card (recommended)</h2>
+  <p class="states">All synced · Syncing · Not paired · Auth fail</p>
   <div class="layout-grid">
+
     <div>
-      <div class="layout-tag"><span class="num">H6</span><span class="name">Idle</span></div>
+      <div class="layout-tag"><span class="num">H6</span><span class="name">All synced</span><span class="hint">Paired · connected</span></div>
       <div class="window">
         <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
         <div class="body">
           <div class="hero-card">
-            <div class="top"><span class="pill"><span class="dot green"></span> Connected</span><button class="btn sm">Reconnect</button></div>
             <div class="sync-bridge">
-              <div class="bridge-node"><div class="ico">💻</div><div class="name">This PC</div><div class="path">C:\XDSoftware\backups</div></div>
-              <div class="bridge-mid idle"><div class="bridge-line"><div class="flow"></div></div><div class="lbl">All synced</div></div>
-              <div class="bridge-node server"><div class="ico">☁</div><div class="name">Server</div><div class="path">XDPT.59655-Palmeira-Minimercado</div></div>
+              <div class="bridge-node">
+                <div class="ico-wrap"><div class="ico"><img src="assets/bridge-pc.svg" alt=""></div></div>
+                <div class="name">This PC</div>
+                <div class="path">C:\XDSoftware\backups</div>
+                <div class="bridge-actions"><button class="btn">Open</button><button class="btn">Browse</button></div>
+              </div>
+              <div class="bridge-mid wide idle">
+                <div class="sync-head ok">All synced</div>
+                <div class="bridge-line"><div class="flow"></div></div>
+                <div class="sync-meta">Nothing waiting<br>to upload or download</div>
+              </div>
+              <div class="bridge-node server">
+                <div class="ico-wrap">
+                  <div class="ico"><img src="assets/bridge-cloud.svg" alt=""></div>
+                  <span class="conn-badge ok">✓</span>
+                </div>
+                <div class="name">Server</div>
+                <div class="path">Palmeira Minimercado</div>
+                <div class="conn-label ok">Paired · live</div>
+                <div class="bridge-actions"><button class="btn">Reconnect</button></div>
+              </div>
             </div>
           </div>
-          <div class="row" style="margin-bottom:8px;"><button class="btn">Open</button><button class="btn">Browse</button></div>
           <div class="hero-strip"><span class="ico">📋</span><span class="txt">No recent activity</span></div>
-          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box"></span> Sync from server</span></div>
+          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
+          <div class="listbox"><div class="listbox-empty">No recent activity</div></div>
+          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box checked"></span> Sync from server</span></div>
           <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
         </div>
       </div>
     </div>
+
     <div>
-      <div class="layout-tag"><span class="num">H6</span><span class="name">Syncing</span></div>
+      <div class="layout-tag"><span class="num">H6</span><span class="name">Syncing</span><span class="hint">One progress bar · % · ETA</span></div>
       <div class="window">
         <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
         <div class="body">
           <div class="hero-card">
-            <div class="top"><span class="pill sync"><span class="dot green"></span> Syncing 45%</span><button class="btn sm">Reconnect</button></div>
             <div class="sync-bridge">
-              <div class="bridge-node"><div class="ico">💻</div><div class="name">This PC</div><div class="path">C:\XDSoftware\backups</div></div>
-              <div class="bridge-mid"><div class="bridge-line"><div class="flow"></div></div><div class="lbl">3 / 8 · ~2 min</div></div>
-              <div class="bridge-node server"><div class="ico">☁</div><div class="name">Server</div><div class="path">XDPT.59655-Palmeira-Minimercado</div></div>
+              <div class="bridge-node">
+                <div class="ico-wrap"><div class="ico"><img src="assets/bridge-pc.svg" alt=""></div></div>
+                <div class="name">This PC</div>
+                <div class="path">C:\XDSoftware\backups</div>
+                <div class="bridge-actions"><button class="btn">Open</button><button class="btn">Browse</button></div>
+              </div>
+              <div class="bridge-mid wide">
+                <div class="sync-head active">Syncing</div>
+                <div class="bridge-line"><div class="flow"></div></div>
+                <div class="sync-meta">Uploading<br>PC → Server</div>
+              </div>
+              <div class="bridge-node server">
+                <div class="ico-wrap">
+                  <div class="ico"><img src="assets/bridge-cloud.svg" alt=""></div>
+                  <span class="conn-badge ok">✓</span>
+                </div>
+                <div class="name">Server</div>
+                <div class="path">Palmeira Minimercado</div>
+                <div class="conn-label ok">Paired · live</div>
+                <div class="bridge-actions"><button class="btn">Reconnect</button></div>
+              </div>
             </div>
-            <div class="progress-wrap"><div class="bar" style="width:45%"></div></div>
+            <div class="sync-progress">
+              <div class="row-labels"><span>3 of 8 files · backup.zip</span><span class="pct">45%</span></div>
+              <div class="progress-wrap"><div class="bar" style="width:45%"></div></div>
+              <div class="row-labels" style="margin-top:4px;margin-bottom:0;"><span style="color:#888;">ETA ~2 min</span><span style="color:#888;">Uploading</span></div>
+            </div>
           </div>
-          <div class="row" style="margin-bottom:8px;"><button class="btn">Open</button><button class="btn">Browse</button></div>
-          <div class="hero-strip"><span class="ico">⬆</span><span class="txt">Uploading backup.zip · 35% — config.db done</span></div>
-          <div class="listbox" style="min-height:56px;margin-bottom:8px;">
-            <div class="listbox-item"><div class="listbox-item-top"><span>⬆</span><span>backup.zip</span><span class="pct">35%</span></div><div class="mini-progress"><div class="bar" style="width:35%"></div></div></div>
+          <div class="hero-strip"><span class="ico">⬆</span><span class="txt">Uploading backup.zip · config.db done</span></div>
+          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
+          <div class="listbox">
+            <div class="listbox-item"><div class="listbox-item-top"><span>⬆</span><span>Uploading backup.zip</span><span class="pct">35%</span></div><div class="mini-progress"><div class="bar" style="width:35%"></div></div></div>
+            <div class="listbox-item"><div class="listbox-item-top"><span>✓</span><span>Uploaded config.db</span><span class="done">Done</span></div></div>
           </div>
-          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box"></span> Sync from server</span></div>
+          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box checked"></span> Sync from server</span></div>
           <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
         </div>
       </div>
     </div>
+
+    <div>
+      <div class="layout-tag"><span class="num">H6</span><span class="name">Not paired</span><span class="hint">Red ✕ on server</span></div>
+      <div class="window">
+        <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
+        <div class="body">
+          <div class="hero-card">
+            <div class="sync-bridge">
+              <div class="bridge-node">
+                <div class="ico-wrap"><div class="ico"><img src="assets/bridge-pc.svg" alt=""></div></div>
+                <div class="name">This PC</div>
+                <div class="path">C:\XDSoftware\backups</div>
+                <div class="bridge-actions"><button class="btn">Open</button><button class="btn">Browse</button></div>
+              </div>
+              <div class="bridge-mid wide idle">
+                <div class="sync-head idle">Not syncing</div>
+                <div class="bridge-line"><div class="flow" style="width:0;background:#ddd;"></div></div>
+                <div class="sync-meta">Pair with server<br>to start backup</div>
+              </div>
+              <div class="bridge-node server">
+                <div class="ico-wrap">
+                  <div class="ico"><img src="assets/bridge-cloud.svg" alt=""></div>
+                  <span class="conn-badge fail">✕</span>
+                </div>
+                <div class="name">Server</div>
+                <div class="path">Not paired</div>
+                <div class="conn-label fail">Not connected</div>
+                <div class="bridge-actions"><button class="btn">Connect</button></div>
+              </div>
+            </div>
+          </div>
+          <div class="hero-strip"><span class="ico">📋</span><span class="txt">No recent activity</span></div>
+          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
+          <div class="listbox"><div class="listbox-empty">No recent activity</div></div>
+          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span></div>
+          <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="layout-tag"><span class="num">H6</span><span class="name">Auth fail</span><span class="hint">Connection lost</span></div>
+      <div class="window">
+        <div class="titlebar"><span>Backup Sync Tool</span><div class="btns"><span class="tb-btn"></span><span class="tb-btn"></span><span class="tb-btn"></span></div></div>
+        <div class="body">
+          <div class="hero-card">
+            <div class="sync-bridge">
+              <div class="bridge-node">
+                <div class="ico-wrap"><div class="ico"><img src="assets/bridge-pc.svg" alt=""></div></div>
+                <div class="name">This PC</div>
+                <div class="path">C:\XDSoftware\backups</div>
+                <div class="bridge-actions"><button class="btn">Open</button><button class="btn">Browse</button></div>
+              </div>
+              <div class="bridge-mid wide idle">
+                <div class="sync-head idle">Sync paused</div>
+                <div class="bridge-line"><div class="flow" style="width:0;background:#ddd;"></div></div>
+                <div class="sync-meta">Credentials invalid<br>reconnect to resume</div>
+              </div>
+              <div class="bridge-node server">
+                <div class="ico-wrap">
+                  <div class="ico"><img src="assets/bridge-cloud.svg" alt=""></div>
+                  <span class="conn-badge fail">✕</span>
+                </div>
+                <div class="name">Server</div>
+                <div class="path">Palmeira Minimercado</div>
+                <div class="conn-label fail">Reconnect required</div>
+                <div class="bridge-actions"><button class="btn">Reconnect</button></div>
+              </div>
+            </div>
+          </div>
+          <div class="hero-strip"><span class="ico">✕</span><span class="txt">Upload failed: backup.zip · HTTP 401</span></div>
+          <div class="section-title" style="margin-bottom:6px;">Recent activity</div>
+          <div class="listbox">
+            <div class="listbox-item"><div class="listbox-item-top failed"><span>✕</span><span>Upload failed: backup.zip</span></div><div class="listbox-item-detail">HTTP 401 · credentials rejected</div></div>
+          </div>
+          <div class="footer"><span class="check"><span class="check-box checked"></span> Start with Windows</span><span class="check"><span class="check-box checked"></span> Sync from server</span></div>
+          <div class="meta-footer"><div class="meta-left"><span class="link">v2026.0.3</span><button class="btn btn-icon">⌾</button></div><span class="link">Rui Almeida</span></div>
+        </div>
+      </div>
+    </div>
+
   </div>
+  <p class="compare-note"><strong>Two questions, two places:</strong> (1) Is the server connection live? — green ✓ or red ✕ badge on the server icon + label under it. (2) Is sync finished? — centre column text + single progress bar (only while syncing, with % and ETA). Reconnect/Connect sits under the server node, aligned like Open/Browse under the PC.</p>
 </section>
 
 </main>
@@ -1538,7 +1593,7 @@
       } else if (el.id === 'inventory') {
         note.textContent = 'Feature inventory — all controls, states, and labels from the spec.';
       } else if (el.id === 'hero-bridge') {
-        note.textContent = 'Hero bridge variants (H1–H6) — explorations based on layout 4 sync bridge.';
+        note.textContent = 'Hero bridge variants (H1–H2, H5–H6) — H6 is the implementation target.';
       } else {
         var h = el.querySelector('h2');
         if (h) note.textContent = h.textContent.trim();

@@ -45,6 +45,9 @@ unicode-normalization = "0.1"
 # Local QR code generation for device pairing
 qrcodegen = "1"
 
+# Bridge icons rendered from mockups.html emoji tiles
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [profile.release]
 opt-level = "z"       # optimise for size
 lto = true            # link-time optimisation

@@ -2,13 +2,19 @@
 unsafe fn on_create(hwnd: HWND) {
     let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _);
 
-    let hfont = mkfont("Segoe UI", 12, FW_NORMAL.0 as i32);
-    let hfont_hdr = mkfont("Segoe UI", 10, FW_SEMIBOLD.0 as i32);
-    let hfont_b = mkfont("Segoe UI", 12, FW_SEMIBOLD.0 as i32);
-    let hfont_small = mkfont("Segoe UI", 9, FW_NORMAL.0 as i32);
-    let hfont_activity = mkfont("Segoe UI", 8, FW_NORMAL.0 as i32);
-    let hfont_btn = mkfont("Segoe UI", 11, FW_NORMAL.0 as i32);
-    let hfont_link = mkfont_underline("Segoe UI", 9, FW_NORMAL.0 as i32);
+    // Readable pixel-height scale (see FONT_* constants in common.rs)
+    let hfont = mkfont_px("Segoe UI", FONT_BODY_PX, FW_NORMAL.0 as i32);
+    let hfont_hdr = mkfont_px("Segoe UI", FONT_SECTION_PX, FW_BOLD.0 as i32);
+    let hfont_b = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
+    let hfont_small = mkfont_px("Segoe UI", FONT_CAPTION_PX, FW_NORMAL.0 as i32);
+    let hfont_activity = mkfont_px("Segoe UI", FONT_CAPTION_PX, FW_NORMAL.0 as i32);
+    let hfont_btn = mkfont_px("Segoe UI", FONT_BTN_PX, FW_NORMAL.0 as i32);
+    let hfont_bridge = mkfont_px("Segoe UI", FONT_BTN_SM_PX, FW_NORMAL.0 as i32);
+    let hfont_bridge_name = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
+    let hfont_bridge_path = mkfont_px("Segoe UI", FONT_CAPTION_PX, FW_NORMAL.0 as i32);
+    let hfont_bridge_mid = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
+    let hfont_bridge_check = mkfont_px("Segoe UI", FONT_BRIDGE_CHECK_PX, FW_SEMIBOLD.0 as i32);
+    let hfont_link = mkfont_px_underline("Segoe UI", FONT_LINK_PX, FW_NORMAL.0 as i32);
 
     let mut cfg = crate::config::load();
     let remote_folder_from_xd = false;
@@ -19,6 +25,7 @@ unsafe fn on_create(hwnd: HWND) {
     }
     let pass = secret::decrypt(&cfg.password_enc).unwrap_or_default();
     let sync_configured = is_sync_configured(&cfg, &pass);
+    let (bridge_icon_pc, bridge_icon_cloud) = load_bridge_icons(hwnd);
 
     let state = Box::new(WndState {
         config: cfg.clone(),
@@ -49,6 +56,14 @@ unsafe fn on_create(hwnd: HWND) {
         server_status_rect: RECT::default(),
         status_strip_rect: RECT::default(),
         status_strip_display: String::new(),
+        status_subtitle: String::new(),
+        bridge_rect: RECT::default(),
+        bridge_progress_rect: RECT::default(),
+        bridge_mid_label: String::new(),
+        bridge_btn_y: 0,
+        bridge_icon_pc,
+        bridge_icon_cloud,
+        inner_w: INNER_W,
         activity_list_rect: RECT::default(),
         dest_path_rect: RECT::default(),
         sync_footer_rect: RECT::default(),
@@ -59,6 +74,11 @@ unsafe fn on_create(hwnd: HWND) {
         hfont_small,
         hfont_activity,
         hfont_btn,
+        hfont_bridge,
+        hfont_bridge_name,
+        hfont_bridge_path,
+        hfont_bridge_mid,
+        hfont_bridge_check,
         hfont_link,
         br_win: CreateSolidBrush(COLORREF(C_WIN_BG)),
         br_path_box: CreateSolidBrush(COLORREF(C_DEST_PATH_BG)),
@@ -94,6 +114,7 @@ unsafe fn on_create(hwnd: HWND) {
         hfont_b,
         hfont_small,
         hfont_btn,
+        hfont_bridge,
         hfont_link,
     );
     apply_server_readonly(hwnd);
@@ -183,188 +204,96 @@ unsafe fn build_ui(
     hf_b: HFONT,
     hf_small: HFONT,
     hf_btn: HFONT,
+    hf_bridge: HFONT,
     hf_link: HFONT,
 ) {
     let st = &mut *state_ptr(hwnd);
     let mut y = CONTENT_TOP_PAD;
 
-    // ── STATUS STRIP + SERVER ───────────────────────────────────────────────────
+    // ── STATUS ROW + SYNC BRIDGE (H5 integrated actions) ───────────────────────
     {
         st.status_strip_rect = RECT {
             left: M,
             top: y,
-            right: WIN_W - M,
-            bottom: y + STATUS_STRIP_H,
+            right: M + st.inner_w,
+            bottom: y + STATUS_ROW_H,
         };
-        let dot_size = 10i32;
-        let dot_x = M + STATUS_ACCENT_W + 6;
-        let dot_y = y + (STATUS_STRIP_H - dot_size) / 2;
-        let text_x = dot_x + dot_size + 8;
+        st.server_status_rect = RECT::default();
         let status_initial = if is_paired(cfg) {
             "Connected".to_string()
         } else {
             "Not paired".to_string()
         };
         st.status_strip_display = status_initial;
+        st.status_subtitle = if is_paired(cfg) {
+            "All synced".to_string()
+        } else {
+            String::new()
+        };
+        st.bridge_mid_label = if is_paired(cfg) {
+            "\u{2713}".to_string()
+        } else {
+            String::new()
+        };
         mkstatic(
             hwnd,
             hi,
             IDC_SERVER_STATUS,
             "",
-            text_x,
-            y,
+            0,
+            0,
             1,
             1,
             hf_b,
         );
         ShowWindow(GetDlgItem(hwnd, IDC_SERVER_STATUS as i32), SW_HIDE);
-        st.server_status_rect = RECT {
-            left: dot_x,
-            top: dot_y,
-            right: dot_x + dot_size,
-            bottom: dot_y + dot_size,
-        };
         install_server_tooltip(hwnd, hi);
-        y += STATUS_STRIP_H + GAP;
+        y += STATUS_ROW_H + 8;
 
-        let pair_x = WIN_W - M - ACTION_BTN_W;
-        mkstatic(
-            hwnd,
-            hi,
-            IDC_SERVER_HDR,
-            "SERVER",
-            M,
-            y,
-            90,
-            ACTION_BTN_H,
-            hf_hdr,
-        );
+        y = layout_bridge_section(hwnd, hi, cfg, y, hf_bridge);
+    }
+
+    // Hidden legacy controls (still used for read_ctrls / tooltips)
+    {
+        mkstatic(hwnd, hi, IDC_SERVER_HDR, "SERVER", 0, 0, 1, 1, hf_hdr);
+        ShowWindow(GetDlgItem(hwnd, IDC_SERVER_HDR as i32), SW_HIDE);
         mkstatic_align(
             hwnd,
             hi,
             IDC_SERVER_URL_LABEL,
             &server_display_text(cfg),
-            M + 95,
-            y,
-            pair_x - M - 95 - PAD,
-            ACTION_BTN_H,
+            0,
+            0,
+            1,
+            1,
             hf_small,
             SS_RIGHT,
         );
-        let pair_label = if is_paired(cfg) {
-            "Reconnect"
-        } else {
-            "Connect"
-        };
-        mkbtn_grey(
-            hwnd,
-            hi,
-            IDC_PAIR_DEVICE,
-            pair_label,
-            pair_x,
-            y,
-            ACTION_BTN_W,
-            ACTION_BTN_H,
-            hf_btn,
-        );
-        y += ACTION_BTN_H + 8;
-    }
-
-    // ── FOLDERS ───────────────────────────────────────────────────────────────
-    {
-        let browse_x = M + INNER_W - ACTION_BTN_W;
-        let open_x = browse_x - PAD - ACTION_BTN_W;
-        let inp_w = INNER_W - FOLDER_ACTIONS_W - PAD;
-
-        mkstatic(
-            hwnd,
-            hi,
-            IDC_ORIGIN_LABEL,
-            "Backup folder on this PC",
-            M,
-            y,
-            INNER_W,
-            LBL_H,
-            hf_small,
-        );
-        y += LBL_H + 4;
+        ShowWindow(GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32), SW_HIDE);
+        mkstatic(hwnd, hi, IDC_ORIGIN_LABEL, "Backup folder on this PC", 0, 0, 1, 1, hf_small);
+        ShowWindow(GetDlgItem(hwnd, IDC_ORIGIN_LABEL as i32), SW_HIDE);
+        mkstatic(hwnd, hi, IDC_DEST_LABEL, "Server destination", 0, 0, 1, 1, hf_small);
+        ShowWindow(GetDlgItem(hwnd, IDC_DEST_LABEL as i32), SW_HIDE);
         mkedit_cue(
             hwnd,
             hi,
             IDC_WATCH_FOLDER,
             &cfg.watch_folder,
             "C:\\XDSoftware\\backups",
-            M,
-            y,
-            inp_w,
+            0,
+            0,
+            1,
             hf,
         );
-        mkbtn_grey(
-            hwnd,
-            hi,
-            IDC_OPEN_LOCAL_FOLDER,
-            "Open",
-            open_x,
-            y,
-            ACTION_BTN_W,
-            ACTION_BTN_H,
-            hf_btn,
-        );
-        mkbtn_grey(
-            hwnd,
-            hi,
-            IDC_BROWSE_LOCAL,
-            "Browse",
-            browse_x,
-            y,
-            ACTION_BTN_W,
-            ACTION_BTN_H,
-            hf_btn,
-        );
-        y += INP_H + GAP;
-
+        ShowWindow(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), SW_HIDE);
         let destination_text = destination_display_text(
             cfg,
             st.remote_folder_from_xd,
             st.detected_customer.as_deref(),
         );
-
-        mkstatic(
-            hwnd,
-            hi,
-            IDC_DEST_LABEL,
-            if is_paired(cfg) {
-                "Server destination"
-            } else {
-                "Destination folder"
-            },
-            M,
-            y,
-            150,
-            LBL_H,
-            hf_small,
-        );
-        y += LBL_H + 4;
-        st.dest_path_rect = RECT {
-            left: M,
-            top: y,
-            right: M + INNER_W,
-            bottom: y + DEST_PATH_H,
-        };
-        mkstatic(
-            hwnd,
-            hi,
-            IDC_REMOTE_FOLDER,
-            &destination_text,
-            M + 10,
-            y + 7,
-            INNER_W - 20,
-            DEST_PATH_H - 14,
-            hf_small,
-        );
-        y += DEST_PATH_H + SECT;
-
-        st.dividers.push(y - SECT / 2);
+        st.dest_path_rect = RECT::default();
+        mkstatic(hwnd, hi, IDC_REMOTE_FOLDER, &destination_text, 0, 0, 1, 1, hf_small);
+        ShowWindow(GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32), SW_HIDE);
     }
 
     // ── RECENT ACTIVITY ───────────────────────────────────────────────────────
@@ -397,12 +326,12 @@ unsafe fn build_ui(
         st.post_list_gap = PAD;
         y += PAD;
 
-        st.sync_row_h = SYNC_FOOTER_H;
+        st.sync_row_h = 0;
         st.sync_footer_rect = RECT {
             left: M,
             top: y,
             right: M + INNER_W,
-            bottom: y + SYNC_FOOTER_H,
+            bottom: y,
         };
         let footer_pad_x = 10;
         let footer_pad_y = 8;
@@ -442,18 +371,8 @@ unsafe fn build_ui(
             hf_small,
             SS_RIGHT,
         );
-        let prog = mkprogress(
-            hwnd,
-            hi,
-            IDC_SYNC_PROGRESS,
-            M + footer_pad_x,
-            y + footer_pad_y + LBL_H + 6,
-            INNER_W - footer_pad_x * 2,
-            8,
-        );
-        SendMessageW(prog, PBM_SETBARCOLOR, WPARAM(0), LPARAM(C_BLUE as isize));
-        SendMessageW(prog, PBM_SETBKCOLOR, WPARAM(0), LPARAM(C_PROGRESS_TRACK as isize));
-        ShowWindow(prog, SW_HIDE);
+        ShowWindow(GetDlgItem(hwnd, IDC_SYNC_STATUS as i32), SW_HIDE);
+        ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
         y += SYNC_FOOTER_H;
         st.post_sync_sect = SECT;
         y += SECT;
@@ -482,7 +401,7 @@ unsafe fn build_ui(
             check_y,
             startup_w,
             18,
-            hf_small,
+            hf,
             cfg.start_with_windows,
         );
         mkcheck(
@@ -494,7 +413,7 @@ unsafe fn build_ui(
             check_y,
             two_way_w,
             18,
-            hf_small,
+            hf,
             cfg.sync_remote_changes,
         );
 
@@ -1002,6 +921,97 @@ unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout) {
     )
         .ok();
     let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_REPO as i32), &hstring(ver_label));
+}
+
+unsafe fn layout_bridge_section(
+    hwnd: HWND,
+    hi: HINSTANCE,
+    cfg: &Config,
+    mut y: i32,
+    hf_bridge: HFONT,
+) -> i32 {
+    let st = state_ptr(hwnd);
+    let inner_w = (*st).inner_w;
+    let g = bridge_geom(inner_w);
+    let pair_label = if is_paired(cfg) {
+        "Reconnect"
+    } else {
+        "Connect"
+    };
+    let pair_w = bridge_pair_btn_w(pair_label);
+    let actions_w = BRIDGE_BTN_OPEN_W + BRIDGE_BTN_GAP + BRIDGE_BTN_BROWSE_W;
+
+    let layout = bridge_layout_at(y, inner_w);
+
+    (*st).bridge_rect = RECT {
+        left: M,
+        top: y,
+        right: M + inner_w,
+        bottom: y + layout.height,
+    };
+
+    (*st).bridge_btn_y = layout.btn_y;
+    let open_x = g.left_x + ((g.node_w - actions_w) / 2).max(BRIDGE_NODE_PAD);
+    let browse_x = open_x + BRIDGE_BTN_OPEN_W + BRIDGE_BTN_GAP;
+    let pair_x = (g.right_x + ((g.node_w - pair_w) / 2).max(BRIDGE_NODE_PAD))
+        .min(g.right_x + g.node_w - pair_w - BRIDGE_NODE_PAD);
+    let btn_y = layout.btn_y;
+
+    let place_btn = |hwnd: HWND, hi: HINSTANCE, id: u16, label: &str, x: i32, w: i32| {
+        let existing = GetDlgItem(hwnd, id as i32);
+        if existing.0.is_null() {
+            mkbtn_grey(hwnd, hi, id, label, x, btn_y, w, BRIDGE_BTN_H, hf_bridge);
+        } else {
+            SetWindowPos(existing, None, x, btn_y, w, BRIDGE_BTN_H, SWP_NOZORDER).ok();
+            let _ = SetWindowTextW(existing, &hstring(label));
+            SendMessageW(existing, WM_SETFONT, WPARAM(hf_bridge.0 as usize), LPARAM(1));
+        }
+    };
+
+    place_btn(hwnd, hi, IDC_OPEN_LOCAL_FOLDER, "Open", open_x, BRIDGE_BTN_OPEN_W);
+    place_btn(hwnd, hi, IDC_BROWSE_LOCAL, "Browse", browse_x, BRIDGE_BTN_BROWSE_W);
+    place_btn(hwnd, hi, IDC_PAIR_DEVICE, pair_label, pair_x, pair_w);
+
+    y += layout.height + 10;
+
+    (*st).bridge_progress_rect = RECT {
+        left: M,
+        top: y,
+        right: M + inner_w,
+        bottom: y + BRIDGE_PROGRESS_H,
+    };
+    let prog = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
+    if prog.0.is_null() {
+        let prog_hwnd = mkprogress(
+            hwnd,
+            hi,
+            IDC_SYNC_PROGRESS,
+            M,
+            y,
+            inner_w,
+            BRIDGE_PROGRESS_H,
+        );
+        SendMessageW(prog_hwnd, PBM_SETBARCOLOR, WPARAM(0), LPARAM(C_BLUE as isize));
+        SendMessageW(
+            prog_hwnd,
+            PBM_SETBKCOLOR,
+            WPARAM(0),
+            LPARAM(C_PROGRESS_TRACK as isize),
+        );
+        ShowWindow(prog_hwnd, SW_HIDE);
+    } else {
+        SetWindowPos(prog, None, M, y, inner_w, BRIDGE_PROGRESS_H, SWP_NOZORDER).ok();
+    }
+
+    y + GAP
+}
+
+fn bridge_pair_btn_w(label: &str) -> i32 {
+    if label == "Connect" {
+        BRIDGE_BTN_CONNECT_W
+    } else {
+        BRIDGE_BTN_PAIR_W
+    }
 }
 
 fn server_tooltip_text(cfg: &Config) -> String {

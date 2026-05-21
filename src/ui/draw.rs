@@ -1,6 +1,7 @@
 // ── WM_DRAWITEM ───────────────────────────────────────────────────────────────
 const BLUE_IDS: &[u16] = &[IDC_UPDATE_LINK];
 const BORDERLESS_IDS: &[u16] = &[IDC_GITHUB];
+const BRIDGE_BTN_IDS: &[u16] = &[IDC_OPEN_LOCAL_FOLDER, IDC_BROWSE_LOCAL, IDC_PAIR_DEVICE];
 
 unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
     let di = &*(lp.0 as *const DRAWITEMSTRUCT);
@@ -40,7 +41,8 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
         let hp = CreatePen(PS_SOLID, 1, COLORREF(bc));
         let op = SelectObject(hdc, hp);
         let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 5, 5);
+        let radius = if BRIDGE_BTN_IDS.contains(&id) { 4 } else { 5 };
+        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
         SelectObject(hdc, op);
         SelectObject(hdc, ob);
         DeleteObject(hp);
@@ -57,13 +59,14 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(fg));
         let mut tr = rc;
-        tr.left += 4;
-        tr.right -= 4;
+        let pad = if BRIDGE_BTN_IDS.contains(&id) { 2 } else { 4 };
+        tr.left += pad;
+        tr.right -= pad;
         DrawTextW(
             hdc,
             &mut buf[..len as usize],
             &mut tr,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
         SelectObject(hdc, of);
     }

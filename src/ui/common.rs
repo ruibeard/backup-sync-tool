@@ -12,6 +12,22 @@
 //   Status dot:      inline on the SERVER heading row
 //   Bottom bar:      version + checkboxes on one row; SAVE right
 //   Spacing:         PAD=8, GAP=12, SECT=20 rhythm
+//
+// Typography (Segoe UI, pixel heights — readable desktop scale):
+//   13px normal   — body: activity rows, checkboxes, footer buttons
+//   12px underline — footer links (version, author)
+//   11px bold     — section headings (RECENT ACTIVITY)
+//   12px semibold — status pill, bridge node names, bridge mid ETA
+//   12px normal   — captions/subtitles, bridge paths, activity status
+//   18px semibold — bridge mid checkmark (icon-like)
+const FONT_BODY_PX: i32 = 13;
+const FONT_CAPTION_PX: i32 = 12;
+const FONT_SECTION_PX: i32 = 11;
+const FONT_EMPHASIS_PX: i32 = 12;
+const FONT_BTN_PX: i32 = 13;
+const FONT_BTN_SM_PX: i32 = 12;
+const FONT_LINK_PX: i32 = 12;
+const FONT_BRIDGE_CHECK_PX: i32 = 18;
 
 use crate::config::Config;
 use crate::logs;
@@ -326,17 +342,143 @@ const GAP: i32 = 12; // medium gap (between rows)
 const SECT: i32 = 20; // section separator gap
 const INP_H: i32 = 26; // input height
 const BTN_H: i32 = 30; // bottom-bar primary button height
-const HDR_H: i32 = 20; // section heading height
-const LBL_H: i32 = 18; // label text height
+const HDR_H: i32 = 22; // section heading height
+const LBL_H: i32 = 20; // label text height
 const ACTION_BTN_W: i32 = 76; // Open / Browse / Connect / Reconnect / footer buttons
 const ACTION_BTN_H: i32 = INP_H;
 const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
 const META_ICON_GAP: i32 = 4; // gap between version link and GitHub icon
 const FOLDER_ACTIONS_W: i32 = ACTION_BTN_W * 2 + PAD;
 const CONTENT_TOP_PAD: i32 = 14; // mockup .body padding above status strip
-const STATUS_STRIP_H: i32 = 38;
+const STATUS_ROW_H: i32 = 26; // H5 pill row (Connected / Syncing + subtitle)
+const STATUS_STRIP_H: i32 = STATUS_ROW_H; // legacy alias for status row height
 const STATUS_ACCENT_W: i32 = 4;
 const DEST_PATH_H: i32 = 30;
+const BRIDGE_PAD_Y: i32 = 14;
+const BRIDGE_PAD_X: i32 = 10;
+const BRIDGE_ICO: i32 = 40;
+const BRIDGE_ICO_GAP: i32 = 6; // mockup .ico margin-bottom
+const BRIDGE_MID_W: i32 = 72;
+const BRIDGE_BTN_H: i32 = 26;
+const BRIDGE_BTN_OPEN_W: i32 = 52;
+const BRIDGE_BTN_BROWSE_W: i32 = 58;
+const BRIDGE_BTN_PAIR_W: i32 = 76;
+const BRIDGE_BTN_CONNECT_W: i32 = 64;
+const BRIDGE_BTN_GAP: i32 = 6;
+const BRIDGE_NODE_PAD: i32 = 4;
+const BRIDGE_NAME_H: i32 = 15;
+const BRIDGE_NAME_GAP: i32 = 3;
+const BRIDGE_ACTIONS_GAP: i32 = 8;
+const BRIDGE_FLOW_H: i32 = 3;
+const BRIDGE_PROGRESS_H: i32 = 8;
+const BRIDGE_PATH_H: i32 = 32;
+const BRIDGE_CONTENT_H: i32 = BRIDGE_ICO
+    + BRIDGE_ICO_GAP
+    + BRIDGE_NAME_H
+    + BRIDGE_NAME_GAP
+    + BRIDGE_PATH_H
+    + BRIDGE_ACTIONS_GAP
+    + BRIDGE_BTN_H;
+const BRIDGE_H: i32 = BRIDGE_PAD_Y + BRIDGE_CONTENT_H + BRIDGE_PAD_Y;
+
+struct BridgeGeom {
+    node_w: i32,
+    left_x: i32,
+    mid_x: i32,
+    right_x: i32,
+}
+
+struct BridgeLayout {
+    height: i32,
+    btn_y: i32,
+    left_ico: RECT,
+    right_ico: RECT,
+    left_name: RECT,
+    right_name: RECT,
+    left_path: RECT,
+    right_path: RECT,
+    mid: RECT,
+}
+
+fn bridge_geom(inner_w: i32) -> BridgeGeom {
+    let content_w = inner_w - BRIDGE_PAD_X * 2;
+    let node_w = (content_w - BRIDGE_MID_W) / 2;
+    let left_x = M + BRIDGE_PAD_X;
+    BridgeGeom {
+        node_w,
+        left_x,
+        mid_x: left_x + node_w,
+        right_x: left_x + node_w + BRIDGE_MID_W,
+    }
+}
+
+fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
+    let g = bridge_geom(inner_w);
+    let ico_y = top + BRIDGE_PAD_Y;
+    let left_ico = RECT {
+        left: g.left_x + (g.node_w - BRIDGE_ICO) / 2,
+        top: ico_y,
+        right: g.left_x + (g.node_w + BRIDGE_ICO) / 2,
+        bottom: ico_y + BRIDGE_ICO,
+    };
+    let right_ico = RECT {
+        left: g.right_x + (g.node_w - BRIDGE_ICO) / 2,
+        top: ico_y,
+        right: g.right_x + (g.node_w + BRIDGE_ICO) / 2,
+        bottom: ico_y + BRIDGE_ICO,
+    };
+    let name_y = left_ico.bottom + BRIDGE_ICO_GAP;
+    let path_y = name_y + BRIDGE_NAME_H + BRIDGE_NAME_GAP;
+    let btn_y = path_y + BRIDGE_PATH_H + BRIDGE_ACTIONS_GAP;
+    let height = btn_y + BRIDGE_BTN_H + BRIDGE_PAD_Y - top;
+    BridgeLayout {
+        height,
+        btn_y,
+        left_ico,
+        right_ico,
+        left_name: RECT {
+            left: g.left_x + BRIDGE_NODE_PAD,
+            top: name_y,
+            right: g.left_x + g.node_w - BRIDGE_NODE_PAD,
+            bottom: name_y + BRIDGE_NAME_H,
+        },
+        right_name: RECT {
+            left: g.right_x + BRIDGE_NODE_PAD,
+            top: name_y,
+            right: g.right_x + g.node_w - BRIDGE_NODE_PAD,
+            bottom: name_y + BRIDGE_NAME_H,
+        },
+        left_path: RECT {
+            left: g.left_x + BRIDGE_NODE_PAD,
+            top: path_y,
+            right: g.left_x + g.node_w - BRIDGE_NODE_PAD,
+            bottom: path_y + BRIDGE_PATH_H,
+        },
+        right_path: RECT {
+            left: g.right_x + BRIDGE_NODE_PAD,
+            top: path_y,
+            right: g.right_x + g.node_w - BRIDGE_NODE_PAD,
+            bottom: path_y + BRIDGE_PATH_H,
+        },
+        mid: RECT {
+            left: g.mid_x,
+            top: top + BRIDGE_PAD_Y,
+            right: g.mid_x + BRIDGE_MID_W,
+            bottom: top + height - BRIDGE_PAD_Y,
+        },
+    }
+}
+
+const C_BRIDGE_BG: u32 = 0x00FFFFFF;
+const C_BRIDGE_BORDER: u32 = 0x00E0E0E0;
+const C_BRIDGE_ICO_BG: u32 = 0x00FBF3EE; // #eef3fb
+const C_BRIDGE_ICO_BORDER: u32 = 0x00F5D9C5; // #c5d9f5
+const C_BRIDGE_SVR_ICO_BG: u32 = 0x00FFF4F0; // #f0f4ff
+const C_PILL_GREEN_BG: u32 = 0x00E9F5E8; // #e8f5e9
+const C_PILL_SYNC_BG: u32 = 0x00FDF2E3; // #e3f2fd
+const C_PILL_SYNC_TXT: u32 = 0x00C06515; // #1565c0
+const C_FLOW_TRACK: u32 = 0x00E0E0E0;
+const C_FLOW_SYNC: u32 = C_BLUE;
 const SYNC_FOOTER_H: i32 = 44;
 const C_STATUS_BG: u32 = 0x00FFFFFF;
 const C_DEST_PATH_BG: u32 = C_FOOTER_IDLE_BG;
@@ -345,15 +487,16 @@ const C_PANEL_BORDER: u32 = 0x00CCCCCC;
 const C_FOOTER_IDLE_BG: u32 = 0x00FAFAFA;
 const C_FOOTER_IDLE_BORDER: u32 = 0x00E0E0E0;
 const C_FOOTER_BUSY_BORDER: u32 = 0x00F5D9C5;
-const C_STATUS_MUTED: u32 = 0x00888888;
+const C_STATUS_MUTED: u32 = 0x00666666;
+const C_BRIDGE_PATH_TXT: u32 = 0x00666666;
 const C_PROGRESS_TRACK: u32 = 0x00E0E0E0;
 
 const MIN_ACTIVITY_LIST_H: i32 = 96;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
 const MAX_ACTIVITY_ROWS: usize = 200;
-const ACTIVITY_ROW_H_DONE: i32 = 22;
-const ACTIVITY_ROW_H_ACTIVE: i32 = 32;
-const ACTIVITY_ROW_H_ERROR: i32 = 36;
+const ACTIVITY_ROW_H_DONE: i32 = 24;
+const ACTIVITY_ROW_H_ACTIVE: i32 = 34;
+const ACTIVITY_ROW_H_ERROR: i32 = 40;
 const ACTIVITY_PAD_LEFT: i32 = 8;
 const ACTIVITY_PAD_RIGHT: i32 = 8;
 const ACTIVITY_STATUS_W: i32 = 36;
@@ -404,6 +547,14 @@ struct WndState {
     server_status_rect: RECT,
     status_strip_rect: RECT,
     status_strip_display: String,
+    status_subtitle: String,
+    bridge_rect: RECT,
+    bridge_progress_rect: RECT,
+    bridge_mid_label: String,
+    bridge_btn_y: i32,
+    bridge_icon_pc: HBITMAP,
+    bridge_icon_cloud: HBITMAP,
+    inner_w: i32,
     activity_list_rect: RECT,
     dest_path_rect: RECT,
     sync_footer_rect: RECT,
@@ -414,6 +565,11 @@ struct WndState {
     hfont_small: HFONT,
     hfont_activity: HFONT,
     hfont_btn: HFONT,
+    hfont_bridge: HFONT,
+    hfont_bridge_name: HFONT,
+    hfont_bridge_path: HFONT,
+    hfont_bridge_mid: HFONT,
+    hfont_bridge_check: HFONT,
     hfont_link: HFONT,
     br_win: HBRUSH,
     br_path_box: HBRUSH,

@@ -88,6 +88,7 @@ unsafe fn browse_local(hwnd: HWND) {
         let s = String::from_utf16_lossy(&buf[..end]);
         if s != previous_folder {
             let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
+            invalidate_bridge(hwnd);
             if !s.trim().is_empty() {
                 persist_settings(hwnd, true);
             }
@@ -428,15 +429,23 @@ unsafe fn do_open_logs(hwnd: HWND) {
     );
 }
 
+fn client_inner_w(hwnd: HWND) -> i32 {
+    let mut cr = RECT::default();
+    unsafe {
+        GetClientRect(hwnd, &mut cr).ok();
+    }
+    (cr.right - cr.left - M * 2).max(200)
+}
+
 fn required_client_height(st: &WndState) -> i32 {
-    let folders_h = (LBL_H + 4) + INP_H + GAP + (LBL_H + 4) + DEST_PATH_H + SECT;
+    let bridge_h = BRIDGE_H + 10 + GAP;
     let activity_h = HDR_H
         + PAD
         + MIN_ACTIVITY_LIST_H
         + st.post_list_gap
         + st.sync_row_h
         + st.post_sync_sect;
-    CONTENT_TOP_PAD + STATUS_STRIP_H + GAP + ACTION_BTN_H + 8 + folders_h + activity_h + st.bottom_bar_h
+    CONTENT_TOP_PAD + STATUS_ROW_H + 8 + bridge_h + activity_h + st.bottom_bar_h
 }
 
 unsafe fn layout_main(hwnd: HWND) {
@@ -451,149 +460,26 @@ unsafe fn layout_main(hwnd: HWND) {
 
     let mut y = CONTENT_TOP_PAD;
 
-    let dot_size = 10i32;
-    let dot_x = M + STATUS_ACCENT_W + 6;
-    let dot_y = y + (STATUS_STRIP_H - dot_size) / 2;
-    let text_x = dot_x + dot_size + 8;
+    (*st).inner_w = client_inner_w(hwnd);
     (*st).status_strip_rect = RECT {
         left: M,
         top: y,
-        right: WIN_W - M,
-        bottom: y + STATUS_STRIP_H,
+        right: M + (*st).inner_w,
+        bottom: y + STATUS_ROW_H,
     };
-    (*st).server_status_rect = RECT {
-        left: dot_x,
-        top: dot_y,
-        right: dot_x + dot_size,
-        bottom: dot_y + dot_size,
-    };
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SERVER_STATUS as i32),
-        None,
-        text_x,
-        y + (STATUS_STRIP_H - LBL_H) / 2,
-        WIN_W - M - text_x,
-        LBL_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += STATUS_STRIP_H + GAP;
+    y += STATUS_ROW_H + 8;
 
-    let pair_x = WIN_W - M - ACTION_BTN_W;
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SERVER_HDR as i32),
-        None,
-        M,
+    (*st).inner_w = client_inner_w(hwnd);
+    y = layout_bridge_section(
+        hwnd,
+        HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _),
+        &(*st).config.clone(),
         y,
-        90,
-        ACTION_BTN_H,
-        SWP_NOZORDER,
-    )
-    .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
-        None,
-        M + 95,
-        y,
-        pair_x - M - 95 - PAD,
-        ACTION_BTN_H,
-        SWP_NOZORDER,
-    )
-    .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32),
-        None,
-        pair_x,
-        y,
-        ACTION_BTN_W,
-        ACTION_BTN_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += ACTION_BTN_H + 8;
+        (*st).hfont_bridge,
+    );
 
     if !(*st).dividers.is_empty() {
         (&mut (*st).dividers)[0] = 0;
-    }
-
-    let browse_x = M + INNER_W - ACTION_BTN_W;
-    let open_x = browse_x - PAD - ACTION_BTN_W;
-    let inp_w = INNER_W - FOLDER_ACTIONS_W - PAD;
-
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_ORIGIN_LABEL as i32),
-        None,
-        M,
-        y,
-        INNER_W,
-        LBL_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += LBL_H + 4;
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32),
-        None,
-        M,
-        y,
-        inp_w,
-        INP_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_OPEN_LOCAL_FOLDER as i32),
-        None,
-        open_x,
-        y,
-        ACTION_BTN_W,
-        ACTION_BTN_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_BROWSE_LOCAL as i32),
-        None,
-        browse_x,
-        y,
-        ACTION_BTN_W,
-        ACTION_BTN_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += INP_H + GAP;
-
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_DEST_LABEL as i32),
-        None,
-        M,
-        y,
-        150,
-        LBL_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += LBL_H + 4;
-    (*st).dest_path_rect = RECT {
-        left: M,
-        top: y,
-        right: M + INNER_W,
-        bottom: y + DEST_PATH_H,
-    };
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-        None,
-        M + 8,
-        y + 6,
-        INNER_W - 16,
-        DEST_PATH_H - 12,
-        SWP_NOZORDER,
-    )
-        .ok();
-    y += DEST_PATH_H + SECT;
-
-    if (*st).dividers.len() > 1 {
-        (&mut (*st).dividers)[1] = y - SECT / 2;
     }
 
     SetWindowPos(
@@ -601,7 +487,7 @@ unsafe fn layout_main(hwnd: HWND) {
         None,
         M,
         y,
-        INNER_W,
+        (*st).inner_w,
         HDR_H,
         SWP_NOZORDER,
     )
@@ -615,7 +501,7 @@ unsafe fn layout_main(hwnd: HWND) {
     (*st).activity_list_rect = RECT {
         left: M,
         top: y,
-        right: M + INNER_W,
+        right: M + (*st).inner_w,
         bottom: y + new_lb_h,
     };
     SetWindowPos(
@@ -623,7 +509,7 @@ unsafe fn layout_main(hwnd: HWND) {
         None,
         M + 1,
         y + 1,
-        INNER_W - 2,
+        (*st).inner_w - 2,
         new_lb_h - 2,
         SWP_NOZORDER,
     )
@@ -632,12 +518,12 @@ unsafe fn layout_main(hwnd: HWND) {
     (*st).sync_footer_rect = RECT {
         left: M,
         top: y,
-        right: M + INNER_W,
+        right: M + (*st).inner_w,
         bottom: y + (*st).sync_row_h,
     };
     let footer_pad_x = 10;
     let footer_pad_y = 8;
-    let retry_btn_x = M + INNER_W - footer_pad_x - ACTION_BTN_W;
+    let retry_btn_x = M + (*st).inner_w - footer_pad_x - ACTION_BTN_W;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_RETRY_FAILED as i32),
         None,
@@ -658,26 +544,6 @@ unsafe fn layout_main(hwnd: HWND) {
         SWP_NOZORDER,
     )
         .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SYNC_ETA as i32),
-        None,
-        M + INNER_W - footer_pad_x - 76,
-        y + footer_pad_y,
-        76,
-        LBL_H,
-        SWP_NOZORDER,
-    )
-        .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32),
-        None,
-        M + footer_pad_x,
-        y + footer_pad_y + LBL_H + 6,
-        INNER_W - footer_pad_x * 2,
-        8,
-        SWP_NOZORDER,
-    )
-        .ok();
     y += (*st).sync_row_h;
     y += (*st).post_sync_sect;
 
@@ -692,7 +558,7 @@ unsafe fn layout_main(hwnd: HWND) {
     let startup_x = M;
     let startup_w = 126i32;
     let two_way_x = startup_x + startup_w + 12;
-    let two_way_w = M + INNER_W - two_way_x;
+    let two_way_w = M + (*st).inner_w - two_way_x;
 
     SetWindowPos(
         GetDlgItem(hwnd, IDC_START_WINDOWS as i32),
