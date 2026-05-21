@@ -137,7 +137,7 @@ unsafe extern "system" fn pair_qr_wnd_proc(
                     C_LABEL
                 }),
             );
-            LRESULT(GetSysColorBrush(COLOR_BTNFACE).0 as isize)
+            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
         }
         WM_DRAWITEM => on_draw_item(lp),
         WM_COMMAND => {

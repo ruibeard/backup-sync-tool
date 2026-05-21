@@ -1,7 +1,7 @@
 // ui.rs — Win32 main window
 //
-// Design (post-redesign):
-//   Window bg:       #F0F0F0
+// Design (mockup target):
+//   Window bg:       #FFFFFF
 //   No card boxes — sections separated by spacing + section headings only
 //   Section headings: #888888, Segoe UI 10pt SemiBold, ALL CAPS
 //   Field labels:     above inputs, left-aligned
@@ -20,14 +20,14 @@
 //   12px semibold — status pill, bridge node names, bridge mid ETA
 //   12px normal   — captions/subtitles, bridge paths, activity status
 //   18px semibold — bridge mid checkmark (icon-like)
-const FONT_BODY_PX: i32 = 13;
-const FONT_CAPTION_PX: i32 = 12;
-const FONT_SECTION_PX: i32 = 11;
-const FONT_EMPHASIS_PX: i32 = 12;
-const FONT_BTN_PX: i32 = 13;
-const FONT_BTN_SM_PX: i32 = 12;
-const FONT_LINK_PX: i32 = 12;
-const FONT_BRIDGE_CHECK_PX: i32 = 18;
+const FONT_BODY_PX: i32 = 14;
+const FONT_CAPTION_PX: i32 = 13;
+const FONT_SECTION_PX: i32 = 12;
+const FONT_EMPHASIS_PX: i32 = 15;
+const FONT_BTN_PX: i32 = 14;
+const FONT_BTN_SM_PX: i32 = 14;
+const FONT_LINK_PX: i32 = 13;
+const FONT_BRIDGE_CHECK_PX: i32 = 16;
 
 use crate::config::Config;
 use crate::logs;
@@ -266,22 +266,22 @@ where
 }
 
 // ── Colours  0x00BBGGRR ──────────────────────────────────────────────────────
-const C_WIN_BG: u32 = 0x00F0F0F0;
-const C_LABEL: u32 = 0x00333333;
+const C_WIN_BG: u32 = 0x00FFFFFF;
+const C_LABEL: u32 = 0x00554833;
 const C_INPUT_BG: u32 = 0x00FFFFFF;
-const C_INPUT_BORDER: u32 = 0x00CCCCCC;
-const C_INPUT_FOCUS: u32 = 0x00A34F2B;
-const C_BLUE: u32 = 0x00A34F2B;
-const C_BLUE_HOV: u32 = 0x007A3A1E;
+const C_INPUT_BORDER: u32 = 0x00E6DDD7;
+const C_INPUT_FOCUS: u32 = 0x00EB6325;
+const C_BLUE: u32 = 0x00EB6325;
+const C_BLUE_HOV: u32 = 0x00D1581D;
 const C_BLUE_TXT: u32 = 0x00FFFFFF;
-const C_GREY_BTN: u32 = 0x00E8E8E8;
-const C_GREY_HOV: u32 = 0x00D8D8D8;
-const C_GREY_TXT: u32 = 0x00333333;
-const C_GREY_BORDER: u32 = 0x00BBBBBB;
-const C_GREEN: u32 = 0x00287A28; // connected
+const C_GREY_BTN: u32 = 0x00FCFAF8;
+const C_GREY_HOV: u32 = 0x00F4F0EA;
+const C_GREY_TXT: u32 = C_LABEL;
+const C_GREY_BORDER: u32 = 0x00D6D0C8;
+const C_GREEN: u32 = 0x003F7A16; // connected
 const C_AMBER: u32 = 0x0000A5FF; // waiting / pending approval
 const C_RED: u32 = 0x000000CC; // not connected
-const C_DIVIDER: u32 = 0x00E0E0E0; // section separator line
+const C_DIVIDER: u32 = 0x00F0ECE6; // section separator line
 
 // ── Control IDs ──────────────────────────────────────────────────────────────
 const IDC_WATCH_FOLDER: u16 = 101;
@@ -302,6 +302,7 @@ const IDC_AUTHOR: u16 = 212;
 const IDC_ORIGIN_LABEL: u16 = 213;
 const IDC_DEST_LABEL: u16 = 214;
 const IDC_ACTIVITY_HDR: u16 = 215;
+const IDC_ACTIVITY_SUBHDR: u16 = 216;
 const IDC_PAIR_DEVICE: u16 = 217;
 const IDC_SERVER_URL_LABEL: u16 = 218;
 const IDC_SYNC_ETA: u16 = 219;
@@ -335,57 +336,50 @@ const IDC_PAIR_QR_LINK: u16 = 303;
 const IDC_PAIR_QR_CANCEL: u16 = 304;
 
 // ── Layout — 8/12/20 rhythm ──────────────────────────────────────────────────
-const WIN_W: i32 = 460; // client width (slightly narrower, cleaner)
-const M: i32 = 16; // outer margin
-const PAD: i32 = 8; // small gap (between items in same group)
-const GAP: i32 = 12; // medium gap (between rows)
-const SECT: i32 = 20; // section separator gap
-const INP_H: i32 = 26; // input height
-const BTN_H: i32 = 30; // bottom-bar primary button height
+const WIN_W: i32 = 560;
+const M: i32 = 24;
+const PAD: i32 = 10;
+const GAP: i32 = 14;
+const SECT: i32 = 22;
+const INP_H: i32 = 30; // input height
+const BTN_H: i32 = 32; // bottom-bar primary button height
 const HDR_H: i32 = 22; // section heading height
 const LBL_H: i32 = 20; // label text height
-const ACTION_BTN_W: i32 = 76; // Open / Browse / Connect / Reconnect / footer buttons
+const ACTION_BTN_W: i32 = 94; // Open / Browse / Connect / Reconnect / footer buttons
 const ACTION_BTN_H: i32 = INP_H;
 const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
-const META_ICON_GAP: i32 = 4; // gap between version link and GitHub icon
+const META_ICON_GAP: i32 = 5; // gap between version link and GitHub icon
 const FOLDER_ACTIONS_W: i32 = ACTION_BTN_W * 2 + PAD;
-const CONTENT_TOP_PAD: i32 = 14; // mockup .body padding above status strip
-const STATUS_ROW_H: i32 = 0; // H6: connection + sync live in the hero card
-const STATUS_STRIP_H: i32 = 26; // legacy pill height (unused when STATUS_ROW_H == 0)
-const STATUS_ACCENT_W: i32 = 4;
-const DEST_PATH_H: i32 = 30;
-const BRIDGE_PAD_Y: i32 = 14;
-const BRIDGE_PAD_X: i32 = 10;
+const CONTENT_TOP_PAD: i32 = 20;
+const BRIDGE_PAD_Y: i32 = 0;
+const BRIDGE_NODE_GAP: i32 = 24;
 const BRIDGE_ICO: i32 = 40;
-const BRIDGE_ICO_GAP: i32 = 6; // mockup .ico margin-bottom
-const BRIDGE_MID_W: i32 = 108;
-const BRIDGE_BTN_H: i32 = 26;
-const BRIDGE_BTN_OPEN_W: i32 = 52;
-const BRIDGE_BTN_BROWSE_W: i32 = 58;
-const BRIDGE_BTN_PAIR_W: i32 = 76;
-const BRIDGE_BTN_CONNECT_W: i32 = 64;
-const BRIDGE_BTN_GAP: i32 = 6;
-const BRIDGE_NODE_PAD: i32 = 4;
-const BRIDGE_NAME_H: i32 = 15;
-const BRIDGE_NAME_GAP: i32 = 3;
-const BRIDGE_CONN_GAP: i32 = 2;
-const BRIDGE_CONN_LABEL_H: i32 = 14;
-const BRIDGE_ACTIONS_GAP: i32 = 8;
-const BRIDGE_FLOW_H: i32 = 3;
-const BRIDGE_PROGRESS_H: i32 = 8;
-const BRIDGE_SYNC_PROGRESS_H: i32 = 58;
-const BRIDGE_PATH_H: i32 = 28;
-const BRIDGE_META_H: i32 = 36;
-const BRIDGE_CONTENT_H: i32 = BRIDGE_ICO
-    + BRIDGE_ICO_GAP
-    + BRIDGE_NAME_H
-    + BRIDGE_NAME_GAP
-    + BRIDGE_PATH_H
-    + BRIDGE_CONN_GAP
-    + BRIDGE_CONN_LABEL_H
-    + BRIDGE_ACTIONS_GAP
-    + BRIDGE_BTN_H;
+const BRIDGE_ICO_TILE: i32 = 52;
+const BRIDGE_ICO_GAP: i32 = 10;
+const BRIDGE_BTN_H: i32 = 30;
+const BRIDGE_HEADER_H: i32 = BRIDGE_ICO_TILE + 5 + BRIDGE_NAME_H + 2 + BRIDGE_PATH_H;
+const BRIDGE_TEXT_GAP: i32 = 10;
+const BRIDGE_OPEN_BTN_W: i32 = 58;
+const BRIDGE_BROWSE_BTN_W: i32 = 82;
+const BRIDGE_PAIR_BTN_W: i32 = 150;
+const BRIDGE_DIVIDER_VPAD: i32 = 12;
+const BRIDGE_NODE_PAD: i32 = 0;
+const BRIDGE_NAME_H: i32 = 20;
+const BRIDGE_NAME_GAP: i32 = 4;
+const BRIDGE_CONN_LABEL_H: i32 = 18;
+const SYNC_BAR_H: i32 = 10;
+const SYNC_BAND_H: i32 = 44;
+const BRIDGE_PATH_H: i32 = 18;
+const BRIDGE_CONTENT_H: i32 = BRIDGE_HEADER_H
+    + BRIDGE_DIVIDER_VPAD
+    + BRIDGE_BTN_H
+    + BRIDGE_DIVIDER_VPAD
+    + 1;
 const BRIDGE_H: i32 = BRIDGE_PAD_Y + BRIDGE_CONTENT_H + BRIDGE_PAD_Y;
+const FOOTER_PANEL_BG: u32 = C_WIN_BG;
+const C_FOOTER_SLUG_BG: u32 = 0x00F0F0F0;
+const C_FOOTER_SLUG_BORDER: u32 = 0x00E0E0E0;
+const STATUS_ROW_H: i32 = 0;
 
 struct BridgeGeom {
     node_w: i32,
@@ -396,89 +390,106 @@ struct BridgeGeom {
 
 struct BridgeLayout {
     height: i32,
+    divider_y: i32,
     btn_y: i32,
+    open_btn_x: i32,
+    open_btn_y: i32,
+    open_btn_w: i32,
+    browse_btn_x: i32,
+    browse_btn_w: i32,
+    pair_btn_x: i32,
+    pair_btn_w: i32,
+    left_tile: RECT,
+    right_tile: RECT,
     left_ico: RECT,
     right_ico: RECT,
-    left_name: RECT,
     right_name: RECT,
     left_path: RECT,
-    right_path: RECT,
     right_conn: RECT,
-    mid: RECT,
 }
 
 fn bridge_geom(inner_w: i32) -> BridgeGeom {
-    let content_w = inner_w - BRIDGE_PAD_X * 2;
-    let node_w = (content_w - BRIDGE_MID_W) / 2;
-    let left_x = M + BRIDGE_PAD_X;
+    let node_w = (inner_w - BRIDGE_NODE_GAP) / 2;
+    let left_x = M;
     BridgeGeom {
         node_w,
         left_x,
-        mid_x: left_x + node_w,
-        right_x: left_x + node_w + BRIDGE_MID_W,
+        mid_x: 0,
+        right_x: left_x + node_w + BRIDGE_NODE_GAP,
     }
 }
 
 fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
-    let g = bridge_geom(inner_w);
-    let ico_y = top + BRIDGE_PAD_Y;
+    let header_top = top + BRIDGE_PAD_Y;
+    let mid = inner_w / 2;
+    let node_w = (inner_w - BRIDGE_NODE_GAP) / 2;
+    let left_node_x = 0;
+    let right_node_x = inner_w - node_w;
+    let tile_x = |node_x: i32| node_x + (node_w - BRIDGE_ICO_TILE) / 2;
+
+    let left_tile = RECT {
+        left: tile_x(left_node_x),
+        top: header_top,
+        right: tile_x(left_node_x) + BRIDGE_ICO_TILE,
+        bottom: header_top + BRIDGE_ICO_TILE,
+    };
     let left_ico = RECT {
-        left: g.left_x + (g.node_w - BRIDGE_ICO) / 2,
-        top: ico_y,
-        right: g.left_x + (g.node_w + BRIDGE_ICO) / 2,
-        bottom: ico_y + BRIDGE_ICO,
+        left: left_tile.left + (BRIDGE_ICO_TILE - BRIDGE_ICO) / 2,
+        top: left_tile.top + (BRIDGE_ICO_TILE - BRIDGE_ICO) / 2,
+        right: left_tile.left + (BRIDGE_ICO_TILE + BRIDGE_ICO) / 2,
+        bottom: left_tile.top + (BRIDGE_ICO_TILE + BRIDGE_ICO) / 2,
+    };
+    let name_y = left_tile.bottom + 5;
+    let path_y = name_y + BRIDGE_NAME_H + 2;
+
+    let right_tile = RECT {
+        left: tile_x(right_node_x),
+        top: header_top,
+        right: tile_x(right_node_x) + BRIDGE_ICO_TILE,
+        bottom: header_top + BRIDGE_ICO_TILE,
     };
     let right_ico = RECT {
-        left: g.right_x + (g.node_w - BRIDGE_ICO) / 2,
-        top: ico_y,
-        right: g.right_x + (g.node_w + BRIDGE_ICO) / 2,
-        bottom: ico_y + BRIDGE_ICO,
+        left: right_tile.left + (BRIDGE_ICO_TILE - BRIDGE_ICO) / 2,
+        top: right_tile.top + (BRIDGE_ICO_TILE - BRIDGE_ICO) / 2,
+        right: right_tile.left + (BRIDGE_ICO_TILE + BRIDGE_ICO) / 2,
+        bottom: right_tile.top + (BRIDGE_ICO_TILE + BRIDGE_ICO) / 2,
     };
-    let name_y = left_ico.bottom + BRIDGE_ICO_GAP;
-    let path_y = name_y + BRIDGE_NAME_H + BRIDGE_NAME_GAP;
-    let conn_y = path_y + BRIDGE_PATH_H + BRIDGE_CONN_GAP;
-    let btn_y = conn_y + BRIDGE_CONN_LABEL_H + BRIDGE_ACTIONS_GAP;
-    let height = btn_y + BRIDGE_BTN_H + BRIDGE_PAD_Y - top;
+
+    let btn_y = header_top + BRIDGE_HEADER_H + BRIDGE_DIVIDER_VPAD;
+    let divider_y = btn_y + BRIDGE_BTN_H + BRIDGE_DIVIDER_VPAD;
+    let local_btns_w = BRIDGE_OPEN_BTN_W + PAD + BRIDGE_BROWSE_BTN_W;
     BridgeLayout {
-        height,
+        height: BRIDGE_H,
+        divider_y,
         btn_y,
+        open_btn_x: left_node_x + (node_w - local_btns_w) / 2,
+        open_btn_y: btn_y,
+        open_btn_w: BRIDGE_OPEN_BTN_W,
+        browse_btn_x: left_node_x + (node_w - local_btns_w) / 2 + BRIDGE_OPEN_BTN_W + PAD,
+        browse_btn_w: BRIDGE_BROWSE_BTN_W,
+        pair_btn_x: right_node_x + (node_w - BRIDGE_PAIR_BTN_W) / 2,
+        pair_btn_w: BRIDGE_PAIR_BTN_W,
+        left_tile,
+        right_tile,
         left_ico,
         right_ico,
-        left_name: RECT {
-            left: g.left_x + BRIDGE_NODE_PAD,
-            top: name_y,
-            right: g.left_x + g.node_w - BRIDGE_NODE_PAD,
-            bottom: name_y + BRIDGE_NAME_H,
-        },
         right_name: RECT {
-            left: g.right_x + BRIDGE_NODE_PAD,
+            left: mid + PAD,
             top: name_y,
-            right: g.right_x + g.node_w - BRIDGE_NODE_PAD,
+            right: inner_w,
             bottom: name_y + BRIDGE_NAME_H,
         },
         left_path: RECT {
-            left: g.left_x + BRIDGE_NODE_PAD,
-            top: path_y,
-            right: g.left_x + g.node_w - BRIDGE_NODE_PAD,
-            bottom: path_y + BRIDGE_PATH_H,
-        },
-        right_path: RECT {
-            left: g.right_x + BRIDGE_NODE_PAD,
-            top: path_y,
-            right: g.right_x + g.node_w - BRIDGE_NODE_PAD,
-            bottom: path_y + BRIDGE_PATH_H,
+            left: left_node_x,
+            top: name_y,
+            right: mid - PAD,
+            bottom: name_y + BRIDGE_PATH_H,
         },
         right_conn: RECT {
-            left: g.right_x + BRIDGE_NODE_PAD,
-            top: conn_y,
-            right: g.right_x + g.node_w - BRIDGE_NODE_PAD,
-            bottom: conn_y + BRIDGE_CONN_LABEL_H,
-        },
-        mid: RECT {
-            left: g.mid_x,
-            top: top + BRIDGE_PAD_Y,
-            right: g.mid_x + BRIDGE_MID_W,
-            bottom: top + height - BRIDGE_PAD_Y,
+            left: mid + PAD,
+            top: path_y,
+            right: inner_w,
+            bottom: path_y + BRIDGE_CONN_LABEL_H,
         },
     }
 }
@@ -486,7 +497,7 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
 const C_BRIDGE_BG: u32 = 0x00FFFFFF;
 const C_BRIDGE_BORDER: u32 = 0x00E0E0E0;
 const C_BRIDGE_ICO_BG: u32 = 0x00FBF3EE; // #eef3fb
-const C_BRIDGE_ICO_BORDER: u32 = 0x00F5D9C5; // #c5d9f5
+const C_BRIDGE_ICO_BORDER: u32 = 0x00F0DCD0; // #d0dcf0
 const C_BRIDGE_SVR_ICO_BG: u32 = 0x00FFF4F0; // #f0f4ff
 const C_PILL_GREEN_BG: u32 = 0x00E9F5E8; // #e8f5e9
 const C_PILL_SYNC_BG: u32 = 0x00FDF2E3; // #e3f2fd
@@ -501,24 +512,24 @@ const C_PANEL_BORDER: u32 = 0x00CCCCCC;
 const C_FOOTER_IDLE_BG: u32 = 0x00FAFAFA;
 const C_FOOTER_IDLE_BORDER: u32 = 0x00E0E0E0;
 const C_FOOTER_BUSY_BORDER: u32 = 0x00F5D9C5;
-const C_STATUS_MUTED: u32 = 0x00666666;
+const C_STATUS_MUTED: u32 = 0x008B7464;
 const C_BRIDGE_CONN_OK: u32 = C_GREEN;
 const C_BRIDGE_CONN_FAIL: u32 = C_RED;
 const C_BRIDGE_SYNC_HEAD_OK: u32 = C_GREEN;
 const C_BRIDGE_SYNC_HEAD_ACTIVE: u32 = C_PILL_SYNC_TXT;
 const C_BRIDGE_SYNC_HEAD_IDLE: u32 = C_STATUS_MUTED;
-const C_BRIDGE_PATH_TXT: u32 = 0x00666666;
+const C_BRIDGE_PATH_TXT: u32 = 0x008B7464;
 const C_PROGRESS_TRACK: u32 = 0x00E0E0E0;
 
-const MIN_ACTIVITY_LIST_H: i32 = 96;
+const MIN_ACTIVITY_LIST_H: i32 = 112;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
 const MAX_ACTIVITY_ROWS: usize = 200;
-const ACTIVITY_ROW_H_DONE: i32 = 24;
-const ACTIVITY_ROW_H_ACTIVE: i32 = 34;
-const ACTIVITY_ROW_H_ERROR: i32 = 40;
-const ACTIVITY_PAD_LEFT: i32 = 8;
-const ACTIVITY_PAD_RIGHT: i32 = 8;
-const ACTIVITY_STATUS_W: i32 = 36;
+const ACTIVITY_ROW_H_DONE: i32 = 30;
+const ACTIVITY_ROW_H_ACTIVE: i32 = 40;
+const ACTIVITY_ROW_H_ERROR: i32 = 48;
+const ACTIVITY_PAD_LEFT: i32 = 12;
+const ACTIVITY_PAD_RIGHT: i32 = 10;
+const ACTIVITY_STATUS_W: i32 = 64;
 const C_PROGRESS_MINI: u32 = 0x00FFA500; // #00A5FF BGR
 const C_ACTIVITY_TRACK: u32 = 0x00E8E8E8;
 
@@ -542,6 +553,8 @@ struct ActivityRow {
     relative_path: Option<String>,
     /// Match key for replacing in-flight rows (e.g. "upload:invoice.pdf").
     replace_key: Option<String>,
+    /// Local time label for info rows (e.g. "10:42 AM").
+    time_label: Option<String>,
 }
 
 // ── Window state ──────────────────────────────────────────────────────────────
@@ -617,6 +630,8 @@ struct WndState {
     divider_activity_idx: usize,
     /// Layout: minimum window client height
     min_client_h: i32,
+    /// Grey footer panel behind checkboxes + meta row
+    footer_panel_rect: RECT,
     pair_qr_hwnd: HWND,
     pair_cancel: Option<Arc<AtomicBool>>,
     pair_id: u64,
@@ -631,12 +646,21 @@ fn config_is_paired(cfg: &Config) -> bool {
     !cfg.device_token_enc.trim().is_empty()
 }
 
-fn bridge_show_progress_block(st: &WndState) -> bool {
-    if !config_is_paired(&st.config) || st.auth_failure_notified {
-        return false;
+fn customer_slug_label(st: &WndState) -> String {
+    let folder = st.config.remote_folder.trim();
+    if !folder.is_empty() && !is_root_remote_folder(folder) {
+        return folder.to_string();
     }
-    st.sync_status_state != crate::sync::ActivityState::Checking as usize
-        && st.sync_status_state != crate::sync::ActivityState::Syncing as usize
+    "Not paired".to_string()
+}
+
+fn is_root_remote_folder(folder: &str) -> bool {
+    let trimmed = folder.trim();
+    trimmed.is_empty() || trimmed == "/" || trimmed == "\\"
+}
+
+fn bridge_show_sync_band(st: &WndState) -> bool {
+    config_is_paired(&st.config) && !st.auth_failure_notified
 }
 
 fn bridge_syncing_progress(st: &WndState) -> bool {
@@ -645,13 +669,16 @@ fn bridge_syncing_progress(st: &WndState) -> bool {
 }
 
 fn bridge_section_total_h(st: &WndState) -> i32 {
-    BRIDGE_H
-        + if bridge_show_progress_block(st) {
-            BRIDGE_SYNC_PROGRESS_H
-        } else {
-            0
-        }
-        + GAP
+    let band = if bridge_show_sync_band(st) {
+        SECT + SYNC_BAND_H
+    } else {
+        0
+    };
+    BRIDGE_H + band + GAP
+}
+
+fn activity_subhdr_text() -> String {
+    format!("Showing last {MAX_ACTIVITY_ROWS} events")
 }
 
 struct PairResult {

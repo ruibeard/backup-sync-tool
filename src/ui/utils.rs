@@ -67,9 +67,9 @@ unsafe fn update_bridge_display(hwnd: HWND) {
 
     invalidate_bridge(hwnd);
 
-    let want_progress = bridge_show_progress_block(st);
-    let has_progress = st.bridge_progress_rect.bottom > st.bridge_progress_rect.top;
-    if want_progress != has_progress {
+    let want_band = bridge_show_sync_band(st);
+    let has_band = st.bridge_progress_rect.bottom > st.bridge_progress_rect.top;
+    if want_band != has_band {
         layout_main(hwnd);
     }
 }
@@ -77,9 +77,9 @@ unsafe fn update_bridge_display(hwnd: HWND) {
 unsafe fn restore_pair_idle_controls(hwnd: HWND) {
     let st = stmut(hwnd);
     let label = if st.auth_failure_notified || is_paired(&st.config) {
-        "Reconnect"
+        "Reconnect Server"
     } else {
-        "Connect"
+        "Connect Server"
     };
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring(label));
@@ -100,11 +100,6 @@ unsafe fn restore_server_status_after_pair_cancel(hwnd: HWND) {
     }
     set_status_strip_text(hwnd, "Pair cancelled");
     set_status_dot_color(hwnd, C_RED);
-}
-
-fn is_root_remote_folder(folder: &str) -> bool {
-    let trimmed = folder.trim();
-    trimmed.is_empty() || trimmed == "/" || trimmed == "\\"
 }
 
 fn is_paired(cfg: &Config) -> bool {
@@ -177,12 +172,10 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     let is_busy = is_checking || is_syncing;
     let st = stmut(hwnd);
     let was_busy = st.sync_footer_busy;
-    let had_progress = bridge_show_progress_block(st);
     st.sync_footer_busy = is_busy && (progress.1 > 0 || is_checking);
     let show_fail_footer = !is_busy && progress.2.max(st.sync_last_failed) > 0;
     let footer_h = if show_fail_footer { SYNC_FOOTER_H } else { 0 };
-    let has_progress = bridge_show_progress_block(st);
-    if st.sync_row_h != footer_h || had_progress != has_progress {
+    if st.sync_row_h != footer_h {
         st.sync_row_h = footer_h;
         layout_main(hwnd);
     } else if was_busy != st.sync_footer_busy {

@@ -3,6 +3,30 @@ unsafe fn draw_activity_text(hdc: HDC, rc: &mut RECT, text: &str, format: DRAW_T
     DrawTextW(hdc, &mut wide, rc, format);
 }
 
+fn activity_time_label_now() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    unsafe {
+        let st = GetLocalTime();
+        let h = st.wHour;
+        let m = st.wMinute;
+        let (h12, suffix) = match h {
+            0 => (12, "AM"),
+            1..=11 => (h, "AM"),
+            12 => (12, "PM"),
+            _ => (h - 12, "PM"),
+        };
+        format!("{h12}:{m:02} {suffix}")
+    }
+}
+
+fn activity_time_for_kind(kind: ActivityKind) -> Option<String> {
+    if kind == ActivityKind::Info {
+        Some(activity_time_label_now())
+    } else {
+        None
+    }
+}
+
 fn activity_row_height(row: &ActivityRow) -> i32 {
     match row.kind {
         ActivityKind::Error if row.detail.is_some() => ACTIVITY_ROW_H_ERROR,
@@ -19,6 +43,7 @@ fn activity_icon_char(kind: ActivityKind, done: bool) -> &'static str {
             ActivityKind::Uploading => "\u{2B06}",
             ActivityKind::Downloading => "\u{2B07}",
             ActivityKind::Error => "!",
+            ActivityKind::Info => "i",
             _ => " ",
         }
     }
@@ -43,6 +68,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 relative_path: None,
                 replace_key: None,
+                time_label: activity_time_for_kind(ActivityKind::Info),
             },
         ));
     }
@@ -61,6 +87,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 relative_path: None,
                 replace_key: None,
+                time_label: activity_time_for_kind(ActivityKind::Info),
             },
         ));
     }
@@ -87,6 +114,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 relative_path: Some(path.to_string()),
                 replace_key: Some(key),
+                time_label: None,
             },
         ));
     }
@@ -102,6 +130,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 relative_path: Some(path.to_string()),
                 replace_key: Some(key),
+                time_label: None,
             },
         ));
     }
@@ -117,6 +146,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 relative_path: Some(path.to_string()),
                 replace_key: Some(key),
+                time_label: None,
             },
         ));
     }
@@ -138,6 +168,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 },
                 relative_path: Some(relative.to_string()),
                 replace_key: Some(key),
+                time_label: None,
             },
         ));
     }
@@ -153,6 +184,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 relative_path: None,
                 replace_key: Some(key),
+                time_label: None,
             },
         ));
     }
@@ -168,6 +200,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 relative_path: None,
                 replace_key: None,
+                time_label: activity_time_for_kind(ActivityKind::Info),
             },
         ));
     }
@@ -246,6 +279,7 @@ fn failed_activity_row(relative: &str, detail: Option<String>) -> (String, Activ
             detail,
             relative_path: Some(relative.to_string()),
             replace_key: Some(key),
+            time_label: None,
         },
     )
 }
@@ -426,22 +460,31 @@ unsafe fn draw_activity_row(
     let mut top_line = *rc;
     top_line.left = rc.left + ACTIVITY_PAD_LEFT;
     top_line.right = content_right - ACTIVITY_PAD_RIGHT;
-    top_line.top += 4;
+    top_line.top += 5;
     top_line.bottom = if show_bar {
         rc.bottom - 9
     } else if is_error && row.detail.is_some() {
         rc.bottom - 14
     } else {
-        rc.bottom - 4
+        rc.bottom - 5
     };
 
     let status_right = top_line.right;
     let status_left = status_right - ACTIVITY_STATUS_W;
 
     let mut icon_rc = top_line;
-    icon_rc.right = icon_rc.left + 12;
+    icon_rc.right = icon_rc.left + 16;
     let of_icon = SelectObject(hdc, hf_label);
-    SetTextColor(hdc, COLORREF(if is_error { C_RED } else { C_LABEL }));
+    SetTextColor(
+        hdc,
+        COLORREF(if is_error {
+            C_RED
+        } else if done {
+            C_GREEN
+        } else {
+            C_STATUS_MUTED
+        }),
+    );
     draw_activity_text(
         hdc,
         &mut icon_rc,
@@ -450,12 +493,20 @@ unsafe fn draw_activity_row(
     );
 
     let mut label_rc = top_line;
-    label_rc.left += 16;
+    label_rc.left += 24;
     label_rc.right = if show_bar || done || is_error {
         status_left - 4
     } else {
         top_line.right
     };
+    SetTextColor(
+        hdc,
+        COLORREF(if row.kind == ActivityKind::Info {
+            C_STATUS_MUTED
+        } else {
+            C_LABEL
+        }),
+    );
     draw_activity_text(
         hdc,
         &mut label_rc,
@@ -566,6 +617,19 @@ unsafe fn draw_activity_row(
             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
         SelectObject(hdc, of_status);
+    } else if let Some(time) = row.time_label.as_deref() {
+        let of_status = SelectObject(hdc, hf_status);
+        SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
+        let mut time_rc = top_line;
+        time_rc.left = status_left;
+        time_rc.right = status_right;
+        draw_activity_text(
+            hdc,
+            &mut time_rc,
+            time,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        SelectObject(hdc, of_status);
     }
 
     SelectObject(hdc, of_icon);
@@ -604,7 +668,7 @@ unsafe fn on_draw_activity_item(lp: LPARAM) -> LRESULT {
         row,
         empty && di.itemID == 0,
         (*st).sync_anim_frame,
-        (*st).hfont,
+        (*st).hfont_activity,
         (*st).hfont_small,
     );
     LRESULT(1)

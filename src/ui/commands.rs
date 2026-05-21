@@ -503,7 +503,6 @@ unsafe fn layout_main(hwnd: HWND) {
     (*st).inner_w = client_inner_w(hwnd);
     (*st).status_strip_rect = RECT::default();
 
-    (*st).inner_w = client_inner_w(hwnd);
     y = layout_bridge_section(
         hwnd,
         HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _),
@@ -512,16 +511,23 @@ unsafe fn layout_main(hwnd: HWND) {
         (*st).hfont_bridge,
     );
 
-    if !(*st).dividers.is_empty() {
-        (&mut (*st).dividers)[0] = 0;
-    }
-
+    let sub_w = 180;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_ACTIVITY_HDR as i32),
         None,
         M,
         y,
-        (*st).inner_w,
+        (*st).inner_w - sub_w - PAD,
+        HDR_H,
+        SWP_NOZORDER,
+    )
+        .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_ACTIVITY_SUBHDR as i32),
+        None,
+        M + (*st).inner_w - sub_w,
+        y,
+        sub_w,
         HDR_H,
         SWP_NOZORDER,
     )
@@ -592,10 +598,17 @@ unsafe fn layout_main(hwnd: HWND) {
     }
 
     y = footer_top;
+    (*st).footer_panel_rect = RECT {
+        left: 0,
+        top: footer_top.saturating_sub(1),
+        right: M + (*st).inner_w + M,
+        bottom: client_h,
+    };
     let row_h = BTN_H;
-    let check_y = y + (row_h - 18) / 2;
+    let check_h = 22;
+    let check_y = y + (row_h - check_h) / 2;
     let startup_x = M;
-    let startup_w = 126i32;
+    let startup_w = 180i32;
     let two_way_x = startup_x + startup_w + 12;
     let two_way_w = M + (*st).inner_w - two_way_x;
 
@@ -605,7 +618,7 @@ unsafe fn layout_main(hwnd: HWND) {
         startup_x,
         check_y,
         startup_w,
-        18,
+        check_h,
         SWP_NOZORDER,
     )
         .ok();
@@ -615,15 +628,15 @@ unsafe fn layout_main(hwnd: HWND) {
         two_way_x,
         check_y,
         two_way_w,
-        18,
+        check_h,
         SWP_NOZORDER,
     )
         .ok();
     y += row_h;
 
     let footer_y = y + 2;
-    let meta = footer_meta_layout(footer_y, (*st).hfont_link);
-    position_footer_meta(hwnd, &meta);
+    let meta = footer_meta_layout(footer_y, (*st).hfont_link, "Rui Almeida");
+    position_footer_meta(hwnd, &meta, "Rui Almeida");
 
     InvalidateRect(hwnd, None, TRUE);
 }

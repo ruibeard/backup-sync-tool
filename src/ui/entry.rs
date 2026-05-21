@@ -123,9 +123,9 @@ unsafe extern "system" fn wnd_proc(
                 return LRESULT(br.0 as isize);
             }
             let text_clr = match id {
-                IDC_REPO => C_BLUE,
-                IDC_AUTHOR => C_LABEL,
+                IDC_REPO | IDC_AUTHOR => C_BLUE,
                 IDC_SERVER_HDR | IDC_ACTIVITY_HDR => 0x00888888,
+                IDC_ACTIVITY_SUBHDR => 0x00999999,
                 IDC_SERVER_URL_LABEL => 0x00777777,
                 IDC_ORIGIN_LABEL | IDC_DEST_LABEL => 0x00555555,
                 _ => C_LABEL,

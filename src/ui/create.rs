@@ -7,7 +7,7 @@ unsafe fn on_create(hwnd: HWND) {
     let hfont_hdr = mkfont_px("Segoe UI", FONT_SECTION_PX, FW_BOLD.0 as i32);
     let hfont_b = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
     let hfont_small = mkfont_px("Segoe UI", FONT_CAPTION_PX, FW_NORMAL.0 as i32);
-    let hfont_activity = mkfont_px("Segoe UI", FONT_CAPTION_PX, FW_NORMAL.0 as i32);
+    let hfont_activity = mkfont_px("Consolas", FONT_BODY_PX, FW_NORMAL.0 as i32);
     let hfont_btn = mkfont_px("Segoe UI", FONT_BTN_PX, FW_NORMAL.0 as i32);
     let hfont_bridge = mkfont_px("Segoe UI", FONT_BTN_SM_PX, FW_NORMAL.0 as i32);
     let hfont_bridge_name = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
@@ -98,6 +98,7 @@ unsafe fn on_create(hwnd: HWND) {
         bottom_bar_h: 0,
         divider_activity_idx: 0,
         min_client_h: 0,
+        footer_panel_rect: RECT::default(),
         pair_qr_hwnd: HWND(std::ptr::null_mut()),
         pair_cancel: None,
         pair_id: 0,
@@ -282,20 +283,33 @@ unsafe fn build_ui(
 
     // ── RECENT ACTIVITY ───────────────────────────────────────────────────────
     {
+        let sub_w = 180;
         mkstatic(
             hwnd,
             hi,
             IDC_ACTIVITY_HDR,
-            "RECENT ACTIVITY",
+            "RECENT ACTIVITY LOG",
             M,
             y,
-            INNER_W,
+            INNER_W - sub_w - PAD,
             HDR_H,
             hf_hdr,
         );
+        mkstatic_align(
+            hwnd,
+            hi,
+            IDC_ACTIVITY_SUBHDR,
+            &activity_subhdr_text(),
+            M + INNER_W - sub_w,
+            y,
+            sub_w,
+            HDR_H,
+            hf_small,
+            SS_RIGHT,
+        );
         y += HDR_H + PAD;
 
-        let lb_h = 140i32;
+        let lb_h = MIN_ACTIVITY_LIST_H;
         st.activity_list_top = y;
         st.activity_list_h = lb_h;
         st.activity_list_rect = RECT {
@@ -370,9 +384,10 @@ unsafe fn build_ui(
     // Row 2: author credit
     {
         let row_h = BTN_H;
-        let check_y = y + (row_h - 18) / 2;
+        let check_h = 22;
+        let check_y = y + (row_h - check_h) / 2;
         let startup_x = M;
-        let startup_w = 126i32;
+        let startup_w = 180i32;
         let two_way_x = startup_x + startup_w + 12;
         let two_way_w = M + INNER_W - two_way_x;
 
@@ -384,7 +399,7 @@ unsafe fn build_ui(
             startup_x,
             check_y,
             startup_w,
-            18,
+            check_h,
             hf,
             cfg.start_with_windows,
         );
@@ -396,7 +411,7 @@ unsafe fn build_ui(
             two_way_x,
             check_y,
             two_way_w,
-            18,
+            check_h,
             hf,
             cfg.sync_remote_changes,
         );
@@ -404,7 +419,7 @@ unsafe fn build_ui(
         y += row_h;
 
         let footer_y = y + 2;
-        let meta = footer_meta_layout(footer_y, hf_link);
+        let meta = footer_meta_layout(footer_y, hf_link, "Rui Almeida");
         let ver_label = concat!("v", env!("CARGO_PKG_VERSION"));
 
         mklink(
@@ -668,7 +683,10 @@ unsafe fn mkcheck(
         WINDOW_EX_STYLE::default(),
         w!("BUTTON"),
         &hs,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+        WS_CHILD
+            | WS_VISIBLE
+            | WS_TABSTOP
+            | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
         x,
         y,
         w,
@@ -821,12 +839,13 @@ unsafe fn font_text_width(hf: HFONT, text: &str) -> i32 {
     sz.cx.max(0) + 2
 }
 
-unsafe fn footer_meta_layout(footer_y: i32, hf_link: HFONT) -> FooterMetaLayout {
+unsafe fn footer_meta_layout(footer_y: i32, hf_link: HFONT, slug: &str) -> FooterMetaLayout {
     let version_x = M;
     let ver_label = concat!("v", env!("CARGO_PKG_VERSION"));
     let version_w = font_text_width(hf_link, ver_label);
     let github_x = version_x + version_w + META_ICON_GAP;
-    let author_w = 100;
+    let slug_w = font_text_width(hf_link, slug) + 16;
+    let author_w = slug_w.max(120).min(INNER_W / 2);
     let author_x = M + INNER_W - author_w;
     let update_x = github_x + GITHUB_BTN_SIZE + META_ICON_GAP;
     let footer_btn_y = footer_y + (LBL_H - ACTION_BTN_H) / 2;
@@ -842,7 +861,7 @@ unsafe fn footer_meta_layout(footer_y: i32, hf_link: HFONT) -> FooterMetaLayout 
     }
 }
 
-unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout) {
+unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout, slug: &str) {
     let ver_label = concat!("v", env!("CARGO_PKG_VERSION"));
     SetWindowPos(
         GetDlgItem(hwnd, IDC_REPO as i32),
@@ -886,6 +905,7 @@ unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout) {
     )
         .ok();
     let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_REPO as i32), &hstring(ver_label));
+    let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_AUTHOR as i32), &hstring("Rui Almeida"));
 }
 
 unsafe fn layout_bridge_section(
@@ -897,18 +917,15 @@ unsafe fn layout_bridge_section(
 ) -> i32 {
     let st = state_ptr(hwnd);
     let inner_w = (*st).inner_w;
-    let g = bridge_geom(inner_w);
     let pair_label = if is_paired(cfg) {
-        "Reconnect"
+        "Reconnect Server"
     } else {
-        "Connect"
+        "Connect Server"
     };
-    let pair_w = bridge_pair_btn_w(pair_label);
-    let actions_w = BRIDGE_BTN_OPEN_W + BRIDGE_BTN_GAP + BRIDGE_BTN_BROWSE_W;
 
     let layout = bridge_layout_at(y, inner_w);
-    let show_progress = bridge_show_progress_block(&*st);
-    let card_h = layout.height + if show_progress { BRIDGE_SYNC_PROGRESS_H } else { 0 };
+    let show_band = bridge_show_sync_band(&*st);
+    let card_h = layout.height;
 
     (*st).bridge_rect = RECT {
         left: M,
@@ -918,34 +935,61 @@ unsafe fn layout_bridge_section(
     };
 
     (*st).bridge_btn_y = layout.btn_y;
-    let open_x = g.left_x + ((g.node_w - actions_w) / 2).max(BRIDGE_NODE_PAD);
-    let browse_x = open_x + BRIDGE_BTN_OPEN_W + BRIDGE_BTN_GAP;
-    let pair_x = (g.right_x + ((g.node_w - pair_w) / 2).max(BRIDGE_NODE_PAD))
-        .min(g.right_x + g.node_w - pair_w - BRIDGE_NODE_PAD);
-    let btn_y = layout.btn_y;
 
-    let place_btn = |hwnd: HWND, hi: HINSTANCE, id: u16, label: &str, x: i32, w: i32| {
+    let place_btn =
+        |hwnd: HWND, hi: HINSTANCE, id: u16, label: &str, x: i32, by: i32, w: i32, h: i32| {
         let existing = GetDlgItem(hwnd, id as i32);
         if existing.0.is_null() {
-            mkbtn_grey(hwnd, hi, id, label, x, btn_y, w, BRIDGE_BTN_H, hf_bridge);
+            mkbtn_grey(hwnd, hi, id, label, x, by, w, h, hf_bridge);
         } else {
-            SetWindowPos(existing, None, x, btn_y, w, BRIDGE_BTN_H, SWP_NOZORDER).ok();
+            SetWindowPos(existing, None, x, by, w, h, SWP_NOZORDER).ok();
             let _ = SetWindowTextW(existing, &hstring(label));
             SendMessageW(existing, WM_SETFONT, WPARAM(hf_bridge.0 as usize), LPARAM(1));
+            ShowWindow(existing, SW_SHOW);
         }
     };
 
-    place_btn(hwnd, hi, IDC_OPEN_LOCAL_FOLDER, "Open", open_x, BRIDGE_BTN_OPEN_W);
-    place_btn(hwnd, hi, IDC_BROWSE_LOCAL, "Browse", browse_x, BRIDGE_BTN_BROWSE_W);
-    place_btn(hwnd, hi, IDC_PAIR_DEVICE, pair_label, pair_x, pair_w);
+    place_btn(
+        hwnd,
+        hi,
+        IDC_OPEN_LOCAL_FOLDER,
+        "Open",
+        M + layout.open_btn_x,
+        layout.open_btn_y,
+        layout.open_btn_w,
+        BRIDGE_BTN_H,
+    );
+    place_btn(
+        hwnd,
+        hi,
+        IDC_BROWSE_LOCAL,
+        "Browse",
+        M + layout.browse_btn_x,
+        layout.btn_y,
+        layout.browse_btn_w,
+        BRIDGE_BTN_H,
+    );
+    place_btn(
+        hwnd,
+        hi,
+        IDC_PAIR_DEVICE,
+        pair_label,
+        M + layout.pair_btn_x,
+        layout.btn_y,
+        layout.pair_btn_w,
+        BRIDGE_BTN_H,
+    );
 
-    if show_progress {
+    y += card_h;
+    if show_band {
+        y += SECT;
         (*st).bridge_progress_rect = RECT {
-            left: M + BRIDGE_PAD_X,
-            top: y + layout.height + 2,
-            right: M + inner_w - BRIDGE_PAD_X,
-            bottom: y + card_h - 6,
+            left: M,
+            top: y,
+            right: M + inner_w,
+            bottom: y + SYNC_BAND_H,
         };
+        y += SYNC_BAND_H;
     } else {
         (*st).bridge_progress_rect = RECT::default();
     }
@@ -966,16 +1010,8 @@ unsafe fn layout_bridge_section(
         SetWindowPos(prog, None, 0, 0, 1, 1, SWP_NOZORDER).ok();
     }
 
-    y += card_h + GAP;
+    y += GAP;
     y
-}
-
-fn bridge_pair_btn_w(label: &str) -> i32 {
-    if label == "Connect" {
-        BRIDGE_BTN_CONNECT_W
-    } else {
-        BRIDGE_BTN_PAIR_W
-    }
 }
 
 fn server_tooltip_text(cfg: &Config) -> String {

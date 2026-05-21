@@ -32,20 +32,18 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
     let rc = di.rcItem;
     let hdc = di.hDC;
 
-    let hbr = CreateSolidBrush(COLORREF(bg));
+    let hbr = CreateSolidBrush(COLORREF(C_WIN_BG));
     FillRect(hdc, &rc, hbr);
     DeleteObject(hbr);
 
     // Draw border for non-borderless buttons
     if !is_borderless {
-        let hp = CreatePen(PS_SOLID, 1, COLORREF(bc));
-        let op = SelectObject(hdc, hp);
-        let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        let radius = if BRIDGE_BTN_IDS.contains(&id) { 4 } else { 5 };
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-        SelectObject(hdc, op);
-        SelectObject(hdc, ob);
-        DeleteObject(hp);
+        let radius = if BRIDGE_BTN_IDS.contains(&id) { 8 } else { 7 };
+        round_rect_color(hdc, &rc, bg, bc, radius);
+    } else {
+        let hbr = CreateSolidBrush(COLORREF(bg));
+        FillRect(hdc, &rc, hbr);
+        DeleteObject(hbr);
     }
 
     let len = GetWindowTextLengthW(di.hwndItem);
