@@ -592,11 +592,6 @@ unsafe fn layout_main(hwnd: HWND) {
     y += (*st).sync_row_h;
     y += (*st).post_sync_sect;
 
-    let div_idx = (*st).divider_activity_idx;
-    if div_idx < (*st).dividers.len() {
-        (&mut (*st).dividers)[div_idx] = y - (*st).post_sync_sect / 2;
-    }
-
     y = footer_top;
     (*st).footer_panel_rect = RECT {
         left: 0,

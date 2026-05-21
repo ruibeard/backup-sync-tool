@@ -423,7 +423,7 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
         left: rc.left,
         top: rc.top,
         right: rc.right,
-        bottom: rc.top + 20,
+        bottom: rc.top + SYNC_BAND_HEAD_H,
     };
     let of_h = SelectObject(hdc, st.hfont_b);
     SetBkMode(hdc, TRANSPARENT);
@@ -445,7 +445,7 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
     }
     SelectObject(hdc, of_h);
 
-    let bar_y = rc.top + 26;
+    let bar_y = rc.top + SYNC_BAND_HEAD_H + SYNC_BAND_HEAD_BAR_GAP;
     let track = RECT {
         left: rc.left,
         top: bar_y,
@@ -467,9 +467,9 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
     if !detail.is_empty() || !eta.is_empty() {
         let row2 = RECT {
             left: rc.left,
-            top: track.bottom + 4,
+            top: track.bottom + SYNC_BAND_BAR_DETAIL_GAP,
             right: rc.right,
-            bottom: rc.bottom,
+            bottom: track.bottom + SYNC_BAND_BAR_DETAIL_GAP + SYNC_BAND_DETAIL_H,
         };
         let of_d = SelectObject(hdc, hf_detail);
         SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
@@ -560,18 +560,6 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
         }
     }
 
-    for &dy in &(*st).dividers {
-        if dy <= 0 {
-            continue;
-        }
-        let hp = CreatePen(PS_SOLID, 1, COLORREF(C_DIVIDER));
-        let op = SelectObject(hdc, hp);
-        let _ = MoveToEx(hdc, M, dy, None);
-        let _ = LineTo(hdc, M + (*st).inner_w, dy);
-        SelectObject(hdc, op);
-        DeleteObject(hp);
-    }
-
     let fp = (*st).footer_panel_rect;
     if fp.bottom > fp.top {
         let top_line = RECT {
@@ -581,7 +569,6 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
             bottom: fp.top + 1,
         };
         fill_rect_color(hdc, &top_line, C_DIVIDER);
-
     }
 
     let _ = hf;

@@ -363,7 +363,15 @@ const BRIDGE_DIVIDER_VPAD: i32 = 12;
 const BRIDGE_NAME_H: i32 = 20;
 const BRIDGE_CONN_LABEL_H: i32 = 18;
 const SYNC_BAR_H: i32 = 10;
-const SYNC_BAND_H: i32 = 44;
+const SYNC_BAND_HEAD_H: i32 = 20;
+const SYNC_BAND_HEAD_BAR_GAP: i32 = 6;
+const SYNC_BAND_BAR_DETAIL_GAP: i32 = 4;
+const SYNC_BAND_DETAIL_H: i32 = 18;
+const SYNC_BAND_H: i32 = SYNC_BAND_HEAD_H
+    + SYNC_BAND_HEAD_BAR_GAP
+    + SYNC_BAR_H
+    + SYNC_BAND_BAR_DETAIL_GAP
+    + SYNC_BAND_DETAIL_H;
 const BRIDGE_PATH_H: i32 = 18;
 const BRIDGE_CONTENT_H: i32 = BRIDGE_HEADER_H
     + BRIDGE_DIVIDER_VPAD
@@ -580,8 +588,6 @@ struct WndState {
     br_footer_busy: HBRUSH,
     br_input: HBRUSH,
     focused_edit: u16,
-    /// Divider y-positions for WM_PAINT
-    dividers: Vec<i32>,
     /// Layout: y-position where the activity listbox starts
     activity_list_top: i32,
     /// Layout: default activity listbox height
@@ -594,8 +600,6 @@ struct WndState {
     post_sync_sect: i32,
     /// Layout: height of bottom bar area (row_h + M)
     bottom_bar_h: i32,
-    /// Layout: the y of the divider between activity section and bottom bar (index in dividers)
-    divider_activity_idx: usize,
     /// Layout: minimum window client height
     min_client_h: i32,
     /// Grey footer panel behind checkboxes + meta row

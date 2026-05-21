@@ -89,14 +89,12 @@ unsafe fn on_create(hwnd: HWND) {
         br_footer_busy: CreateSolidBrush(COLORREF(C_STATUS_BG)),
         br_input: CreateSolidBrush(COLORREF(C_INPUT_BG)),
         focused_edit: 0,
-        dividers: Vec::new(),
         activity_list_top: 0,
         activity_list_h: 0,
         post_list_gap: 0,
         sync_row_h: 0,
         post_sync_sect: 0,
         bottom_bar_h: 0,
-        divider_activity_idx: 0,
         min_client_h: 0,
         footer_panel_rect: RECT::default(),
         pair_qr_hwnd: HWND(std::ptr::null_mut()),
@@ -374,9 +372,6 @@ unsafe fn build_ui(
         y += SYNC_FOOTER_H;
         st.post_sync_sect = SECT;
         y += SECT;
-
-        st.divider_activity_idx = st.dividers.len();
-        st.dividers.push(y - SECT / 2);
     }
 
     // ── BOTTOM BAR ────────────────────────────────────────────────────────────
