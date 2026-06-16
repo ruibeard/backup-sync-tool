@@ -16,7 +16,7 @@ Native Windows tray app that backs up one local folder to WebDAV. Pairing via a 
 
 ## Requirements
 
-- Windows 10+
+- Windows 7 SP1 x64 or newer
 - WebDAV server + [pairing API](SPEC.md#pairing-api) (default base `https://box.rui.cam`)
 
 ## Install
@@ -25,7 +25,7 @@ Download `backupsynctool.exe` from [Releases](https://github.com/ruibeard/backup
 
 ## Use
 
-1. Set **backup folder** (or use detected `C:\XDSoftware\backups` when present).
+1. Set **backup folder** (or use detected `C:\XDSoftware\backups` when present; otherwise the app prompts after pairing).
 2. **Pair** — scan QR / enter code; admin approves customer folder on server.
 3. Sync starts automatically after pairing (no Save button).
 4. **Reconnect** if WebDAV returns HTTP 401.
@@ -38,7 +38,13 @@ Settings auto-save on folder browse and checkbox changes.
 .\build-local.ps1
 ```
 
-Public release: `.\release.ps1` (bumps version, tags `vX.Y.Z`, pushes).
+Windows 7-compatible build:
+
+```powershell
+.\build-win7.ps1
+```
+
+Public release: `.\release.ps1` (builds one Windows 7-compatible `backupsynctool.exe`, bumps version, tags `vX.Y.Z`, pushes).
 
 Details: [SPEC.md](SPEC.md) · Agent rules: [AGENTS.md](AGENTS.md) (LLM/Cursor only)
 
@@ -49,7 +55,7 @@ Details: [SPEC.md](SPEC.md) · Agent rules: [AGENTS.md](AGENTS.md) (LLM/Cursor o
 | `src/` | Rust app (Win32 UI, sync, WebDAV, pairing) |
 | `license-inspector/` | Optional XD licence diagnostic helper |
 | `mockups.html` | UI layout reference |
-| `build-local.ps1` / `release.ps1` | Build & release scripts |
+| `build-local.ps1` / `build-win7.ps1` / `release.ps1` | Build & release scripts |
 
 ## Security note
 

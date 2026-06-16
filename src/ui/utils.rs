@@ -26,9 +26,19 @@ unsafe fn update_bridge_display(hwnd: HWND) {
     } else if auth_fail {
         "Reconnect required".to_string()
     } else if st.connected {
-        "Paired · live".to_string()
+        let host = server_host_text(&st.config);
+        if host == "Server not configured" {
+            "Paired · live".to_string()
+        } else {
+            format!("{host} · live")
+        }
     } else {
-        "Offline".to_string()
+        let host = server_host_text(&st.config);
+        if host == "Server not configured" {
+            "Offline".to_string()
+        } else {
+            format!("{host} · offline")
+        }
     };
 
     st.bridge_sync_head = if auth_fail && !is_syncing && !is_checking {
@@ -333,6 +343,36 @@ unsafe fn ensure_default_watch_folder(hwnd: HWND) {
     }
 }
 
+unsafe fn ensure_or_prompt_watch_folder(hwnd: HWND) -> bool {
+    {
+        let st = stmut(hwnd);
+        if !st.config.watch_folder.trim().is_empty() && Path::new(&st.config.watch_folder).is_dir()
+        {
+            return true;
+        }
+    }
+    ensure_default_watch_folder(hwnd);
+    {
+        let st = stmut(hwnd);
+        if !st.config.watch_folder.trim().is_empty() && Path::new(&st.config.watch_folder).is_dir()
+        {
+            return true;
+        }
+    }
+    notify_user(
+        hwnd,
+        "Choose the backup folder on this PC. The XDSoftware backup folder was not found.",
+    );
+    if !browse_local(hwnd, false) {
+        return false;
+    }
+    read_ctrls(hwnd, stmut(hwnd));
+    {
+        let st = stmut(hwnd);
+        !st.config.watch_folder.trim().is_empty() && Path::new(&st.config.watch_folder).is_dir()
+    }
+}
+
 /// Stop any running engine and start a new one when credentials and folders are set.
 unsafe fn do_retry_failed_uploads(hwnd: HWND) {
     read_ctrls(hwnd, stmut(hwnd));
@@ -417,7 +457,10 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
 
 unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     read_ctrls(hwnd, stmut(hwnd));
-    ensure_default_watch_folder(hwnd);
+    if !ensure_or_prompt_watch_folder(hwnd) {
+        stmut(hwnd).sync_engine = None;
+        return Err("Sync not started: choose a valid backup folder on this PC.".to_string());
+    }
     let cfg = stmut(hwnd).config.clone();
     let pass = stmut(hwnd).password_plain.clone();
     if !is_sync_configured(&cfg, &pass) {
@@ -546,6 +589,17 @@ unsafe fn mkfont_px_underline(name: &str, px: i32, weight: i32) -> HFONT {
 
 fn hstring(s: &str) -> HSTRING {
     HSTRING::from(s)
+}
+
+fn approval_timestamp_now() -> String {
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    unsafe {
+        let st = GetLocalTime();
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute
+        )
+    }
 }
 
 unsafe fn msgbox_yn(hwnd: HWND, text: &str, title: &str) -> bool {

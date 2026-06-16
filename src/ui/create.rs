@@ -7,7 +7,7 @@ unsafe fn on_create(hwnd: HWND) {
     let hfont_hdr = mkfont_px("Segoe UI", FONT_SECTION_PX, FW_BOLD.0 as i32);
     let hfont_b = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
     let hfont_small = mkfont_px("Segoe UI", FONT_CAPTION_PX, FW_NORMAL.0 as i32);
-    let hfont_activity = mkfont_px("Consolas", FONT_BODY_PX, FW_NORMAL.0 as i32);
+    let hfont_activity = mkfont_px("Segoe UI", FONT_BODY_PX, FW_NORMAL.0 as i32);
     let hfont_btn = mkfont_px("Segoe UI", FONT_BTN_PX, FW_NORMAL.0 as i32);
     let hfont_bridge = mkfont_px("Segoe UI", FONT_BTN_SM_PX, FW_NORMAL.0 as i32);
     let hfont_bridge_name = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
@@ -1020,7 +1020,20 @@ fn server_tooltip_text(cfg: &Config) -> String {
     } else {
         cfg.remote_folder.trim()
     };
-    format!("Server: {url}\nDestination: {folder}")
+    let mut lines = vec![
+        format!("Server: {url}"),
+        format!("Destination: {folder}"),
+    ];
+    if let Some(approved_at) = cfg.server_approved_at.as_deref().and_then(non_empty_str) {
+        lines.push(format!("Approved: {approved_at}"));
+    }
+    if let Some(profile_id) = cfg.credential_profile_id {
+        lines.push(format!("Credential profile: {profile_id}"));
+    }
+    if let Some(version) = cfg.credential_version {
+        lines.push(format!("Credential version: {version}"));
+    }
+    lines.join("\n")
 }
 
 fn server_display_text(cfg: &Config) -> String {
@@ -1033,6 +1046,10 @@ fn server_display_text(cfg: &Config) -> String {
             .trim_end_matches('/')
             .to_string()
     }
+}
+
+fn server_host_text(cfg: &Config) -> String {
+    server_display_text(cfg)
 }
 
 fn destination_display_text(

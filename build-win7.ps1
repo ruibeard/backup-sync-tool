@@ -4,35 +4,40 @@ $env:PATH += ";$env:USERPROFILE\.cargo\bin"
 Set-Location $PSScriptRoot
 
 $target = "x86_64-win7-windows-msvc"
+$rootExe = "backupsynctool.exe"
 $builtExe = "target\$target\release\backupsynctool.exe"
 
-# Bump patch version
-$toml = Get-Content "Cargo.toml" -Raw
-$m = [regex]::Match($toml, 'version\s*=\s*"(\d+)\.(\d+)\.(\d+)"')
-$major = $m.Groups[1].Value
-$minor = $m.Groups[2].Value
-$patch = [int]$m.Groups[3].Value + 1
-$newVersion = "$major.$minor.$patch"
-$toml = $toml -replace '(?m)^version\s*=\s*"\d+\.\d+\.\d+"', "version = `"$newVersion`""
-Set-Content "Cargo.toml" $toml -NoNewline
-Write-Host "Bumped version to $newVersion"
+Write-Host "Stopping running Backup Sync Tool instance..."
+$existing = Get-Process -Name "backupsynctool" -ErrorAction SilentlyContinue
+if ($existing) {
+    $existing | Stop-Process -Force
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 250
+        $existing = Get-Process -Name "backupsynctool" -ErrorAction SilentlyContinue
+    } while ($existing -and (Get-Date) -lt $deadline)
 
-# Kill running instance
-Get-Process backupsynctool -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 500
+    if ($existing) {
+        Write-Error "Could not stop backupsynctool.exe before copying the new build."
+        exit 1
+    }
+}
 
-# Build Windows 7-compatible release exe. This keeps a single public
-# backupsynctool.exe asset that works on Windows 7 SP1 x64 through Windows 11.
+Write-Host "Ensuring nightly Rust toolchain is installed..."
 rustup toolchain install nightly
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "rustup toolchain install nightly failed"; exit 1
+    Write-Error "rustup toolchain install nightly failed"
+    exit 1
 }
 
+Write-Host "Ensuring nightly rust-src is installed..."
 rustup component add rust-src --toolchain nightly
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "rustup component add rust-src failed"; exit 1
+    Write-Error "rustup component add rust-src failed"
+    exit 1
 }
 
+Write-Host "Building Windows 7 release exe..."
 $previousRustFlags = $env:RUSTFLAGS
 if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
     $env:RUSTFLAGS = "-C target-feature=+crt-static"
@@ -43,13 +48,14 @@ if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
 cargo +nightly build -Z build-std=std,panic_abort --release --target $target
 $buildExit = $LASTEXITCODE
 $env:RUSTFLAGS = $previousRustFlags
-if ($buildExit -ne 0)
-{
-    Write-Error "cargo build failed"; exit 1
+if ($buildExit -ne 0) {
+    Write-Error "Windows 7 cargo build failed"
+    exit 1
 }
 
 if (-not (Test-Path $builtExe)) {
-    Write-Error "Build succeeded, but $builtExe was not found."; exit 1
+    Write-Error "Build succeeded, but $builtExe was not found."
+    exit 1
 }
 
 function Get-ImportTableText {
@@ -108,50 +114,25 @@ if ($imports) {
     Write-Warning "Could not inspect imports. Install Visual Studio dumpbin or LLVM llvm-objdump to verify Windows 7 imports."
 }
 
-Copy-Item $builtExe ".\backupsynctool.exe" -Force
-Write-Host "Built backupsynctool.exe"
+Copy-Item $builtExe $rootExe -Force
+Write-Host "Copied $builtExe to repo root $rootExe."
 
-# Commit everything, tag, push
-$v = "v$newVersion"
-git add -A
-git commit -m "release: $v"
-if ($LASTEXITCODE -ne 0)
-{
-    Write-Error "git commit failed"; exit 1
-}
+Write-Host "Launching backupsynctool.exe from repo root..."
+$expectedPath = (Resolve-Path $rootExe).Path
+Start-Process -FilePath $expectedPath -WorkingDirectory $PSScriptRoot
+Start-Sleep -Milliseconds 500
 
-git rev-parse -q --verify "refs/tags/$v" *> $null
-if ($LASTEXITCODE -eq 0)
-{
-    Write-Error "Tag $v already exists locally"
+$running = Get-Process -Name "backupsynctool" -ErrorAction SilentlyContinue | Where-Object {
+    try {
+        $_.MainModule.FileName -eq $expectedPath
+    } catch {
+        $false
+    }
+} | Select-Object -First 1
+
+if (-not $running) {
+    Write-Error "Build succeeded, but root backupsynctool.exe is not running."
     exit 1
 }
 
-git tag $v
-if ($LASTEXITCODE -ne 0)
-{
-    Write-Error "git tag $v failed"; exit 1
-}
-
-git push origin main
-if ($LASTEXITCODE -ne 0)
-{
-    Write-Error "git push origin main failed"; exit 1
-}
-
-# The workflow triggers on tag pushes, so push the tag explicitly and verify it exists remotely.
-git push origin $v
-if ($LASTEXITCODE -ne 0)
-{
-    Write-Error "git push origin $v failed"; exit 1
-}
-
-$remoteTag = git ls-remote --tags origin "refs/tags/$v"
-if (-not $remoteTag)
-{
-    Write-Error "Remote tag $v was not found after push; GitHub Actions will not create the release."
-    exit 1
-}
-
-Write-Host "Done. Pushed main and tag $v"
-Write-Host "GitHub Actions should create the release at: https://github.com/ruibeard/backup-sync-tool/releases/tag/$v"
+Write-Host "Done. Windows 7-compatible release build succeeded with 0 errors and Backup Sync Tool is running from repo root."

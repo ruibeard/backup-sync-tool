@@ -37,7 +37,9 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         x if x == tray::ID_TRAY_EXIT as u16 => {
             DestroyWindow(hwnd).ok();
         }
-        IDC_BROWSE_LOCAL => browse_local(hwnd),
+        IDC_BROWSE_LOCAL => {
+            browse_local(hwnd, true);
+        }
         IDC_OPEN_LOCAL_FOLDER => do_open_local_folder(hwnd),
         IDC_UPDATE_LINK => do_update(hwnd),
         IDC_GITHUB => do_open_repo(hwnd),
@@ -48,7 +50,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-unsafe fn browse_local(hwnd: HWND) {
+unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
     let title: Vec<u16> = "Select local folder\0".encode_utf16().collect();
     let previous_folder = gettext(hwnd, IDC_WATCH_FOLDER);
     let current_folder = previous_folder.clone();
@@ -80,21 +82,26 @@ unsafe fn browse_local(hwnd: HWND) {
     };
     let pidl = SHBrowseForFolderW(&bi);
     if pidl.is_null() {
-        return;
+        return false;
     }
+    let mut selected = false;
     let mut buf = [0u16; 260];
     if SHGetPathFromIDListW(pidl, &mut buf).as_bool() {
         let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         let s = String::from_utf16_lossy(&buf[..end]);
+        if !s.trim().is_empty() {
+            selected = true;
+        }
         if s != previous_folder {
             let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
             invalidate_bridge(hwnd);
-            if !s.trim().is_empty() {
+            if persist_after_select && !s.trim().is_empty() {
                 persist_settings(hwnd, true);
             }
         }
     }
     ILFree(Some(pidl));
+    selected
 }
 
 unsafe fn do_open_local_folder(hwnd: HWND) {

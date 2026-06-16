@@ -169,7 +169,11 @@ mod tests {
         match check(env!("CARGO_PKG_VERSION")) {
             CheckResult::UpToDate => {}
             CheckResult::UpdateAvailable(info) => {
-                panic!("unexpected update v{} while running v{}", info.version, env!("CARGO_PKG_VERSION"))
+                panic!(
+                    "unexpected update v{} while running v{}",
+                    info.version,
+                    env!("CARGO_PKG_VERSION")
+                )
             }
             CheckResult::Error(e) => panic!("GitHub API error: {e}"),
         }

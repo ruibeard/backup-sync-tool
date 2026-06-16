@@ -208,62 +208,78 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if pair.pair_id != stmut(hwnd).pair_id {
         return LRESULT(0);
     }
-    let st = stmut(hwnd);
-    st.pair_cancel = None;
-    let qr_hwnd = st.pair_qr_hwnd;
-    if !qr_hwnd.0.is_null() && IsWindow(qr_hwnd).as_bool() {
-        DestroyWindow(qr_hwnd).ok();
-    }
-    restore_pair_idle_controls(hwnd);
-    match secret::encrypt(&pair.device_token) {
-        Ok(enc) => st.config.device_token_enc = enc,
-        Err(e) => {
-            notify_user_status(
-                hwnd,
-                "Pair failed",
-                C_RED,
-                &format!("Device token encrypt error: {e}"),
-            );
-            return LRESULT(0);
+    {
+        let st = stmut(hwnd);
+        st.pair_cancel = None;
+        let qr_hwnd = st.pair_qr_hwnd;
+        if !qr_hwnd.0.is_null() && IsWindow(qr_hwnd).as_bool() {
+            DestroyWindow(qr_hwnd).ok();
         }
+        restore_pair_idle_controls(hwnd);
+        read_ctrls(hwnd, st);
     }
-    st.config.webdav_url = pair.webdav_url.clone();
-    st.config.username = pair.username.clone();
-    match secret::encrypt(&pair.password) {
-        Ok(enc) => {
-            st.config.password_enc = enc;
-            st.password_plain = pair.password.clone();
-        }
-        Err(e) => {
-            notify_user_status(
-                hwnd,
-                "Pair failed",
-                C_RED,
-                &format!("WebDAV password encrypt error: {e}"),
-            );
-            return LRESULT(0);
-        }
+    if !ensure_or_prompt_watch_folder(hwnd) {
+        notify_user_status(
+            hwnd,
+            "Backup folder required",
+            C_AMBER,
+            "Pairing was not saved. Choose a backup folder on this PC, then pair again.",
+        );
+        apply_server_readonly(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        return LRESULT(0);
     }
-    st.config.remote_folder = pair.remote_folder.clone();
-    st.remote_folder_from_xd = false;
-    st.auth_failure_notified = false;
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-        &hstring(&pair.remote_folder),
-    );
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
-        &hstring(&server_display_text(&st.config)),
-    );
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_DEST_LABEL as i32),
-        &hstring("Server destination"),
-    );
-    st.config.credential_profile_id = pair.credential_profile_id;
-    st.config.credential_version = pair.credential_version;
-    read_ctrls(hwnd, st);
-    ensure_default_watch_folder(hwnd);
-    if let Err(e) = crate::config::save(&st.config) {
+    {
+        let st = stmut(hwnd);
+        match secret::encrypt(&pair.device_token) {
+            Ok(enc) => st.config.device_token_enc = enc,
+            Err(e) => {
+                notify_user_status(
+                    hwnd,
+                    "Pair failed",
+                    C_RED,
+                    &format!("Device token encrypt error: {e}"),
+                );
+                return LRESULT(0);
+            }
+        }
+        st.config.webdav_url = pair.webdav_url.clone();
+        st.config.username = pair.username.clone();
+        match secret::encrypt(&pair.password) {
+            Ok(enc) => {
+                st.config.password_enc = enc;
+                st.password_plain = pair.password.clone();
+            }
+            Err(e) => {
+                notify_user_status(
+                    hwnd,
+                    "Pair failed",
+                    C_RED,
+                    &format!("WebDAV password encrypt error: {e}"),
+                );
+                return LRESULT(0);
+            }
+        }
+        st.config.remote_folder = pair.remote_folder.clone();
+        st.remote_folder_from_xd = false;
+        st.auth_failure_notified = false;
+        st.config.server_approved_at = Some(approval_timestamp_now());
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
+            &hstring(&pair.remote_folder),
+        );
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
+            &hstring(&server_display_text(&st.config)),
+        );
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_DEST_LABEL as i32),
+            &hstring("Server destination"),
+        );
+        st.config.credential_profile_id = pair.credential_profile_id;
+        st.config.credential_version = pair.credential_version;
+    }
+    if let Err(e) = crate::config::save(&stmut(hwnd).config) {
         notify_user_status(
             hwnd,
             "Save failed",
@@ -272,6 +288,10 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         );
         return LRESULT(0);
     }
+    apply_activity_log(
+        hwnd,
+        &format!("Server approved destination: {}", pair.remote_folder),
+    );
     match restart_sync_engine(hwnd) {
         Ok(()) => logs::append("Pairing complete; initial sync started."),
         Err(err) => {

@@ -204,6 +204,20 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
             },
         ));
     }
+    if let Some(folder) = message.strip_prefix("Server approved destination: ") {
+        return Some((
+            None,
+            ActivityRow {
+                label: format!("Server approved {folder}"),
+                kind: ActivityKind::Info,
+                pct: None,
+                detail: None,
+                relative_path: None,
+                replace_key: None,
+                time_label: activity_time_for_kind(ActivityKind::Info),
+            },
+        ));
+    }
     None
 }
 
@@ -494,7 +508,7 @@ unsafe fn draw_activity_row(
 
     let mut label_rc = top_line;
     label_rc.left += 24;
-    label_rc.right = if show_bar || done || is_error {
+    label_rc.right = if show_bar || done || is_error || row.time_label.is_some() {
         status_left - 4
     } else {
         top_line.right

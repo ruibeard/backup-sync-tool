@@ -88,6 +88,7 @@ Laravel = control plane only. Never proxies backup bytes.
   "remote_folder": "XDPT.59655-Palmeira-Minimercado",
   "pair_api_base": "https://box.rui.cam",
   "device_token_enc": "...",
+  "server_approved_at": "2026-06-17 00:42",
   "credential_profile_id": 10,
   "credential_version": 1,
   "start_with_windows": true,
@@ -101,6 +102,7 @@ Laravel = control plane only. Never proxies backup bytes.
 | `watch_folder` | Watched recursively |
 | `remote_folder` | Server-approved single segment; locked after pair |
 | `device_token_enc` | Present ⇒ paired |
+| `server_approved_at` | Local timestamp written when pairing approval is accepted |
 | `sync_remote_changes` | UI: **Download from server**; enables remote poll + download baseline |
 | `parallel_uploads` | Default `10` |
 
@@ -227,7 +229,7 @@ Requires: `watch_folder`, `webdav_url`, username, password, `remote_folder`.
 | Pair approved | `src/ui/messages.rs` `on_app_pair_result` |
 | Browse folder / toggles | `src/ui/commands.rs` `persist_settings*` |
 
-Empty watch at pair → `xd::default_watch_folder()` when available.
+Empty or missing watch folder at pair → `xd::default_watch_folder()` when available; otherwise prompt the user to choose the backup folder. If the user cancels, local pairing is not saved and sync does not start.
 
 ### Startup (`sync_startup`)
 
@@ -270,13 +272,13 @@ Auth header: `Basic base64(username:password)`.
 
 - Raw Win32; owner-draw children must be **direct** children of main window (`WM_DRAWITEM`).
 - No **Save** — auto-save browse + checkboxes.
-- Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Browse** actions below; WebDAV node with icon above the configured WebDAV host and **Paired · live**, plus **Reconnect Server**. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
+- Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Browse** actions below; WebDAV node with icon above the approved destination folder and host/live status below, plus **Reconnect Server**. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
 - **Sync band** (below connection card, when paired): **All synced** + 100% green bar when idle; **Syncing** + blue bar with **%** and **ETA** when uploading/downloading; **Checking…** when scanning.
 - **Recent activity**: header **RECENT ACTIVITY LOG** + **Showing last 200 events**; info rows show clock time on the right; file rows show **Done** or **%**.
 - Bridge icons: baked PNGs at **120×120** (3× logical tile) in `assets/bridge-pc.png` and `assets/bridge-server.png`; SVG sources kept in `assets/svg-backups/`. Downscaled to 40×40 at draw time with HALFTONE.
 - **Typography** (Segoe UI, pixel heights): 13px body; 12px captions/paths/activity status; 12px semibold bridge names and sync head; 11px bold section headings; 13px buttons; 12px links. Muted text `#666666`.
 - Notices: `notify_user()` / `notify_user_status()` — no `MessageBox` except update Yes/No.
-- Labels: backup folder path shown in bridge (Browse to change); server destination read-only in bridge.
+- Labels: backup folder path shown in bridge (Browse to change); if no XD/default folder exists, show a choose-folder prompt instead of pretending `C:\XDSoftware\backups` exists. The paired server node shows the approved destination folder, with host, approval time, and credential metadata in the tooltip.
 - Colours: window `#F0F0F0`, bridge card `#FFFFFF`, accent `#2B4FA3` → `COLORREF(0x00A34F2B)`.
 
 ## Logs
@@ -291,16 +293,32 @@ GET https://api.github.com/repos/ruibeard/backup-sync-tool/releases/latest
 
 Download release asset → swap exe → restart.
 
+Asset selection:
+
+- Prefer `backupsynctool.exe`.
+- Public releases must publish one Windows 7-compatible `backupsynctool.exe`.
+- Do not publish separate Win7 and Win10 exe assets unless the updater is changed to handle channels intentionally.
+
 ## Build & launch
 
 From repo root (config beside root `backupsynctool.exe`):
 
 ```powershell
 .\build-local.ps1    # dev cycle
+.\build-win7.ps1     # Windows 7-compatible x64 build
 .\release.ps1        # version bump, tag, push
 ```
 
 Never run from `target/debug` or `target/release` for local testing.
+
+Windows 7 support is handled by making the single public x64 exe use the Windows 7-compatible build target:
+
+- Build target: `x86_64-win7-windows-msvc`.
+- Build command is in `build-win7.ps1`; it uses nightly Rust with `rust-src` and `-Z build-std=std,panic_abort`.
+- The script copies the built exe to root `backupsynctool.exe` for local launch.
+- `release.ps1` uses the same compatible target and publishes the normal root `backupsynctool.exe`.
+- Import verification must reject known Windows 8+ startup imports: `GetSystemTimePreciseAsFileTime`, `WaitOnAddress`, `WakeByAddressAll`, `WakeByAddressSingle`, `ProcessPrng`.
+- Final validation must include a launch test on Windows 7 SP1 x64, not only Windows 10/11.
 
 ## Security
 

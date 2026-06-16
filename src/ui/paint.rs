@@ -577,13 +577,16 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
 fn bridge_pc_path(st: &WndState) -> String {
     let path = st.config.watch_folder.trim();
     if path.is_empty() {
-        "C:\\XDSoftware\\backups".to_string()
+        "Choose backup folder".to_string()
     } else {
         path.to_string()
     }
 }
 
 fn bridge_server_name(st: &WndState) -> String {
+    if is_paired(&st.config) && !st.config.remote_folder.trim().is_empty() {
+        return st.config.remote_folder.trim().to_string();
+    }
     let url = st.config.webdav_url.trim();
     if url.is_empty() {
         return "Server".to_string();

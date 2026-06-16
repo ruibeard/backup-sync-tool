@@ -21,6 +21,8 @@ pub struct Config {
     pub credential_profile_id: Option<u64>,
     #[serde(default)]
     pub credential_version: Option<u64>,
+    #[serde(default)]
+    pub server_approved_at: Option<String>,
     #[serde(default = "default_true")]
     pub start_with_windows: bool,
     #[serde(default)]
@@ -41,6 +43,7 @@ impl Default for Config {
             device_token_enc: String::new(),
             credential_profile_id: None,
             credential_version: None,
+            server_approved_at: None,
             start_with_windows: true, // on by default
             sync_remote_changes: false,
             parallel_uploads: default_parallel_uploads(),
