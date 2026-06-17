@@ -325,14 +325,14 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
         &bridge_server_name(st),
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
-    SetTextColor(
-        hdc,
-        COLORREF(if st.bridge_conn_ok {
-            C_BRIDGE_CONN_OK
-        } else {
-            C_BRIDGE_CONN_FAIL
-        }),
-    );
+    let conn_color = if is_paired(&st.config) && !st.config.remote_folder.trim().is_empty() {
+        C_BRIDGE_PATH_TXT
+    } else if st.bridge_conn_ok {
+        C_BRIDGE_CONN_OK
+    } else {
+        C_BRIDGE_CONN_FAIL
+    };
+    SetTextColor(hdc, COLORREF(conn_color));
     draw_text_w(
         hdc,
         &right_conn,
@@ -576,7 +576,7 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
 
 fn bridge_pc_path(st: &WndState) -> String {
     let path = st.config.watch_folder.trim();
-    if path.is_empty() {
+    if !watch_folder_is_valid(path) {
         "Choose backup folder".to_string()
     } else {
         path.to_string()
@@ -584,9 +584,6 @@ fn bridge_pc_path(st: &WndState) -> String {
 }
 
 fn bridge_server_name(st: &WndState) -> String {
-    if is_paired(&st.config) && !st.config.remote_folder.trim().is_empty() {
-        return st.config.remote_folder.trim().to_string();
-    }
     let url = st.config.webdav_url.trim();
     if url.is_empty() {
         return "Server".to_string();

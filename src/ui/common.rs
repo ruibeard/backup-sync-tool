@@ -8,7 +8,7 @@
 //   Inputs:          white bg, 1px #CCCCCC border (blue on focus)
 //   Password field:  eye icon drawn inside right padding of edit subclass
 //   Connect/Save:    blue #2B4FA3, white text; Save is primary, Close secondary
-//   Browse/Close:    #E8E8E8 grey, #333333 text
+//   Choose/Close:    #E8E8E8 grey, #333333 text
 //   Status dot:      inline on the SERVER heading row
 //   Bottom bar:      version + checkboxes on one row; SAVE right
 //   Spacing:         PAD=8, GAP=12, SECT=20 rhythm
@@ -47,6 +47,7 @@ use windows::Win32::Graphics::Gdi as gdi;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::WindowsAndMessaging as wam;
 use windows::Win32::UI::Shell::{
     DefSubclassProc, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW,
@@ -345,7 +346,7 @@ const INP_H: i32 = 30; // input height
 const BTN_H: i32 = 32; // bottom-bar primary button height
 const HDR_H: i32 = 22; // section heading height
 const LBL_H: i32 = 20; // label text height
-const ACTION_BTN_W: i32 = 94; // Open / Browse / Connect / Reconnect / footer buttons
+const ACTION_BTN_W: i32 = 94; // Open / Choose / Connect / Reconnect / footer buttons
 const ACTION_BTN_H: i32 = INP_H;
 const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
 const META_ICON_GAP: i32 = 5; // gap between version link and GitHub icon

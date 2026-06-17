@@ -23,22 +23,12 @@ unsafe fn update_bridge_display(hwnd: HWND) {
     st.bridge_conn_ok = paired && st.connected && !auth_fail;
     st.bridge_conn_label = if !paired {
         "Not connected".to_string()
+    } else if !st.config.remote_folder.trim().is_empty() {
+        st.config.remote_folder.trim().to_string()
     } else if auth_fail {
-        "Reconnect required".to_string()
-    } else if st.connected {
-        let host = server_host_text(&st.config);
-        if host == "Server not configured" {
-            "Paired · live".to_string()
-        } else {
-            format!("{host} · live")
-        }
+        "Remote folder unavailable".to_string()
     } else {
-        let host = server_host_text(&st.config);
-        if host == "Server not configured" {
-            "Offline".to_string()
-        } else {
-            format!("{host} · offline")
-        }
+        "Remote folder unavailable".to_string()
     };
 
     st.bridge_sync_head = if auth_fail && !is_syncing && !is_checking {
@@ -94,6 +84,7 @@ unsafe fn restore_pair_idle_controls(hwnd: HWND) {
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring(label));
     ShowWindow(pair_hwnd, SW_SHOW);
+    update_pair_button_enabled(hwnd);
     layout_main(hwnd);
 }
 
@@ -322,11 +313,27 @@ unsafe fn start_connection_check(hwnd: HWND) {
 }
 
 fn is_sync_configured(cfg: &Config, pass: &str) -> bool {
-    !cfg.watch_folder.trim().is_empty()
+    watch_folder_is_valid(&cfg.watch_folder)
         && !cfg.webdav_url.trim().is_empty()
         && !cfg.username.trim().is_empty()
         && !pass.is_empty()
         && !cfg.remote_folder.trim().is_empty()
+}
+
+fn watch_folder_is_valid(path: &str) -> bool {
+    let path = path.trim();
+    !path.is_empty() && Path::new(path).is_dir()
+}
+
+unsafe fn update_pair_button_enabled(hwnd: HWND) {
+    let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
+    if pair_hwnd.0.is_null() {
+        return;
+    }
+    let enabled = watch_folder_is_valid(&stmut(hwnd).config.watch_folder);
+    let _ = ShowWindow(pair_hwnd, if enabled { SW_SHOW } else { SW_HIDE });
+    let _ = EnableWindow(pair_hwnd, enabled);
+    let _ = InvalidateRect(pair_hwnd, None, TRUE);
 }
 
 unsafe fn ensure_default_watch_folder(hwnd: HWND) {

@@ -94,9 +94,17 @@ unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
         }
         if s != previous_folder {
             let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
-            invalidate_bridge(hwnd);
+            read_ctrls(hwnd, stmut(hwnd));
+            update_pair_button_enabled(hwnd);
+            layout_main(hwnd);
             if persist_after_select && !s.trim().is_empty() {
-                persist_settings(hwnd, true);
+                if is_paired(&stmut(hwnd).config) {
+                    persist_settings(hwnd, true);
+                } else if let Err(err) = crate::config::save(&stmut(hwnd).config) {
+                    notify_user_status(hwnd, "Save failed", C_RED, &format!("Save error: {err}"));
+                } else {
+                    notify_user(hwnd, "Backup folder selected.");
+                }
             }
         }
     }
@@ -138,8 +146,19 @@ unsafe extern "system" fn browse_local_init_cb(
 }
 
 unsafe fn do_pair_device(hwnd: HWND) {
+    read_ctrls(hwnd, stmut(hwnd));
+    if !watch_folder_is_valid(&stmut(hwnd).config.watch_folder) {
+        update_pair_button_enabled(hwnd);
+        notify_user_status(
+            hwnd,
+            "Backup folder required",
+            C_AMBER,
+            "Choose a valid backup folder on this PC before connecting the server.",
+        );
+        let _ = SetForegroundWindow(hwnd);
+        return;
+    }
     let st = stmut(hwnd);
-    read_ctrls(hwnd, st);
     let api_base = st.config.pair_api_base.clone();
     let mut detected_folder = if st.remote_folder_from_xd {
         non_empty(st.config.remote_folder.clone())

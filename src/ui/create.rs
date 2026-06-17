@@ -120,6 +120,7 @@ unsafe fn on_create(hwnd: HWND) {
         hfont_link,
     );
     apply_server_readonly(hwnd);
+    update_pair_button_enabled(hwnd);
 
     let hicon = LoadIconW(hi, w!("APP_ICON_IDLE"))
         .unwrap_or(LoadIconW(None, IDI_APPLICATION).unwrap_or_default());
@@ -921,6 +922,7 @@ unsafe fn layout_bridge_section(
     let layout = bridge_layout_at(y, inner_w);
     let show_band = bridge_show_sync_band(&*st);
     let card_h = layout.height;
+    let local_folder_valid = watch_folder_is_valid(&cfg.watch_folder);
 
     (*st).bridge_rect = RECT {
         left: M,
@@ -940,40 +942,56 @@ unsafe fn layout_bridge_section(
             SetWindowPos(existing, None, x, by, w, h, SWP_NOZORDER).ok();
             let _ = SetWindowTextW(existing, &hstring(label));
             SendMessageW(existing, WM_SETFONT, WPARAM(hf_bridge.0 as usize), LPARAM(1));
-            ShowWindow(existing, SW_SHOW);
+            let _ = ShowWindow(existing, SW_SHOW);
         }
     };
 
-    place_btn(
-        hwnd,
-        hi,
-        IDC_OPEN_LOCAL_FOLDER,
-        "Open",
-        M + layout.open_btn_x,
-        layout.open_btn_y,
-        layout.open_btn_w,
-        BRIDGE_BTN_H,
-    );
-    place_btn(
-        hwnd,
-        hi,
-        IDC_BROWSE_LOCAL,
-        "Browse",
-        M + layout.browse_btn_x,
-        layout.btn_y,
-        layout.browse_btn_w,
-        BRIDGE_BTN_H,
-    );
-    place_btn(
-        hwnd,
-        hi,
-        IDC_PAIR_DEVICE,
-        pair_label,
-        M + layout.pair_btn_x,
-        layout.btn_y,
-        layout.pair_btn_w,
-        BRIDGE_BTN_H,
-    );
+    if local_folder_valid {
+        place_btn(
+            hwnd,
+            hi,
+            IDC_OPEN_LOCAL_FOLDER,
+            "Open",
+            M + layout.open_btn_x,
+            layout.open_btn_y,
+            layout.open_btn_w,
+            BRIDGE_BTN_H,
+        );
+        place_btn(
+            hwnd,
+            hi,
+            IDC_BROWSE_LOCAL,
+            "Choose",
+            M + layout.browse_btn_x,
+            layout.btn_y,
+            layout.browse_btn_w,
+            BRIDGE_BTN_H,
+        );
+        place_btn(
+            hwnd,
+            hi,
+            IDC_PAIR_DEVICE,
+            pair_label,
+            M + layout.pair_btn_x,
+            layout.btn_y,
+            layout.pair_btn_w,
+            BRIDGE_BTN_H,
+        );
+    } else {
+        let choose_w = BRIDGE_PAIR_BTN_W;
+        place_btn(
+            hwnd,
+            hi,
+            IDC_BROWSE_LOCAL,
+            "Choose folder",
+            M + (inner_w - choose_w) / 2,
+            layout.btn_y,
+            choose_w,
+            BRIDGE_BTN_H,
+        );
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_OPEN_LOCAL_FOLDER as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), SW_HIDE);
+    }
 
     y += card_h;
     if show_band {
@@ -1046,10 +1064,6 @@ fn server_display_text(cfg: &Config) -> String {
             .trim_end_matches('/')
             .to_string()
     }
-}
-
-fn server_host_text(cfg: &Config) -> String {
-    server_display_text(cfg)
 }
 
 fn destination_display_text(

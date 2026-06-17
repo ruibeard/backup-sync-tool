@@ -30,7 +30,7 @@ Download `backupsynctool.exe` from [Releases](https://github.com/ruibeard/backup
 3. Sync starts automatically after pairing (no Save button).
 4. **Reconnect** if WebDAV returns HTTP 401.
 
-Settings auto-save on folder browse and checkbox changes.
+Settings auto-save on folder choose and checkbox changes.
 
 ## Build (developers)
 
@@ -38,13 +38,9 @@ Settings auto-save on folder browse and checkbox changes.
 .\build-local.ps1
 ```
 
-Windows 7-compatible build:
+`build-local.ps1` builds the single Windows 7 SP1 x64 through Windows 11-compatible `backupsynctool.exe`.
 
-```powershell
-.\build-win7.ps1
-```
-
-Public release: `.\release.ps1` (builds one Windows 7-compatible `backupsynctool.exe`, bumps version, tags `vX.Y.Z`, pushes).
+Public release: `.\release.ps1` (builds the same compatible exe, bumps version, tags `vX.Y.Z`, pushes).
 
 Details: [SPEC.md](SPEC.md) · Agent rules: [AGENTS.md](AGENTS.md) (LLM/Cursor only)
 
@@ -55,7 +51,7 @@ Details: [SPEC.md](SPEC.md) · Agent rules: [AGENTS.md](AGENTS.md) (LLM/Cursor o
 | `src/` | Rust app (Win32 UI, sync, WebDAV, pairing) |
 | `license-inspector/` | Optional XD licence diagnostic helper |
 | `mockups.html` | UI layout reference |
-| `build-local.ps1` / `build-win7.ps1` / `release.ps1` | Build & release scripts |
+| `build-local.ps1` / `release.ps1` | Build & release scripts |
 
 ## Security note
 

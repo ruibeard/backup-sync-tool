@@ -148,6 +148,7 @@ sequenceDiagram
     participant API
     participant Admin
 
+    User->>App: Choose local backup folder
     User->>App: Pair
     App-->>User: Popup immediately
     App->>XD: detect_customer_hint
@@ -213,6 +214,7 @@ Valid `remote_folder`: one segment; trimmed non-empty; not `/` `\`; no `/` `\` `
 - Server URL, user, password, destination read-only; no destination browse.
 - `persist_settings` must not overwrite `remote_folder` from UI.
 - Only change folder/credentials: **re-pair**.
+- Pairing cannot start unless `watch_folder` is a real local directory; the user must Choose a folder first when XD default backup folder is missing.
 - **`restart_sync_engine()`** required after approval (`src/ui/utils.rs`) — save alone is insufficient.
 
 Pair popup opens before `/api/pair/start` returns; QR updates when response arrives.
@@ -227,9 +229,9 @@ Requires: `watch_folder`, `webdav_url`, username, password, `remote_folder`.
 | --- | --- |
 | Launch (configured) | `src/ui/create.rs` `on_create` |
 | Pair approved | `src/ui/messages.rs` `on_app_pair_result` |
-| Browse folder / toggles | `src/ui/commands.rs` `persist_settings*` |
+| Choose folder / toggles | `src/ui/commands.rs` `persist_settings*` |
 
-Empty or missing watch folder at pair → `xd::default_watch_folder()` when available; otherwise prompt the user to choose the backup folder. If the user cancels, local pairing is not saved and sync does not start.
+Empty or missing watch folder before pair → `xd::default_watch_folder()` when available; otherwise Connect/Reconnect is disabled until the user chooses a valid backup folder with Choose. Approval handling still re-checks the folder defensively; if it is no longer valid, local pairing is not saved and sync does not start.
 
 ### Startup (`sync_startup`)
 
@@ -271,14 +273,14 @@ Auth header: `Basic base64(username:password)`.
 ## UI rules
 
 - Raw Win32; owner-draw children must be **direct** children of main window (`WM_DRAWITEM`).
-- No **Save** — auto-save browse + checkboxes.
-- Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Browse** actions below; WebDAV node with icon above the approved destination folder and host/live status below, plus **Reconnect Server**. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
+- No **Save** — auto-save folder choice + checkboxes.
+- Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Choose** actions below; WebDAV node with icon above the Storage Box host and approved remote folder below, plus **Reconnect Server**. If no valid local folder exists, hide Open and Connect/Reconnect and show one **Choose folder** action. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
 - **Sync band** (below connection card, when paired): **All synced** + 100% green bar when idle; **Syncing** + blue bar with **%** and **ETA** when uploading/downloading; **Checking…** when scanning.
 - **Recent activity**: header **RECENT ACTIVITY LOG** + **Showing last 200 events**; info rows show clock time on the right; file rows show **Done** or **%**.
 - Bridge icons: baked PNGs at **120×120** (3× logical tile) in `assets/bridge-pc.png` and `assets/bridge-server.png`; SVG sources kept in `assets/svg-backups/`. Downscaled to 40×40 at draw time with HALFTONE.
 - **Typography** (Segoe UI, pixel heights): 13px body; 12px captions/paths/activity status; 12px semibold bridge names and sync head; 11px bold section headings; 13px buttons; 12px links. Muted text `#666666`.
 - Notices: `notify_user()` / `notify_user_status()` — no `MessageBox` except update Yes/No.
-- Labels: backup folder path shown in bridge (Browse to change); if no XD/default folder exists, show a choose-folder prompt instead of pretending `C:\XDSoftware\backups` exists. The paired server node shows the approved destination folder, with host, approval time, and credential metadata in the tooltip.
+- Labels: backup folder path shown in bridge (Choose to change); if no XD/default folder exists, show "Choose backup folder" instead of pretending `C:\XDSoftware\backups` exists. Connect/Reconnect stays disabled until that path is a real directory. The paired server node shows the approved destination folder, with host, approval time, and credential metadata in the tooltip.
 - Colours: window `#F0F0F0`, bridge card `#FFFFFF`, accent `#2B4FA3` → `COLORREF(0x00A34F2B)`.
 
 ## Logs
@@ -304,17 +306,16 @@ Asset selection:
 From repo root (config beside root `backupsynctool.exe`):
 
 ```powershell
-.\build-local.ps1    # dev cycle
-.\build-win7.ps1     # Windows 7-compatible x64 build
-.\release.ps1        # version bump, tag, push
+.\build-local.ps1    # build Windows 7-compatible x64 exe, copy to root, launch
+.\release.ps1        # version bump, build same compatible exe, tag, push
 ```
 
 Never run from `target/debug` or `target/release` for local testing.
 
-Windows 7 support is handled by making the single public x64 exe use the Windows 7-compatible build target:
+Windows 7 support is handled by making the single x64 exe use the Windows 7-compatible build target:
 
 - Build target: `x86_64-win7-windows-msvc`.
-- Build command is in `build-win7.ps1`; it uses nightly Rust with `rust-src` and `-Z build-std=std,panic_abort`.
+- Build command is in `build-local.ps1`; it uses nightly Rust with `rust-src` and `-Z build-std=std,panic_abort`.
 - The script copies the built exe to root `backupsynctool.exe` for local launch.
 - `release.ps1` uses the same compatible target and publishes the normal root `backupsynctool.exe`.
 - Import verification must reject known Windows 8+ startup imports: `GetSystemTimePreciseAsFileTime`, `WaitOnAddress`, `WakeByAddressAll`, `WakeByAddressSingle`, `ProcessPrng`.
