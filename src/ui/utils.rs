@@ -617,6 +617,7 @@ unsafe fn read_ctrls(hwnd: HWND, st: &mut WndState) {
     st.config.watch_folder = gettext(hwnd, IDC_WATCH_FOLDER);
     st.config.start_with_windows = checked(hwnd, IDC_START_WINDOWS);
     st.config.sync_remote_changes = checked(hwnd, IDC_SYNC_REMOTE);
+    st.config.auto_update = checked(hwnd, IDC_AUTO_UPDATE);
 }
 
 unsafe fn gettext(hwnd: HWND, id: u16) -> String {

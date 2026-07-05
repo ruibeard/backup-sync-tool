@@ -345,10 +345,13 @@ unsafe fn on_app_pair_started(hwnd: HWND, lp: LPARAM) -> LRESULT {
 }
 
 unsafe fn on_app_update(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if wp.0 == 1 {
+    let auto_install = wp.0 == 1;
+    let url = Box::from_raw(lp.0 as *mut String);
+    if auto_install {
+        notify_user(hwnd, "Update available. Installing automatically...");
+        start_update_install(hwnd, *url);
         return LRESULT(0);
     }
-    let url = Box::from_raw(lp.0 as *mut String);
     stmut(hwnd).update_url = Some(*url);
     ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_SHOW);
     InvalidateRect(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), None, TRUE);

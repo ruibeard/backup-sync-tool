@@ -176,6 +176,7 @@ unsafe fn on_create(hwnd: HWND) {
         });
     }
 
+    let auto_update = cfg.auto_update;
     std::thread::spawn(
         move || match crate::updater::check(env!("CARGO_PKG_VERSION")) {
             crate::updater::CheckResult::UpdateAvailable(info) => {
@@ -184,7 +185,7 @@ unsafe fn on_create(hwnd: HWND) {
                 PostMessageW(
                     HWND(raw as *mut _),
                     WM_APP_UPDATE,
-                    WPARAM(0),
+                    WPARAM(if auto_update { 1 } else { 0 }),
                     LPARAM(Box::into_raw(url) as isize),
                 )
                 .ok();
@@ -376,16 +377,18 @@ unsafe fn build_ui(
     }
 
     // ── BOTTOM BAR ────────────────────────────────────────────────────────────
-    // Row 1: version + github icon + update + checkboxes + save
+    // Row 1: version + github icon + update + checkboxes
     // Row 2: author credit
     {
         let row_h = BTN_H;
         let check_h = 22;
         let check_y = y + (row_h - check_h) / 2;
         let startup_x = M;
-        let startup_w = 180i32;
+        let startup_w = 154i32;
         let two_way_x = startup_x + startup_w + 12;
-        let two_way_w = M + INNER_W - two_way_x;
+        let two_way_w = 140i32;
+        let auto_update_x = two_way_x + two_way_w + 12;
+        let auto_update_w = M + INNER_W - auto_update_x;
 
         mkcheck(
             hwnd,
@@ -410,6 +413,18 @@ unsafe fn build_ui(
             check_h,
             hf,
             cfg.sync_remote_changes,
+        );
+        mkcheck(
+            hwnd,
+            hi,
+            IDC_AUTO_UPDATE,
+            "Auto-update",
+            auto_update_x,
+            check_y,
+            auto_update_w,
+            check_h,
+            hf,
+            cfg.auto_update,
         );
 
         y += row_h;

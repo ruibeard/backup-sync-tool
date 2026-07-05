@@ -18,7 +18,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
 
     if notif == BN_CLICKED as u16 {
         match id {
-            IDC_START_WINDOWS | IDC_SYNC_REMOTE => {
+            IDC_START_WINDOWS | IDC_SYNC_REMOTE | IDC_AUTO_UPDATE => {
                 persist_settings_on_toggle(hwnd, id);
                 return LRESULT(0);
             }
@@ -299,11 +299,21 @@ unsafe fn persist_settings_on_toggle(hwnd: HWND, id: u16) {
     let st = stmut(hwnd);
     let prev_start = st.config.start_with_windows;
     let prev_sync = st.config.sync_remote_changes;
+    let prev_auto_update = st.config.auto_update;
     read_ctrls(hwnd, st);
     if id == IDC_START_WINDOWS && st.config.start_with_windows == prev_start {
         return;
     }
     if id == IDC_SYNC_REMOTE && st.config.sync_remote_changes == prev_sync {
+        return;
+    }
+    if id == IDC_AUTO_UPDATE && st.config.auto_update == prev_auto_update {
+        return;
+    }
+    if id == IDC_AUTO_UPDATE {
+        if let Err(e) = crate::config::save(&st.config) {
+            notify_user_status(hwnd, "Save failed", C_RED, &format!("Save error: {e}"));
+        }
         return;
     }
     persist_settings(hwnd, false);
@@ -394,31 +404,35 @@ unsafe fn do_update(hwnd: HWND) {
         "A new version is available.\nDownload and install now? The app will restart.",
         "Update Available",
     ) {
-        let msg = Box::new("Update started.".to_string());
-        PostMessageW(
-            hwnd,
-            WM_APP_LOG,
-            WPARAM(0),
-            LPARAM(Box::into_raw(msg) as isize),
-        )
-            .ok();
-        ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
-        let raw = hwnd.0 as isize;
-        std::thread::spawn(move || {
-            let _ = crate::updater::download_and_replace(&url, |pct| {
-                let m = Box::new(format!("Downloading: {pct}%"));
-                unsafe {
-                    PostMessageW(
-                        HWND(raw as *mut _),
-                        WM_APP_LOG,
-                        WPARAM(0),
-                        LPARAM(Box::into_raw(m) as isize),
-                    )
-                        .ok();
-                }
-            });
-        });
+        start_update_install(hwnd, url);
     }
+}
+
+unsafe fn start_update_install(hwnd: HWND, url: String) {
+    let msg = Box::new("Update started.".to_string());
+    PostMessageW(
+        hwnd,
+        WM_APP_LOG,
+        WPARAM(0),
+        LPARAM(Box::into_raw(msg) as isize),
+    )
+    .ok();
+    ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
+    let raw = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let _ = crate::updater::download_and_replace(&url, |pct| {
+            let m = Box::new(format!("Downloading: {pct}%"));
+            unsafe {
+                PostMessageW(
+                    HWND(raw as *mut _),
+                    WM_APP_LOG,
+                    WPARAM(0),
+                    LPARAM(Box::into_raw(m) as isize),
+                )
+                .ok();
+            }
+        });
+    });
 }
 
 unsafe fn do_open_repo(hwnd: HWND) {

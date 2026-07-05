@@ -2,6 +2,12 @@
 
 Native Windows tray app that backs up one local folder to WebDAV. Pairing via a Laravel admin app supplies credentials; uploads go direct to WebDAV (no proxy).
 
+## Screenshots
+
+![Backup Sync Tool main window](assets/readme/main-window.png)
+
+![Server pairing QR code](assets/readme/pairing-qr.png)
+
 ## Features
 
 - System tray — close hides; double-click restores
@@ -12,7 +18,7 @@ Native Windows tray app that backs up one local folder to WebDAV. Pairing via a 
 - Admin pairing (QR/code) — server owns destination folder
 - DPAPI-encrypted password + device token
 - Recent Activity + sync footer progress
-- Silent GitHub auto-update
+- GitHub auto-update, enabled by default
 
 ## Requirements
 
@@ -30,7 +36,7 @@ Download `backupsynctool.exe` from [Releases](https://github.com/ruibeard/backup
 3. Sync starts automatically after pairing (no Save button).
 4. **Reconnect** if WebDAV returns HTTP 401.
 
-Settings auto-save on folder choose and checkbox changes.
+Settings auto-save on folder choose and checkbox changes. Auto-update is enabled by default and can be turned off from the bottom bar.
 
 ## Build (developers)
 

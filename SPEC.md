@@ -93,6 +93,7 @@ Laravel = control plane only. Never proxies backup bytes.
   "credential_version": 1,
   "start_with_windows": true,
   "sync_remote_changes": false,
+  "auto_update": true,
   "parallel_uploads": 10
 }
 ```
@@ -104,6 +105,7 @@ Laravel = control plane only. Never proxies backup bytes.
 | `device_token_enc` | Present ⇒ paired |
 | `server_approved_at` | Local timestamp written when pairing approval is accepted |
 | `sync_remote_changes` | UI: **Download from server**; enables remote poll + download baseline |
+| `auto_update` | UI: **Auto-update**; default `true`; installs newer GitHub releases automatically |
 | `parallel_uploads` | Default `10` |
 
 `Config::Default` must be explicit (serde ignores `default` fns on derived `Default`).
@@ -281,7 +283,7 @@ Auth header: `Basic base64(username:password)`.
 - **Recent activity**: header **RECENT ACTIVITY LOG** + **Showing last 200 events**; info rows show clock time on the right; file rows show **Done** or **%**.
 - Bridge icons: baked PNGs at **120×120** (3× logical tile) in `assets/bridge-pc.png` and `assets/bridge-server.png`; SVG sources kept in `assets/svg-backups/`. Downscaled to 40×40 at draw time with HALFTONE.
 - **Typography** (Segoe UI, pixel heights): 13px body; 12px captions/paths/activity status; 12px semibold bridge names and sync head; 11px bold section headings; 13px buttons; 12px links. Muted text `#666666`.
-- Notices: `notify_user()` / `notify_user_status()` — no `MessageBox` except update Yes/No.
+- Notices: `notify_user()` / `notify_user_status()` — no `MessageBox` except manual update Yes/No when auto-update is off.
 - Labels: backup folder path shown in bridge (Choose to change); if no XD/default folder exists, show "Choose backup folder" instead of pretending `C:\XDSoftware\backups` exists. Connect/Reconnect stays disabled until that path is a real directory. The paired server node shows the approved destination folder, with host, approval time, and credential metadata in the tooltip.
 - Colours: window `#F0F0F0`, bridge card `#FFFFFF`, accent `#2B4FA3` → `COLORREF(0x00A34F2B)`.
 
@@ -296,6 +298,8 @@ GET https://api.github.com/repos/ruibeard/backup-sync-tool/releases/latest
 ```
 
 Download release asset → swap exe → restart.
+
+`auto_update` defaults to `true`. When enabled, a detected newer release starts the download/install flow immediately and restarts the app. When disabled, the app shows the manual **Update** action and asks for Yes/No before installing.
 
 Asset selection:
 

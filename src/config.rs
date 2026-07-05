@@ -27,6 +27,8 @@ pub struct Config {
     pub start_with_windows: bool,
     #[serde(default)]
     pub sync_remote_changes: bool,
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     #[serde(default = "default_parallel_uploads")]
     pub parallel_uploads: usize,
 }
@@ -46,6 +48,7 @@ impl Default for Config {
             server_approved_at: None,
             start_with_windows: true, // on by default
             sync_remote_changes: false,
+            auto_update: true,
             parallel_uploads: default_parallel_uploads(),
         }
     }
