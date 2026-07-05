@@ -308,6 +308,7 @@ const IDC_PAIR_DEVICE: u16 = 217;
 const IDC_SERVER_URL_LABEL: u16 = 218;
 const IDC_SYNC_ETA: u16 = 219;
 const IDC_RETRY_FAILED: u16 = 220;
+const IDC_REFRESH_REMOTE: u16 = 221;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -360,6 +361,8 @@ const BRIDGE_HEADER_H: i32 = BRIDGE_ICO_TILE + 5 + BRIDGE_NAME_H + 2 + BRIDGE_PA
 const BRIDGE_OPEN_BTN_W: i32 = 58;
 const BRIDGE_BROWSE_BTN_W: i32 = 82;
 const BRIDGE_PAIR_BTN_W: i32 = 150;
+const BRIDGE_RECONNECT_BTN_W: i32 = 132;
+const BRIDGE_REFRESH_BTN_W: i32 = 78;
 const BRIDGE_DIVIDER_VPAD: i32 = 12;
 const BRIDGE_NAME_H: i32 = 20;
 const BRIDGE_CONN_LABEL_H: i32 = 18;
@@ -393,6 +396,8 @@ struct BridgeLayout {
     browse_btn_w: i32,
     pair_btn_x: i32,
     pair_btn_w: i32,
+    refresh_btn_x: i32,
+    refresh_btn_w: i32,
     left_tile: RECT,
     right_tile: RECT,
     left_ico: RECT,
@@ -441,6 +446,7 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
     let btn_y = header_top + BRIDGE_HEADER_H + BRIDGE_DIVIDER_VPAD;
     let divider_y = btn_y + BRIDGE_BTN_H + BRIDGE_DIVIDER_VPAD;
     let local_btns_w = BRIDGE_OPEN_BTN_W + PAD + BRIDGE_BROWSE_BTN_W;
+    let server_btns_w = BRIDGE_REFRESH_BTN_W + PAD + BRIDGE_RECONNECT_BTN_W;
     BridgeLayout {
         height: BRIDGE_H,
         divider_y,
@@ -452,6 +458,8 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
         browse_btn_w: BRIDGE_BROWSE_BTN_W,
         pair_btn_x: right_node_x + (node_w - BRIDGE_PAIR_BTN_W) / 2,
         pair_btn_w: BRIDGE_PAIR_BTN_W,
+        refresh_btn_x: right_node_x + (node_w - server_btns_w) / 2,
+        refresh_btn_w: BRIDGE_REFRESH_BTN_W,
         left_tile,
         right_tile,
         left_ico,

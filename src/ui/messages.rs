@@ -311,6 +311,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         st.sync_status_text = "Checking...".to_string();
     }
     set_status_strip_connection(hwnd);
+    layout_main(hwnd);
     invalidate_bridge(hwnd);
     apply_server_readonly(hwnd);
     start_connection_check(hwnd);

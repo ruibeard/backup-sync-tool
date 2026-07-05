@@ -247,10 +247,12 @@ Empty or missing watch folder before pair → `xd::default_watch_folder()` when 
 
 - Watcher: recursive `notify`, debounce, ignore `.backupsynctool-manifest.json`.
 - Local manifest: updated **only after successful PUT** per path.
-- Remote manifest: rewritten from **PROPFIND** (`save_remote_manifest_from_server`), never full local scan.
+- Remote manifest: rewritten from **PROPFIND** (`save_remote_manifest_from_server`), never full local scan; the small remote manifest also acts as the lightweight server-change marker.
 - Skip upload (manifest exists): local unchanged since last success **and** server file size matches (`remote_file_states`).
 - `heal_missing_uploads`: every 24h re-upload missing/size-mismatch on server.
-- Remote poll: 60s when `sync_remote_changes` true.
+- Remote marker poll when `sync_remote_changes` true: every 10s for 5 minutes after startup or upload activity, then every 30s while idle. Marker changes trigger downloads without a recursive scan.
+- Full remote scan fallback when `sync_remote_changes` true: every 60s recursive `PROPFIND` to discover files added outside the app or without a fresh remote manifest.
+- Manual **Refresh** button: paired server action that performs one immediate remote pull check, including recursive `PROPFIND`, and downloads server changes without enabling continuous remote polling.
 
 Upload URL:
 
@@ -274,7 +276,7 @@ Auth header: `Basic base64(username:password)`.
 
 - Raw Win32; owner-draw children must be **direct** children of main window (`WM_DRAWITEM`).
 - No **Save** — auto-save folder choice + checkboxes.
-- Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Choose** actions below; WebDAV node with icon above the Storage Box host and approved remote folder below, plus **Reconnect Server**. If no valid local folder exists, hide Open and Connect/Reconnect and show one **Choose folder** action. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
+- Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Choose** actions below; WebDAV node with icon above the Storage Box host and approved remote folder below, plus paired server actions **Refresh** and **Reconnect Server**. If no valid local folder exists, hide Open, Refresh, and Connect/Reconnect and show one **Choose folder** action. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
 - **Sync band** (below connection card, when paired): **All synced** + 100% green bar when idle; **Syncing** + blue bar with **%** and **ETA** when uploading/downloading; **Checking…** when scanning.
 - **Recent activity**: header **RECENT ACTIVITY LOG** + **Showing last 200 events**; info rows show clock time on the right; file rows show **Done** or **%**.
 - Bridge icons: baked PNGs at **120×120** (3× logical tile) in `assets/bridge-pc.png` and `assets/bridge-server.png`; SVG sources kept in `assets/svg-backups/`. Downscaled to 40×40 at draw time with HALFTONE.

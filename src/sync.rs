@@ -15,7 +15,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-const REMOTE_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+const REMOTE_FULL_SYNC_INTERVAL: Duration = Duration::from_secs(60);
+const REMOTE_MARKER_FAST_INTERVAL: Duration = Duration::from_secs(10);
+const REMOTE_MARKER_IDLE_INTERVAL: Duration = Duration::from_secs(30);
+const REMOTE_MARKER_FAST_WINDOW: Duration = Duration::from_secs(5 * 60);
 const REMOTE_HEAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MANIFEST_NAME: &str = ".backupsynctool-manifest.json";
 
@@ -27,7 +30,7 @@ struct FileState {
     mtime: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct SyncManifest {
     #[serde(default)]
     files: HashMap<String, FileState>,
@@ -139,7 +142,14 @@ impl SyncEngine {
                 failed_paths: startup_batch.failed_paths,
             });
 
-            let mut last_remote_sync = Instant::now();
+            let mut last_remote_full_sync = Instant::now();
+            let mut last_remote_marker_check = Instant::now();
+            let mut last_remote_marker = if cfg_watcher.sync_remote_changes {
+                fetch_remote_manifest_marker(&cfg_watcher, &pass_watcher, &auth_failed_clone)
+            } else {
+                None
+            };
+            let mut fast_remote_marker_until = Instant::now() + REMOTE_MARKER_FAST_WINDOW;
             let mut last_remote_heal = Instant::now();
             while !stop_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(500));
@@ -179,6 +189,14 @@ impl SyncEngine {
                         Some(&activity_clone),
                         &auth_failed_clone,
                     );
+                    if cfg_watcher.sync_remote_changes && batch.succeeded > 0 {
+                        fast_remote_marker_until = Instant::now() + REMOTE_MARKER_FAST_WINDOW;
+                        last_remote_marker = fetch_remote_manifest_marker(
+                            &cfg_watcher,
+                            &pass_watcher,
+                            &auth_failed_clone,
+                        );
+                    }
                     activity_clone(ActivityInfo {
                         state: ActivityState::Idle,
                         completed: batch.succeeded,
@@ -209,26 +227,63 @@ impl SyncEngine {
                     last_remote_heal = Instant::now();
                 }
 
-                if cfg_watcher.sync_remote_changes
-                    && last_remote_sync.elapsed() >= REMOTE_SYNC_INTERVAL
-                {
-                    if let Some(remote_manifest) = fetch_remote_state(
-                        &cfg_watcher,
-                        &pass_watcher,
-                        &log_clone,
-                        &auth_failed_clone,
-                    ) {
-                        apply_remote_manifest(
+                if cfg_watcher.sync_remote_changes {
+                    let now = Instant::now();
+                    let marker_interval = if now <= fast_remote_marker_until {
+                        REMOTE_MARKER_FAST_INTERVAL
+                    } else {
+                        REMOTE_MARKER_IDLE_INTERVAL
+                    };
+
+                    if last_remote_marker_check.elapsed() >= marker_interval {
+                        if let Some(remote_manifest) = fetch_remote_manifest_marker(
                             &cfg_watcher,
                             &pass_watcher,
-                            &manifest,
-                            &remote_manifest,
-                            &suppressed_clone,
+                            &auth_failed_clone,
+                        ) {
+                            if last_remote_marker.as_ref() != Some(&remote_manifest) {
+                                log_clone(
+                                    "Remote manifest changed, downloading server updates"
+                                        .to_string(),
+                                );
+                                apply_remote_manifest(
+                                    &cfg_watcher,
+                                    &pass_watcher,
+                                    &manifest,
+                                    &remote_manifest,
+                                    &suppressed_clone,
+                                    &log_clone,
+                                    &auth_failed_clone,
+                                );
+                                last_remote_marker = Some(remote_manifest);
+                                fast_remote_marker_until =
+                                    Instant::now() + REMOTE_MARKER_FAST_WINDOW;
+                            }
+                        }
+                        last_remote_marker_check = Instant::now();
+                    }
+
+                    if last_remote_full_sync.elapsed() >= REMOTE_FULL_SYNC_INTERVAL {
+                        if let Some(remote_manifest) = fetch_remote_state(
+                            &cfg_watcher,
+                            &pass_watcher,
                             &log_clone,
                             &auth_failed_clone,
-                        );
+                        ) {
+                            apply_remote_manifest(
+                                &cfg_watcher,
+                                &pass_watcher,
+                                &manifest,
+                                &remote_manifest,
+                                &suppressed_clone,
+                                &log_clone,
+                                &auth_failed_clone,
+                            );
+                            last_remote_marker = Some(remote_manifest);
+                        }
+                        last_remote_full_sync = Instant::now();
+                        last_remote_marker_check = Instant::now();
                     }
-                    last_remote_sync = Instant::now();
                 }
             }
         });
@@ -460,7 +515,7 @@ fn apply_remote_manifest(
     suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>,
     log: &LogFn,
     auth_failed: &AuthFailedFn,
-) {
+) -> usize {
     let local_manifest = manifest.lock().unwrap().clone();
     let mut downloads = Vec::new();
 
@@ -472,8 +527,9 @@ fn apply_remote_manifest(
     }
 
     if downloads.is_empty() {
-        return;
+        return 0;
     }
+    let download_count = downloads.len();
 
     download_remote_paths(
         cfg,
@@ -487,6 +543,7 @@ fn apply_remote_manifest(
     );
 
     save_remote_manifest_from_server(cfg, password, log, auth_failed);
+    download_count
 }
 
 fn download_remote_paths(
@@ -721,6 +778,60 @@ pub fn retry_uploads(
     )
 }
 
+pub fn refresh_remote_changes(
+    cfg: &Config,
+    password: &str,
+    log: &LogFn,
+    activity: &ActivityFn,
+    auth_failed: &AuthFailedFn,
+) -> usize {
+    let mut pull_cfg = cfg.clone();
+    pull_cfg.sync_remote_changes = true;
+    let manifest = Arc::new(Mutex::new(load_local_manifest(&pull_cfg)));
+    let suppressed: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    activity(ActivityInfo {
+        state: ActivityState::Checking,
+        completed: 0,
+        total: 0,
+        failed: 0,
+        failed_paths: Vec::new(),
+    });
+    log("Manual server refresh started".to_string());
+
+    let downloaded = fetch_remote_state(&pull_cfg, password, log, auth_failed)
+        .map(|remote_manifest| {
+            apply_remote_manifest(
+                &pull_cfg,
+                password,
+                &manifest,
+                &remote_manifest,
+                &suppressed,
+                log,
+                auth_failed,
+            )
+        })
+        .unwrap_or(0);
+
+    if downloaded == 0 {
+        log("Manual server refresh complete: no server changes found".to_string());
+    } else {
+        log(format!(
+            "Manual server refresh complete: {} file(s) pulled from server",
+            downloaded
+        ));
+    }
+
+    activity(ActivityInfo {
+        state: ActivityState::Idle,
+        completed: downloaded,
+        total: downloaded,
+        failed: 0,
+        failed_paths: Vec::new(),
+    });
+    downloaded
+}
+
 fn fetch_remote_manifest(
     cfg: &Config,
     password: &str,
@@ -735,6 +846,23 @@ fn fetch_remote_manifest(
                 auth_failed();
             }
             log(format!("Remote manifest unavailable: {}", err));
+            None
+        }
+    }
+}
+
+fn fetch_remote_manifest_marker(
+    cfg: &Config,
+    password: &str,
+    auth_failed: &AuthFailedFn,
+) -> Option<SyncManifest> {
+    let remote_url = remote_manifest_url(cfg);
+    match webdav::get_file(cfg, password, &remote_url) {
+        Ok(data) => Some(serde_json::from_slice(&data).unwrap_or_default()),
+        Err(err) => {
+            if err.is_auth_failed() {
+                auth_failed();
+            }
             None
         }
     }

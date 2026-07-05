@@ -785,6 +785,7 @@ unsafe fn install_server_tooltip(hwnd: HWND, hi: HINSTANCE) {
         IDC_SERVER_STATUS,
         IDC_SERVER_URL_LABEL,
         IDC_PAIR_DEVICE,
+        IDC_REFRESH_REMOTE,
     ] {
         let target = GetDlgItem(hwnd, target_id as i32);
         if target.0.is_null() {
@@ -967,16 +968,40 @@ unsafe fn layout_bridge_section(
             layout.browse_btn_w,
             BRIDGE_BTN_H,
         );
-        place_btn(
-            hwnd,
-            hi,
-            IDC_PAIR_DEVICE,
-            pair_label,
-            M + layout.pair_btn_x,
-            layout.btn_y,
-            layout.pair_btn_w,
-            BRIDGE_BTN_H,
-        );
+        if is_paired(cfg) {
+            place_btn(
+                hwnd,
+                hi,
+                IDC_REFRESH_REMOTE,
+                "Refresh",
+                M + layout.refresh_btn_x,
+                layout.btn_y,
+                layout.refresh_btn_w,
+                BRIDGE_BTN_H,
+            );
+            place_btn(
+                hwnd,
+                hi,
+                IDC_PAIR_DEVICE,
+                pair_label,
+                M + layout.refresh_btn_x + layout.refresh_btn_w + PAD,
+                layout.btn_y,
+                BRIDGE_RECONNECT_BTN_W,
+                BRIDGE_BTN_H,
+            );
+        } else {
+            place_btn(
+                hwnd,
+                hi,
+                IDC_PAIR_DEVICE,
+                pair_label,
+                M + layout.pair_btn_x,
+                layout.btn_y,
+                layout.pair_btn_w,
+                BRIDGE_BTN_H,
+            );
+            let _ = ShowWindow(GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32), SW_HIDE);
+        }
     } else {
         let choose_w = BRIDGE_PAIR_BTN_W;
         place_btn(
@@ -991,6 +1016,7 @@ unsafe fn layout_bridge_section(
         );
         let _ = ShowWindow(GetDlgItem(hwnd, IDC_OPEN_LOCAL_FOLDER as i32), SW_HIDE);
         let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32), SW_HIDE);
     }
 
     y += card_h;
@@ -1102,6 +1128,7 @@ unsafe fn update_server_tooltip(hwnd: HWND) {
         IDC_SERVER_STATUS,
         IDC_SERVER_URL_LABEL,
         IDC_PAIR_DEVICE,
+        IDC_REFRESH_REMOTE,
     ] {
         let target = GetDlgItem(hwnd, target_id as i32);
         if target.0.is_null() {

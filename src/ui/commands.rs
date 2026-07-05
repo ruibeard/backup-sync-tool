@@ -44,6 +44,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         IDC_UPDATE_LINK => do_update(hwnd),
         IDC_GITHUB => do_open_repo(hwnd),
         IDC_PAIR_DEVICE => do_pair_device(hwnd),
+        IDC_REFRESH_REMOTE => do_refresh_remote_changes(hwnd),
         IDC_RETRY_FAILED => do_retry_failed_uploads(hwnd),
         _ => {}
     }

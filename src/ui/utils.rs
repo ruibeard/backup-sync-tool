@@ -330,10 +330,22 @@ unsafe fn update_pair_button_enabled(hwnd: HWND) {
     if pair_hwnd.0.is_null() {
         return;
     }
-    let enabled = watch_folder_is_valid(&stmut(hwnd).config.watch_folder);
+    let st = stmut(hwnd);
+    let enabled = watch_folder_is_valid(&st.config.watch_folder);
     let _ = ShowWindow(pair_hwnd, if enabled { SW_SHOW } else { SW_HIDE });
     let _ = EnableWindow(pair_hwnd, enabled);
     let _ = InvalidateRect(pair_hwnd, None, TRUE);
+
+    let refresh_hwnd = GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32);
+    if !refresh_hwnd.0.is_null() {
+        let refresh_enabled = enabled && is_paired(&st.config) && !st.auth_failure_notified;
+        let _ = ShowWindow(
+            refresh_hwnd,
+            if refresh_enabled { SW_SHOW } else { SW_HIDE },
+        );
+        let _ = EnableWindow(refresh_hwnd, refresh_enabled);
+        let _ = InvalidateRect(refresh_hwnd, None, TRUE);
+    }
 }
 
 unsafe fn ensure_default_watch_folder(hwnd: HWND) {
@@ -459,6 +471,74 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
             failed: batch.failed,
             failed_paths: batch.failed_paths,
         });
+    });
+}
+
+unsafe fn do_refresh_remote_changes(hwnd: HWND) {
+    read_ctrls(hwnd, stmut(hwnd));
+    {
+        let st = stmut(hwnd);
+        if st.auth_failure_notified {
+            notify_user_status(
+                hwnd,
+                "Reconnect required",
+                C_RED,
+                "Cannot refresh from server until credentials are reconnected.",
+            );
+            return;
+        }
+        if sync_is_busy(st) {
+            notify_user(hwnd, "Sync is already running.");
+            return;
+        }
+    }
+
+    let cfg = stmut(hwnd).config.clone();
+    let pass = stmut(hwnd).password_plain.clone();
+    if !is_sync_configured(&cfg, &pass) {
+        notify_user(hwnd, "Cannot refresh: sync is not configured.");
+        return;
+    }
+
+    notify_user(hwnd, "Refreshing from server...");
+    set_status_strip_text(hwnd, "Checking server");
+
+    let raw = hwnd.0 as isize;
+    let log: crate::sync::LogFn = Arc::new(move |m: String| {
+        logs::append(&m);
+        let s = Box::new(m);
+        unsafe {
+            PostMessageW(
+                HWND(raw as *mut _),
+                WM_APP_LOG,
+                WPARAM(0),
+                LPARAM(Box::into_raw(s) as isize),
+            )
+            .ok();
+        }
+    });
+    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
+        PostMessageW(
+            HWND(raw as *mut _),
+            WM_APP_SYNC_ACTIVITY,
+            WPARAM(info.state as usize),
+            LPARAM(
+                Box::into_raw(Box::new((
+                    info.completed,
+                    info.total,
+                    info.failed,
+                    info.failed_paths,
+                ))) as isize,
+            ),
+        )
+        .ok();
+    });
+    let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
+        PostMessageW(HWND(raw as *mut _), WM_APP_AUTH_FAILED, WPARAM(0), LPARAM(0)).ok();
+    });
+
+    std::thread::spawn(move || {
+        crate::sync::refresh_remote_changes(&cfg, &pass, &log, &activity, &auth_failed);
     });
 }
 

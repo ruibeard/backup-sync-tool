@@ -1,7 +1,12 @@
 // ── WM_DRAWITEM ───────────────────────────────────────────────────────────────
 const BLUE_IDS: &[u16] = &[IDC_UPDATE_LINK];
 const BORDERLESS_IDS: &[u16] = &[IDC_GITHUB];
-const BRIDGE_BTN_IDS: &[u16] = &[IDC_OPEN_LOCAL_FOLDER, IDC_BROWSE_LOCAL, IDC_PAIR_DEVICE];
+const BRIDGE_BTN_IDS: &[u16] = &[
+    IDC_OPEN_LOCAL_FOLDER,
+    IDC_BROWSE_LOCAL,
+    IDC_PAIR_DEVICE,
+    IDC_REFRESH_REMOTE,
+];
 
 unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
     let di = &*(lp.0 as *const DRAWITEMSTRUCT);
