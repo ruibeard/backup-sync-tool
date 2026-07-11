@@ -303,12 +303,7 @@ unsafe fn finalize_stuck_upload_rows(hwnd: HWND) {
         let st = stmut(hwnd);
         st.activity_rows
             .iter()
-            .filter(|r| {
-                matches!(
-                    r.kind,
-                    ActivityKind::Uploading | ActivityKind::Downloading
-                )
-            })
+            .filter(|r| matches!(r.kind, ActivityKind::Uploading | ActivityKind::Downloading))
             .filter_map(|r| {
                 let relative = r.relative_path.clone().or_else(|| {
                     r.label
@@ -316,7 +311,8 @@ unsafe fn finalize_stuck_upload_rows(hwnd: HWND) {
                         .or_else(|| r.label.strip_prefix("Downloading "))
                         .map(str::to_string)
                 })?;
-                let (key, row) = failed_activity_row(&relative, Some("Upload did not complete".to_string()));
+                let (key, row) =
+                    failed_activity_row(&relative, Some("Upload did not complete".to_string()));
                 Some((key, row))
             })
             .collect()
@@ -343,11 +339,7 @@ unsafe fn apply_sync_batch_failures(hwnd: HWND, failed_paths: &[String]) {
 
 unsafe fn track_failed_upload_path(hwnd: HWND, relative: &str) {
     let st = stmut(hwnd);
-    if !st
-        .failed_upload_paths
-        .iter()
-        .any(|p| p == relative)
-    {
+    if !st.failed_upload_paths.iter().any(|p| p == relative) {
         st.failed_upload_paths.push(relative.to_string());
     }
     update_retry_failed_button(hwnd);

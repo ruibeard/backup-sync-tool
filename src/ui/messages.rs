@@ -19,10 +19,7 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         x if x == crate::sync::ActivityState::Syncing as usize => {
             (w!("APP_ICON_SYNCING"), "Syncing...")
         }
-        _ if progress.2 > 0 => (
-            w!("APP_ICON_SYNCING"),
-            "Upload errors",
-        ),
+        _ if progress.2 > 0 => (w!("APP_ICON_SYNCING"), "Upload errors"),
         _ => (w!("APP_ICON_COMPLETE"), "All synced"),
     };
 
@@ -208,6 +205,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if pair.pair_id != stmut(hwnd).pair_id {
         return LRESULT(0);
     }
+    let prior_config = stmut(hwnd).config.clone();
     {
         let st = stmut(hwnd);
         st.pair_cancel = None;
@@ -229,41 +227,72 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         let _ = SetForegroundWindow(hwnd);
         return LRESULT(0);
     }
+    let mut candidate_config = stmut(hwnd).config.clone();
+    stmut(hwnd).config = prior_config;
+
+    candidate_config.device_token_enc = match secret::encrypt(&pair.device_token) {
+        Ok(enc) => enc,
+        Err(e) => {
+            notify_user_status(
+                hwnd,
+                "Pair failed",
+                C_RED,
+                &format!("Device token encrypt error: {e}"),
+            );
+            return LRESULT(0);
+        }
+    };
+    candidate_config.webdav_url.clear();
+    candidate_config.username.clear();
+    candidate_config.password_enc.clear();
+    candidate_config.transport = "s3".to_string();
+    candidate_config.s3_endpoint = pair.s3_endpoint.clone();
+    candidate_config.s3_region = if pair.s3_region.trim().is_empty() {
+        "us-east-1".to_string()
+    } else {
+        pair.s3_region.clone()
+    };
+    candidate_config.s3_bucket = pair.s3_bucket.clone();
+    candidate_config.s3_access_key = pair.s3_access_key.clone();
+    candidate_config.s3_path_style = pair.s3_path_style;
+    candidate_config.s3_prefix = pair.s3_prefix.clone();
+    candidate_config.parallel_uploads = 2;
+    candidate_config.s3_secret_enc = match secret::encrypt(&pair.s3_secret_key) {
+        Ok(enc) => enc,
+        Err(e) => {
+            notify_user_status(
+                hwnd,
+                "Pair failed",
+                C_RED,
+                &format!("S3 secret encrypt error: {e}"),
+            );
+            return LRESULT(0);
+        }
+    };
+    let candidate_password_plain = String::new();
+    let candidate_s3_secret_plain = pair.s3_secret_key.clone();
+
+    candidate_config.remote_folder = pair.remote_folder.clone();
+    candidate_config.server_approved_at = Some(approval_timestamp_now());
+    candidate_config.credential_profile_id = pair.credential_profile_id;
+    candidate_config.credential_version = pair.credential_version;
+
+    if let Err(e) = crate::config::save(&candidate_config) {
+        notify_user_status(
+            hwnd,
+            "Save failed",
+            C_RED,
+            &format!("Pairing succeeded but save failed: {e}"),
+        );
+        return LRESULT(0);
+    }
     {
         let st = stmut(hwnd);
-        match secret::encrypt(&pair.device_token) {
-            Ok(enc) => st.config.device_token_enc = enc,
-            Err(e) => {
-                notify_user_status(
-                    hwnd,
-                    "Pair failed",
-                    C_RED,
-                    &format!("Device token encrypt error: {e}"),
-                );
-                return LRESULT(0);
-            }
-        }
-        st.config.webdav_url = pair.webdav_url.clone();
-        st.config.username = pair.username.clone();
-        match secret::encrypt(&pair.password) {
-            Ok(enc) => {
-                st.config.password_enc = enc;
-                st.password_plain = pair.password.clone();
-            }
-            Err(e) => {
-                notify_user_status(
-                    hwnd,
-                    "Pair failed",
-                    C_RED,
-                    &format!("WebDAV password encrypt error: {e}"),
-                );
-                return LRESULT(0);
-            }
-        }
-        st.config.remote_folder = pair.remote_folder.clone();
+        st.config = candidate_config;
+        st.password_plain = candidate_password_plain;
+        st.s3_secret_plain = candidate_s3_secret_plain;
         st.remote_folder_from_xd = false;
         st.auth_failure_notified = false;
-        st.config.server_approved_at = Some(approval_timestamp_now());
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
             &hstring(&pair.remote_folder),
@@ -276,17 +305,6 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             GetDlgItem(hwnd, IDC_DEST_LABEL as i32),
             &hstring("Server destination"),
         );
-        st.config.credential_profile_id = pair.credential_profile_id;
-        st.config.credential_version = pair.credential_version;
-    }
-    if let Err(e) = crate::config::save(&stmut(hwnd).config) {
-        notify_user_status(
-            hwnd,
-            "Save failed",
-            C_RED,
-            &format!("Pairing succeeded but save failed: {e}"),
-        );
-        return LRESULT(0);
     }
     apply_activity_log(
         hwnd,
@@ -295,9 +313,8 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match restart_sync_engine(hwnd) {
         Ok(()) => logs::append("Pairing complete; initial sync started."),
         Err(err) => {
-            let msg = format!(
-                "Paired but sync did not start: {err}. Set the backup folder on this PC."
-            );
+            let msg =
+                format!("Paired but sync did not start: {err}. Set the backup folder on this PC.");
             notify_user_status(hwnd, "Sync not started", C_AMBER, &msg);
             apply_server_readonly(hwnd);
             start_connection_check(hwnd);

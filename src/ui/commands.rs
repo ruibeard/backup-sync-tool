@@ -208,7 +208,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
                         WPARAM(0),
                         LPARAM(Box::into_raw(started) as isize),
                     )
-                        .ok();
+                    .ok();
                 }
 
                 let started = std::time::Instant::now();
@@ -231,26 +231,14 @@ unsafe fn do_pair_device(hwnd: HWND) {
                     {
                         match status.status.as_str() {
                             "approved" => {
+                                if !crate::pairing::is_s3_approval(&status) {
+                                    break Err(
+                                        "Pairing approved without S3 credentials. Pair again after the server enables S3."
+                                            .to_string(),
+                                    );
+                                }
                                 let device_token =
                                     match required_pair_field(status.device_token, "device token") {
-                                        Ok(value) => value,
-                                        Err(err) => break Err(err),
-                                    };
-                                let webdav_url =
-                                    match required_pair_field(status.webdav_url, "server URL") {
-                                        Ok(value) => value,
-                                        Err(err) => break Err(err),
-                                    };
-                                if let Err(err) = validate_webdav_url(&webdav_url) {
-                                    break Err(format!("Pairing approved with invalid server URL: {err}"));
-                                }
-                                let username =
-                                    match required_pair_field(status.username, "username") {
-                                        Ok(value) => value,
-                                        Err(err) => break Err(err),
-                                    };
-                                let password =
-                                    match required_pair_field(status.password, "password") {
                                         Ok(value) => value,
                                         Err(err) => break Err(err),
                                     };
@@ -259,15 +247,52 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                         Ok(folder) => folder,
                                         Err(err) => break Err(err),
                                     };
+                                let s3_endpoint =
+                                    match required_pair_field(status.s3_endpoint, "S3 endpoint") {
+                                        Ok(value) => value,
+                                        Err(err) => break Err(err),
+                                    };
+                                if let Err(err) = validate_https_url(&s3_endpoint, "S3 endpoint") {
+                                    break Err(format!(
+                                        "Pairing approved with invalid S3 endpoint: {err}"
+                                    ));
+                                }
+                                let s3_bucket =
+                                    match required_pair_field(status.s3_bucket, "S3 bucket") {
+                                        Ok(value) => value,
+                                        Err(err) => break Err(err),
+                                    };
+                                let s3_access_key = match required_pair_field(
+                                    status.s3_access_key,
+                                    "S3 access key",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let s3_secret_key = match required_pair_field(
+                                    status.s3_secret_key,
+                                    "S3 secret key",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let s3_prefix = status.s3_prefix.unwrap_or_default();
                                 break Ok(PairResult {
                                     pair_id,
                                     device_token,
-                                    webdav_url,
-                                    username,
-                                    password,
+                                    transport: "s3".to_string(),
                                     remote_folder,
                                     credential_profile_id: status.credential_profile_id,
                                     credential_version: status.credential_version,
+                                    s3_endpoint,
+                                    s3_region: status
+                                        .s3_region
+                                        .unwrap_or_else(|| "us-east-1".to_string()),
+                                    s3_bucket,
+                                    s3_access_key,
+                                    s3_secret_key,
+                                    s3_path_style: status.s3_path_style.unwrap_or(true),
+                                    s3_prefix,
                                 });
                             }
                             "rejected" => break Err("Pairing was rejected.".to_string()),
@@ -290,7 +315,13 @@ unsafe fn do_pair_device(hwnd: HWND) {
             ),
         };
         unsafe {
-            PostMessageW(HWND(raw as *mut _), WM_APP_PAIR_RESULT, WPARAM(ok), LPARAM(payload)).ok();
+            PostMessageW(
+                HWND(raw as *mut _),
+                WM_APP_PAIR_RESULT,
+                WPARAM(ok),
+                LPARAM(payload),
+            )
+            .ok();
         }
     });
 }
@@ -326,12 +357,30 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
     let locked_username = st.config.username.clone();
     let locked_password = st.password_plain.clone();
     let locked_remote_folder = st.config.remote_folder.clone();
+    let locked_transport = st.config.transport.clone();
+    let locked_s3_endpoint = st.config.s3_endpoint.clone();
+    let locked_s3_region = st.config.s3_region.clone();
+    let locked_s3_bucket = st.config.s3_bucket.clone();
+    let locked_s3_access_key = st.config.s3_access_key.clone();
+    let locked_s3_secret = st.s3_secret_plain.clone();
+    let locked_s3_path_style = st.config.s3_path_style;
+    let locked_s3_prefix = st.config.s3_prefix.clone();
+    let locked_s3_part_size = st.config.s3_part_size_mib;
     read_ctrls(hwnd, st);
     if was_paired {
         st.config.webdav_url = locked_webdav_url;
         st.config.username = locked_username;
         st.password_plain = locked_password;
         st.config.remote_folder = locked_remote_folder;
+        st.config.transport = locked_transport;
+        st.config.s3_endpoint = locked_s3_endpoint;
+        st.config.s3_region = locked_s3_region;
+        st.config.s3_bucket = locked_s3_bucket;
+        st.config.s3_access_key = locked_s3_access_key;
+        st.s3_secret_plain = locked_s3_secret;
+        st.config.s3_path_style = locked_s3_path_style;
+        st.config.s3_prefix = locked_s3_prefix;
+        st.config.s3_part_size_mib = locked_s3_part_size;
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
             &hstring(&st.config.remote_folder),
@@ -341,22 +390,38 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
         notify_user(hwnd, "Origin folder is required.");
         return;
     }
-    if st.config.webdav_url.trim().is_empty() {
-        notify_user(hwnd, "Server URL is required.");
-        return;
-    }
-    if let Err(err) = validate_webdav_url(&st.config.webdav_url) {
-        notify_user_status(hwnd, "Save failed", C_RED, &err);
-        return;
-    }
     if st.config.remote_folder.trim().is_empty() {
         notify_user(hwnd, "Destination folder is required.");
         return;
     }
-    match secret::encrypt(&st.password_plain) {
-        Ok(enc) => st.config.password_enc = enc,
-        Err(e) => {
-            notify_user_status(hwnd, "Save failed", C_RED, &format!("Encrypt error: {e}"));
+    match config::transport_kind(&st.config) {
+        Some(TransportKind::S3) => {
+            if st.config.s3_endpoint.trim().is_empty() {
+                notify_user(hwnd, "S3 endpoint is required.");
+                return;
+            }
+            if let Err(err) = validate_https_url(&st.config.s3_endpoint, "S3 endpoint") {
+                notify_user_status(hwnd, "Save failed", C_RED, &err);
+                return;
+            }
+            match secret::encrypt(&st.s3_secret_plain) {
+                Ok(enc) => st.config.s3_secret_enc = enc,
+                Err(e) => {
+                    notify_user_status(
+                        hwnd,
+                        "Save failed",
+                        C_RED,
+                        &format!("S3 secret encrypt error: {e}"),
+                    );
+                    return;
+                }
+            }
+        }
+        None => {
+            notify_user(
+                hwnd,
+                "WebDAV is no longer supported. Pair again for S3 storage.",
+            );
             return;
         }
     }
@@ -366,7 +431,7 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
     }
     apply_startup(&st.config);
     let cfg = st.config.clone();
-    let pass = st.password_plain.clone();
+    let s3_secret = st.s3_secret_plain.clone();
     let raw = hwnd.0 as isize;
     match restart_sync_engine(hwnd) {
         Ok(()) => {
@@ -379,17 +444,20 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
         }
         Err(e) => notify_user_status(hwnd, "Sync error", C_RED, &e),
     }
-    if !cfg.webdav_url.is_empty() && !cfg.username.is_empty() && !pass.is_empty() {
+    if is_sync_configured(&cfg, &s3_secret) {
         set_status_dot_color(hwnd, C_AMBER);
         std::thread::spawn(move || {
-            let ok = webdav::test_connection(&cfg, &pass).is_ok();
+            let ok = match transport::build(&cfg, &s3_secret) {
+                Ok(t) => t.test_connection().is_ok(),
+                Err(_) => false,
+            };
             PostMessageW(
                 HWND(raw as *mut _),
                 WM_APP_CONNECTED,
                 WPARAM(if ok { 1 } else { 0 }),
                 LPARAM(0),
             )
-                .ok();
+            .ok();
         });
     }
 }
@@ -480,12 +548,8 @@ fn client_inner_w(hwnd: HWND) -> i32 {
 
 fn required_client_height(st: &WndState) -> i32 {
     let bridge_h = bridge_section_total_h(st);
-    let activity_h = HDR_H
-        + PAD
-        + MIN_ACTIVITY_LIST_H
-        + st.post_list_gap
-        + st.sync_row_h
-        + st.post_sync_sect;
+    let activity_h =
+        HDR_H + PAD + MIN_ACTIVITY_LIST_H + st.post_list_gap + st.sync_row_h + st.post_sync_sect;
     CONTENT_TOP_PAD + bridge_h + activity_h + st.bottom_bar_h
 }
 
@@ -562,7 +626,7 @@ unsafe fn layout_main(hwnd: HWND) {
         HDR_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_ACTIVITY_SUBHDR as i32),
         None,
@@ -572,7 +636,7 @@ unsafe fn layout_main(hwnd: HWND) {
         HDR_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     y += HDR_H + PAD;
     (*st).activity_list_top = y;
 
@@ -599,7 +663,7 @@ unsafe fn layout_main(hwnd: HWND) {
         new_lb_h - 2,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     y += new_lb_h + (*st).post_list_gap;
     (*st).sync_footer_rect = RECT {
         left: M,
@@ -619,7 +683,7 @@ unsafe fn layout_main(hwnd: HWND) {
         ACTION_BTN_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
         None,
@@ -629,7 +693,7 @@ unsafe fn layout_main(hwnd: HWND) {
         LBL_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     y += (*st).sync_row_h;
     y += (*st).post_sync_sect;
 
@@ -657,7 +721,7 @@ unsafe fn layout_main(hwnd: HWND) {
         check_h,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SYNC_REMOTE as i32),
         None,
@@ -667,7 +731,7 @@ unsafe fn layout_main(hwnd: HWND) {
         check_h,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     y += row_h;
 
     let footer_y = y + 2;

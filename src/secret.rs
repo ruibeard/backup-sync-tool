@@ -1,5 +1,6 @@
-// secret.rs — DPAPI encrypt/decrypt for password storage
+// secret.rs — DPAPI encrypt/decrypt for password / S3 secret / device token storage
 // CryptProtectData / CryptUnprotectData bind the blob to the current user + machine.
+// Entropy label remains `webdavsync-v1` so existing stored secrets stay valid.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use windows::Win32::Security::Cryptography::{

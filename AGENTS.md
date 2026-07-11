@@ -2,68 +2,66 @@
 
 `SPEC.md` is the technical spec. `README.md` is the GitHub-facing summary. Do not add separate feature/spec markdown for implemented behavior; update `SPEC.md` instead.
 
+## Three systems
+
+| System | Where |
+| --- | --- |
+| Control plane | Laravel `box-rui-cam` → `https://backup.rui.cam` |
+| Sync app | this repo |
+| Object storage | MinIO → `https://s3.rui.cam` |
+
 ## Build & Launch Rules
 
-After every code change:
+After every code change, on a **Windows** host (Proxmox VM 102):
 
 ```powershell
 .\build-local.ps1
 ```
 
-Always run these commands from the repo root. Never launch from `target/debug` or `target/release`; the app expects `backupsynctool.json` next to the root exe.
+Always from repo root. Target is **`x86_64-win7-windows-msvc`** (Win7-compatible). Never launch from `target/debug` or `target/release`.
 
-Always confirm:
-
-- release build succeeded with 0 errors
-- root `backupsynctool.exe` was copied
-- app is running from the repo root
+Confirm: release build 0 errors · root `backupsynctool.exe` copied · app running from repo root.
 
 ## Project Rules
 
 - Rust app lives in the repo root.
 - UI is raw Win32 through `windows-rs`; do not add egui, nwg, webview, Electron, or an async runtime.
-- HTTP/WebDAV uses blocking `ureq`.
+- HTTP uses blocking `ureq` (S3 SigV4 + pairing API). No async runtime / AWS SDK.
 - Config is `backupsynctool.json` next to the exe.
-- Password and device token are encrypted with Windows DPAPI in `src/secret.rs`.
-- Tray behavior: closing hides to tray, double-click reopens.
-- Auto-update checks GitHub releases directly and replaces the exe in place.
-- `target/` is ignored and should not be committed.
+- S3 secret and device token are encrypted with Windows DPAPI in `src/secret.rs` (entropy remains `webdavsync-v1`).
+- Sync storage goes through `Arc<dyn BackupTransport>` in `src/transport/` — `sync.rs` must not call S3 APIs directly. Transport is S3-only.
+- Tray: closing hides; double-click reopens.
+- Auto-update replaces exe in place from GitHub releases.
+- `target/` is ignored; do not commit.
 
 ## Sync And Pairing (must match SPEC.md)
 
-- **Start sync** via `restart_sync_engine()` in `src/ui/utils.rs` — on app launch (if configured), after successful pairing (`on_app_pair_result`), and on Save (`do_save`). Pairing must not end at config save without starting the engine.
-- **First backup:** no local `.backupsynctool-manifest.json` + `sync_remote_changes` false → startup uploads every file in `watch_folder`.
-- **Local manifest** (`{watch_folder}/.backupsynctool-manifest.json`): last successful upload per path only; updated in `upload_path` after PUT succeeds.
-- **Remote manifest:** written from `PROPFIND` (`save_remote_manifest_from_server`), never from a full local scan.
-- **Upload skip** (when local manifest exists): local unchanged since last success **and** file present on server with matching size (`remote_file_states`).
-- **Logs:** always on; daily files under `logs/` next to the exe (`src/logs.rs`).
+- **Start sync** via `restart_sync_engine()` — launch (if configured), after pair approval, and Save paths. Pairing must start the engine.
+- **First backup:** no local manifest + `sync_remote_changes` false → upload all local files.
+- Local manifest updated only after successful upload; remote manifest from server listing only.
+- S3: PutObject ≤ `s3_part_size_mib`; larger = persistent multipart. File concurrency capped at 2.
+- Pair start sends `supported_transports: ["s3"]`. Empty/`webdav` `transport` → re-pair.
+- Default `pair_api_base` = `https://backup.rui.cam`.
+- Logs always on under `logs/` next to exe.
 
-## WebDAV Errors
+## Storage Errors
 
-- Only **HTTP 401** → `WebDavError::AuthFailed` → pause sync + pair-again UI.
-- **HTTP 403** on `MKCOL` → treat as folder exists (403/405); continue to PUT.
-- Do not show “Credentials Invalid” for Storage Box folder-create 403s.
+- S3 auth/policy failures → pause sync + pair-again UI.
+- Missing object is not auth failure.
 
 ## UI Notices
 
-- Use `notify_user()` / `notify_user_status()` in `src/ui/utils.rs` for non-blocking ribbon + Recent Activity messages.
-- Do not add `MessageBox` for routine success/error; it freezes the UI thread. Reserve modals for actions that need explicit Yes/No (e.g. update install).
+- Use `notify_user()` / `notify_user_status()` — no MessageBox for routine notices.
 
 ## Release
 
-Use `.\build-local.ps1` for normal local build/test cycles. It performs the required stop, Windows 7-compatible release build, root exe copy, root launch, import verification, and running-process verification.
-
-Use `.\release.ps1` for an actual public release. It bumps the patch version in `Cargo.toml`, builds the Windows 7-compatible release target, copies it to repo-root `backupsynctool.exe`, commits, creates a new `vX.Y.Z` tag, pushes `main`, pushes the tag, and verifies the remote tag exists.
-
-Do not move or force-push an existing release tag during normal releases. Only use `git tag -f` / `git push --force` when explicitly repairing a bad tag or bad release.
+`.\build-local.ps1` for local cycles. `.\release.ps1` for public `vX.Y.Z` (same Win7 target). Do not force-move tags unless repairing.
 
 ## Win32 Gotchas
 
-- `WM_DRAWITEM` only arrives at the parent for direct child controls; avoid intermediate panel windows for owner-drawn controls.
-- `WM_CTLCOLORSTATIC` brushes must be preallocated in `WndState`; do not create brushes per message.
-- `SS_CENTERIMAGE` (`0x0200`) is `SS_REALSIZEIMAGE` on Win32; use manual text centering instead.
-- BGR colour order: `#2B4FA3` is `COLORREF(0x00A34F2B)`.
-- `EnableWindow` and `SetFocus` are in `Win32::UI::Input::KeyboardAndMouse`.
-- `SetWindowSubclass` and `DefSubclassProc` are in `Win32::UI::Shell`.
-- `Config::Default` must be explicit; derived `Default` ignores serde default functions for bool fields.
-- `ureq` v2 has no `.into_json()`; use `.into_string()` and `serde_json::from_str()`.
+- `WM_DRAWITEM` only for direct children of parent.
+- Preallocate `WM_CTLCOLORSTATIC` brushes in `WndState`.
+- `SS_CENTERIMAGE` (`0x0200`) is `SS_REALSIZEIMAGE` — center text manually.
+- BGR: `#2B4FA3` → `COLORREF(0x00A34F2B)`.
+- `Config::Default` must be explicit.
+- `ureq` v2: `.into_string()` + `serde_json::from_str()`.

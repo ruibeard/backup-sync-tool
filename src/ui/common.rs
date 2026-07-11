@@ -29,11 +29,11 @@ const FONT_BTN_SM_PX: i32 = 14;
 const FONT_LINK_PX: i32 = 13;
 const FONT_BRIDGE_CHECK_PX: i32 = 16;
 
-use crate::config::Config;
+use crate::config::{self, Config, TransportKind};
 use crate::logs;
 use crate::secret;
+use crate::transport;
 use crate::tray;
-use crate::webdav;
 use qrcodegen::{QrCode, QrCodeEcc};
 use std::ffi::c_void;
 use std::path::Path;
@@ -48,12 +48,11 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
-use windows::Win32::UI::WindowsAndMessaging as wam;
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW,
-    SetWindowSubclass,
+    DefSubclassProc, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW, SetWindowSubclass,
     BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
 };
+use windows::Win32::UI::WindowsAndMessaging as wam;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 trait IntoOptionalHwnd {
@@ -378,11 +377,8 @@ const SYNC_BAND_H: i32 = SYNC_BAND_HEAD_H
     + SYNC_BAND_BAR_DETAIL_GAP
     + SYNC_BAND_DETAIL_H;
 const BRIDGE_PATH_H: i32 = 18;
-const BRIDGE_CONTENT_H: i32 = BRIDGE_HEADER_H
-    + BRIDGE_DIVIDER_VPAD
-    + BRIDGE_BTN_H
-    + BRIDGE_DIVIDER_VPAD
-    + 1;
+const BRIDGE_CONTENT_H: i32 =
+    BRIDGE_HEADER_H + BRIDGE_DIVIDER_VPAD + BRIDGE_BTN_H + BRIDGE_DIVIDER_VPAD + 1;
 const BRIDGE_H: i32 = BRIDGE_PAD_Y + BRIDGE_CONTENT_H + BRIDGE_PAD_Y;
 const STATUS_ROW_H: i32 = 0;
 
@@ -547,6 +543,7 @@ struct ActivityRow {
 struct WndState {
     config: Config,
     password_plain: String,
+    s3_secret_plain: String,
     sync_engine: Option<crate::sync::SyncEngine>,
     update_url: Option<String>,
     connected: bool,
@@ -658,12 +655,17 @@ fn activity_subhdr_text() -> String {
 struct PairResult {
     pair_id: u64,
     device_token: String,
-    webdav_url: String,
-    username: String,
-    password: String,
+    transport: String,
     remote_folder: String,
     credential_profile_id: Option<u64>,
     credential_version: Option<u64>,
+    s3_endpoint: String,
+    s3_region: String,
+    s3_bucket: String,
+    s3_access_key: String,
+    s3_secret_key: String,
+    s3_path_style: bool,
+    s3_prefix: String,
 }
 
 struct PairStarted {

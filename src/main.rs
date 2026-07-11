@@ -7,10 +7,10 @@ mod logs;
 mod pairing;
 mod secret;
 mod sync;
+mod transport;
 mod tray;
 mod ui;
 mod updater;
-mod webdav;
 mod xd;
 
 use windows::core::w;

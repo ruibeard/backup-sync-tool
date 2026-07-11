@@ -206,7 +206,10 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     update_bridge_display(hwnd);
 
     let footer_hwnd = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
-    ShowWindow(footer_hwnd, if show_fail_footer { SW_SHOW } else { SW_HIDE });
+    ShowWindow(
+        footer_hwnd,
+        if show_fail_footer { SW_SHOW } else { SW_HIDE },
+    );
     ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
     let fr = stmut(hwnd).sync_footer_rect;
     ShowWindow(
@@ -218,7 +221,11 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     }
 }
 
-unsafe fn update_status_strip_after_sync(hwnd: HWND, state: usize, progress: (usize, usize, usize)) {
+unsafe fn update_status_strip_after_sync(
+    hwnd: HWND,
+    state: usize,
+    progress: (usize, usize, usize),
+) {
     let st = stmut(hwnd);
     if !st.auth_failure_notified {
         set_status_strip_connection(hwnd);
@@ -292,14 +299,16 @@ unsafe fn apply_server_readonly(hwnd: HWND) {
 unsafe fn start_connection_check(hwnd: HWND) {
     let st = stmut(hwnd);
     let cfg = st.config.clone();
-    let pass = st.password_plain.clone();
-    if cfg.webdav_url.trim().is_empty() || cfg.username.trim().is_empty() || pass.trim().is_empty()
-    {
+    let s3_secret = st.s3_secret_plain.clone();
+    if !is_sync_configured(&cfg, &s3_secret) {
         return;
     }
     let raw = hwnd.0 as isize;
     std::thread::spawn(move || {
-        let ok = webdav::test_connection(&cfg, &pass).is_ok();
+        let ok = match transport::build(&cfg, &s3_secret) {
+            Ok(t) => t.test_connection().is_ok(),
+            Err(_) => false,
+        };
         unsafe {
             PostMessageW(
                 HWND(raw as *mut _),
@@ -312,12 +321,15 @@ unsafe fn start_connection_check(hwnd: HWND) {
     });
 }
 
-fn is_sync_configured(cfg: &Config, pass: &str) -> bool {
-    watch_folder_is_valid(&cfg.watch_folder)
-        && !cfg.webdav_url.trim().is_empty()
-        && !cfg.username.trim().is_empty()
-        && !pass.is_empty()
-        && !cfg.remote_folder.trim().is_empty()
+fn is_sync_configured(cfg: &Config, s3_secret: &str) -> bool {
+    if !watch_folder_is_valid(&cfg.watch_folder) || cfg.remote_folder.trim().is_empty() {
+        return false;
+    }
+    matches!(config::transport_kind(cfg), Some(TransportKind::S3))
+        && !cfg.s3_endpoint.trim().is_empty()
+        && !cfg.s3_bucket.trim().is_empty()
+        && !cfg.s3_access_key.trim().is_empty()
+        && !s3_secret.is_empty()
 }
 
 fn watch_folder_is_valid(path: &str) -> bool {
@@ -407,11 +419,15 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
     }
     update_retry_failed_button(hwnd);
     let cfg = stmut(hwnd).config.clone();
-    let pass = stmut(hwnd).password_plain.clone();
-    if !is_sync_configured(&cfg, &pass) {
+    let s3_secret = stmut(hwnd).s3_secret_plain.clone();
+    if !is_sync_configured(&cfg, &s3_secret) {
         notify_user(hwnd, "Cannot retry: sync is not configured.");
         return;
     }
+    let Ok(transport) = transport::build(&cfg, &s3_secret) else {
+        notify_user(hwnd, "Cannot retry: storage transport is not configured.");
+        return;
+    };
     let count = paths.len();
     let retry_msg = if count == 1 {
         "Retrying 1 failed upload...".to_string()
@@ -440,19 +456,23 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
             HWND(raw as *mut _),
             WM_APP_SYNC_ACTIVITY,
             WPARAM(info.state as usize),
-            LPARAM(
-                Box::into_raw(Box::new((
-                    info.completed,
-                    info.total,
-                    info.failed,
-                    info.failed_paths,
-                ))) as isize,
-            ),
+            LPARAM(Box::into_raw(Box::new((
+                info.completed,
+                info.total,
+                info.failed,
+                info.failed_paths,
+            ))) as isize),
         )
         .ok();
     });
     let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(HWND(raw as *mut _), WM_APP_AUTH_FAILED, WPARAM(0), LPARAM(0)).ok();
+        PostMessageW(
+            HWND(raw as *mut _),
+            WM_APP_AUTH_FAILED,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .ok();
     });
 
     std::thread::spawn(move || {
@@ -463,7 +483,8 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
             failed: 0,
             failed_paths: Vec::new(),
         });
-        let batch = crate::sync::retry_uploads(&cfg, &pass, &paths, &log, &activity, &auth_failed);
+        let batch =
+            crate::sync::retry_uploads(&cfg, transport, &paths, &log, &activity, &auth_failed);
         activity(crate::sync::ActivityInfo {
             state: crate::sync::ActivityState::Idle,
             completed: batch.succeeded,
@@ -494,11 +515,15 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
     }
 
     let cfg = stmut(hwnd).config.clone();
-    let pass = stmut(hwnd).password_plain.clone();
-    if !is_sync_configured(&cfg, &pass) {
+    let s3_secret = stmut(hwnd).s3_secret_plain.clone();
+    if !is_sync_configured(&cfg, &s3_secret) {
         notify_user(hwnd, "Cannot refresh: sync is not configured.");
         return;
     }
+    let Ok(transport) = transport::build(&cfg, &s3_secret) else {
+        notify_user(hwnd, "Cannot refresh: storage transport is not configured.");
+        return;
+    };
 
     notify_user(hwnd, "Refreshing from server...");
     set_status_strip_text(hwnd, "Checking server");
@@ -522,23 +547,27 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
             HWND(raw as *mut _),
             WM_APP_SYNC_ACTIVITY,
             WPARAM(info.state as usize),
-            LPARAM(
-                Box::into_raw(Box::new((
-                    info.completed,
-                    info.total,
-                    info.failed,
-                    info.failed_paths,
-                ))) as isize,
-            ),
+            LPARAM(Box::into_raw(Box::new((
+                info.completed,
+                info.total,
+                info.failed,
+                info.failed_paths,
+            ))) as isize),
         )
         .ok();
     });
     let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(HWND(raw as *mut _), WM_APP_AUTH_FAILED, WPARAM(0), LPARAM(0)).ok();
+        PostMessageW(
+            HWND(raw as *mut _),
+            WM_APP_AUTH_FAILED,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .ok();
     });
 
     std::thread::spawn(move || {
-        crate::sync::refresh_remote_changes(&cfg, &pass, &log, &activity, &auth_failed);
+        crate::sync::refresh_remote_changes(&cfg, transport, &log, &activity, &auth_failed);
     });
 }
 
@@ -549,14 +578,15 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
         return Err("Sync not started: choose a valid backup folder on this PC.".to_string());
     }
     let cfg = stmut(hwnd).config.clone();
-    let pass = stmut(hwnd).password_plain.clone();
-    if !is_sync_configured(&cfg, &pass) {
+    let s3_secret = stmut(hwnd).s3_secret_plain.clone();
+    if !is_sync_configured(&cfg, &s3_secret) {
         stmut(hwnd).sync_engine = None;
         return Err(
             "Sync not started: origin folder, server credentials, and destination are required."
                 .to_string(),
         );
     }
+    let transport = transport::build(&cfg, &s3_secret)?;
     {
         let st = stmut(hwnd);
         st.sync_status_text = "Starting...".to_string();
@@ -587,22 +617,26 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
             HWND(raw as *mut _),
             WM_APP_SYNC_ACTIVITY,
             WPARAM(info.state as usize),
-            LPARAM(
-                Box::into_raw(Box::new((
-                    info.completed,
-                    info.total,
-                    info.failed,
-                    info.failed_paths,
-                ))) as isize,
-            ),
+            LPARAM(Box::into_raw(Box::new((
+                info.completed,
+                info.total,
+                info.failed,
+                info.failed_paths,
+            ))) as isize),
         )
         .ok();
     });
     let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(HWND(raw as *mut _), WM_APP_AUTH_FAILED, WPARAM(0), LPARAM(0)).ok();
+        PostMessageW(
+            HWND(raw as *mut _),
+            WM_APP_AUTH_FAILED,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .ok();
     });
 
-    match crate::sync::SyncEngine::start(cfg.clone(), pass, log, activity, auth_failed) {
+    match crate::sync::SyncEngine::start(cfg.clone(), transport, log, activity, auth_failed) {
         Ok(engine) => {
             stmut(hwnd).sync_engine = Some(engine);
             let started = format!("Sync engine started for {}", cfg.watch_folder);
@@ -731,11 +765,11 @@ fn format_eta(seconds: u64) -> String {
     }
 }
 
-fn validate_webdav_url(url: &str) -> std::result::Result<(), String> {
+fn validate_https_url(url: &str, label: &str) -> std::result::Result<(), String> {
     if url.trim().to_ascii_lowercase().starts_with("https://") {
         Ok(())
     } else {
-        Err("Server URL must start with https://".to_string())
+        Err(format!("{label} must start with https://"))
     }
 }
 

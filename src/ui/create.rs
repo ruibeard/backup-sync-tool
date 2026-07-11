@@ -24,12 +24,14 @@ unsafe fn on_create(hwnd: HWND) {
         }
     }
     let pass = secret::decrypt(&cfg.password_enc).unwrap_or_default();
-    let sync_configured = is_sync_configured(&cfg, &pass);
+    let s3_secret = secret::decrypt(&cfg.s3_secret_enc).unwrap_or_default();
+    let sync_configured = is_sync_configured(&cfg, &s3_secret);
     let (bridge_icon_pc, bridge_icon_cloud) = load_bridge_icons(hwnd);
 
     let state = Box::new(WndState {
         config: cfg.clone(),
         password_plain: pass.clone(),
+        s3_secret_plain: s3_secret.clone(),
         sync_engine: None,
         update_url: None,
         connected: false,
@@ -124,7 +126,12 @@ unsafe fn on_create(hwnd: HWND) {
 
     let hicon = LoadIconW(hi, w!("APP_ICON_IDLE"))
         .unwrap_or(LoadIconW(None, IDI_APPLICATION).unwrap_or_default());
-    SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(hicon.0 as isize));
+    SendMessageW(
+        hwnd,
+        WM_SETICON,
+        WPARAM(ICON_BIG as usize),
+        LPARAM(hicon.0 as isize),
+    );
     SendMessageW(
         hwnd,
         WM_SETICON,
@@ -160,12 +167,15 @@ unsafe fn on_create(hwnd: HWND) {
         });
     }
 
-    if !cfg.webdav_url.is_empty() && !cfg.username.is_empty() && !pass.is_empty() {
+    if is_sync_configured(&cfg, &s3_secret) {
         let cfg2 = cfg.clone();
-        let pass2 = pass.clone();
+        let s3_2 = s3_secret.clone();
         set_status_strip_text(hwnd, "Connecting");
         std::thread::spawn(move || {
-            let ok = crate::webdav::test_connection(&cfg2, &pass2).is_ok();
+            let ok = match crate::transport::build(&cfg2, &s3_2) {
+                Ok(t) => t.test_connection().is_ok(),
+                Err(_) => false,
+            };
             PostMessageW(
                 HWND(raw as *mut _),
                 WM_APP_CONNECTED,
@@ -220,17 +230,7 @@ unsafe fn build_ui(
         st.server_status_rect = RECT::default();
         st.status_strip_display.clear();
         st.status_subtitle.clear();
-        mkstatic(
-            hwnd,
-            hi,
-            IDC_SERVER_STATUS,
-            "",
-            0,
-            0,
-            1,
-            1,
-            hf_b,
-        );
+        mkstatic(hwnd, hi, IDC_SERVER_STATUS, "", 0, 0, 1, 1, hf_b);
         ShowWindow(GetDlgItem(hwnd, IDC_SERVER_STATUS as i32), SW_HIDE);
         install_server_tooltip(hwnd, hi);
 
@@ -255,9 +255,29 @@ unsafe fn build_ui(
             SS_RIGHT,
         );
         ShowWindow(GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32), SW_HIDE);
-        mkstatic(hwnd, hi, IDC_ORIGIN_LABEL, "Backup folder on this PC", 0, 0, 1, 1, hf_small);
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_ORIGIN_LABEL,
+            "Backup folder on this PC",
+            0,
+            0,
+            1,
+            1,
+            hf_small,
+        );
         ShowWindow(GetDlgItem(hwnd, IDC_ORIGIN_LABEL as i32), SW_HIDE);
-        mkstatic(hwnd, hi, IDC_DEST_LABEL, "Server destination", 0, 0, 1, 1, hf_small);
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_DEST_LABEL,
+            "Server destination",
+            0,
+            0,
+            1,
+            1,
+            hf_small,
+        );
         ShowWindow(GetDlgItem(hwnd, IDC_DEST_LABEL as i32), SW_HIDE);
         mkedit_cue(
             hwnd,
@@ -277,7 +297,17 @@ unsafe fn build_ui(
             st.detected_customer.as_deref(),
         );
         st.dest_path_rect = RECT::default();
-        mkstatic(hwnd, hi, IDC_REMOTE_FOLDER, &destination_text, 0, 0, 1, 1, hf_small);
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_REMOTE_FOLDER,
+            &destination_text,
+            0,
+            0,
+            1,
+            1,
+            hf_small,
+        );
         ShowWindow(GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32), SW_HIDE);
     }
 
@@ -318,7 +348,16 @@ unsafe fn build_ui(
             right: M + INNER_W,
             bottom: y + lb_h,
         };
-        mklb(hwnd, hi, IDC_ACTIVITY_LIST, M + 1, y + 1, INNER_W - 2, lb_h - 2, hf_small);
+        mklb(
+            hwnd,
+            hi,
+            IDC_ACTIVITY_LIST,
+            M + 1,
+            y + 1,
+            INNER_W - 2,
+            lb_h - 2,
+            hf_small,
+        );
         refresh_activity_listbox(hwnd);
         y += lb_h;
         st.post_list_gap = PAD;
@@ -694,10 +733,7 @@ unsafe fn mkcheck(
         WINDOW_EX_STYLE::default(),
         w!("BUTTON"),
         &hs,
-        WS_CHILD
-            | WS_VISIBLE
-            | WS_TABSTOP
-            | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
         x,
         y,
         w,
@@ -884,7 +920,7 @@ unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout, _slug: &st
         LBL_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_GITHUB as i32),
         None,
@@ -894,7 +930,7 @@ unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout, _slug: &st
         GITHUB_BTN_SIZE,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_UPDATE_LINK as i32),
         None,
@@ -904,7 +940,7 @@ unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout, _slug: &st
         ACTION_BTN_H,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     let author_h = LBL_H - 2;
     SetWindowPos(
         GetDlgItem(hwnd, IDC_AUTHOR as i32),
@@ -915,7 +951,7 @@ unsafe fn position_footer_meta(hwnd: HWND, layout: &FooterMetaLayout, _slug: &st
         author_h,
         SWP_NOZORDER,
     )
-        .ok();
+    .ok();
     let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_REPO as i32), &hstring(ver_label));
     let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_AUTHOR as i32), &hstring("Rui Almeida"));
 }
@@ -951,16 +987,21 @@ unsafe fn layout_bridge_section(
 
     let place_btn =
         |hwnd: HWND, hi: HINSTANCE, id: u16, label: &str, x: i32, by: i32, w: i32, h: i32| {
-        let existing = GetDlgItem(hwnd, id as i32);
-        if existing.0.is_null() {
-            mkbtn_grey(hwnd, hi, id, label, x, by, w, h, hf_bridge);
-        } else {
-            SetWindowPos(existing, None, x, by, w, h, SWP_NOZORDER).ok();
-            let _ = SetWindowTextW(existing, &hstring(label));
-            SendMessageW(existing, WM_SETFONT, WPARAM(hf_bridge.0 as usize), LPARAM(1));
-            let _ = ShowWindow(existing, SW_SHOW);
-        }
-    };
+            let existing = GetDlgItem(hwnd, id as i32);
+            if existing.0.is_null() {
+                mkbtn_grey(hwnd, hi, id, label, x, by, w, h, hf_bridge);
+            } else {
+                SetWindowPos(existing, None, x, by, w, h, SWP_NOZORDER).ok();
+                let _ = SetWindowTextW(existing, &hstring(label));
+                SendMessageW(
+                    existing,
+                    WM_SETFONT,
+                    WPARAM(hf_bridge.0 as usize),
+                    LPARAM(1),
+                );
+                let _ = ShowWindow(existing, SW_SHOW);
+            }
+        };
 
     if local_folder_valid {
         place_btn(
@@ -1051,7 +1092,12 @@ unsafe fn layout_bridge_section(
     let prog = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
     if prog.0.is_null() {
         let prog_hwnd = mkprogress(hwnd, hi, IDC_SYNC_PROGRESS, 0, 0, 1, 1);
-        SendMessageW(prog_hwnd, PBM_SETBARCOLOR, WPARAM(0), LPARAM(C_BLUE as isize));
+        SendMessageW(
+            prog_hwnd,
+            PBM_SETBARCOLOR,
+            WPARAM(0),
+            LPARAM(C_BLUE as isize),
+        );
         SendMessageW(
             prog_hwnd,
             PBM_SETBKCOLOR,
@@ -1069,20 +1115,24 @@ unsafe fn layout_bridge_section(
 }
 
 fn server_tooltip_text(cfg: &Config) -> String {
-    let url = if cfg.webdav_url.trim().is_empty() {
+    let url = if cfg.s3_endpoint.trim().is_empty() {
         "not set"
     } else {
-        cfg.webdav_url.trim()
+        cfg.s3_endpoint.trim()
     };
     let folder = if cfg.remote_folder.trim().is_empty() {
         "waiting for Laravel approval"
     } else {
         cfg.remote_folder.trim()
     };
-    let mut lines = vec![
-        format!("Server: {url}"),
-        format!("Destination: {folder}"),
-    ];
+    let mut lines = vec![format!("Server: {url}"), format!("Destination: {folder}")];
+    if matches!(
+        crate::config::transport_kind(cfg),
+        Some(crate::config::TransportKind::S3)
+    ) && !cfg.s3_prefix.trim().is_empty()
+    {
+        lines.push(format!("Prefix: {}", cfg.s3_prefix.trim()));
+    }
     if let Some(approved_at) = cfg.server_approved_at.as_deref().and_then(non_empty_str) {
         lines.push(format!("Approved: {approved_at}"));
     }
@@ -1096,10 +1146,10 @@ fn server_tooltip_text(cfg: &Config) -> String {
 }
 
 fn server_display_text(cfg: &Config) -> String {
-    if cfg.webdav_url.trim().is_empty() {
+    if cfg.s3_endpoint.trim().is_empty() {
         "Server not configured".to_string()
     } else {
-        cfg.webdav_url
+        cfg.s3_endpoint
             .trim()
             .trim_start_matches("https://")
             .trim_end_matches('/')

@@ -95,5 +95,15 @@ unsafe fn draw_github_icon(hdc: HDC, rc: &RECT, hwnd_item: HWND) {
     let size = 16;
     let x = rc.left + ((rc.right - rc.left - size) / 2);
     let y = rc.top + ((rc.bottom - rc.top - size) / 2);
-    let _ = DrawIconEx(hdc, x, y, icon, size, size, 0, HBRUSH(std::ptr::null_mut()), DI_NORMAL);
+    let _ = DrawIconEx(
+        hdc,
+        x,
+        y,
+        icon,
+        size,
+        size,
+        0,
+        HBRUSH(std::ptr::null_mut()),
+        DI_NORMAL,
+    );
 }
