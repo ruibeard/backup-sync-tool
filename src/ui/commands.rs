@@ -414,9 +414,6 @@ unsafe fn persist_settings_on_toggle(hwnd: HWND, id: u16) {
 unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
     let st = stmut(hwnd);
     let was_paired = is_paired(&st.config);
-    let locked_webdav_url = st.config.webdav_url.clone();
-    let locked_username = st.config.username.clone();
-    let locked_password = st.password_plain.clone();
     let locked_remote_folder = st.config.remote_folder.clone();
     let locked_transport = st.config.transport.clone();
     let locked_s3_endpoint = st.config.s3_endpoint.clone();
@@ -429,9 +426,6 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
     let locked_s3_part_size = st.config.s3_part_size_mib;
     read_ctrls(hwnd, st);
     if was_paired {
-        st.config.webdav_url = locked_webdav_url;
-        st.config.username = locked_username;
-        st.password_plain = locked_password;
         st.config.remote_folder = locked_remote_folder;
         st.config.transport = locked_transport;
         st.config.s3_endpoint = locked_s3_endpoint;
@@ -479,10 +473,7 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
             }
         }
         None => {
-            notify_user(
-                hwnd,
-                "WebDAV is no longer supported. Pair again for S3 storage.",
-            );
+            notify_user(hwnd, "Not paired for S3. Pair again to get storage credentials.");
             return;
         }
     }

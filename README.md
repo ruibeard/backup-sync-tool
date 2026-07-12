@@ -42,7 +42,7 @@ Download `backupsynctool.exe` from [Releases](https://github.com/ruibeard/backup
 
 1. Set **backup folder** (or use detected `C:\XDSoftware\backups` when present).
 2. **Pair** — QR / code; admin approves on `backup.rui.cam`.
-3. Sync starts after pairing (no Save button). Old WebDAV configs must **re-pair** for S3.
+3. Sync starts after pairing (no Save button). Re-pair if credentials are missing or auth fails.
 4. **Reconnect** if storage returns an auth/credential failure.
 
 ## Build (developers)

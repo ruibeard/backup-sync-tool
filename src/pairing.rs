@@ -24,12 +24,6 @@ pub struct PairStatusResponse {
     pub device_token: Option<String>,
     #[serde(default)]
     pub transport: Option<String>,
-    #[serde(default)]
-    pub webdav_url: Option<String>,
-    #[serde(default)]
-    pub username: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
     pub remote_folder: Option<String>,
     pub credential_profile_id: Option<u64>,
     pub credential_version: Option<u64>,
@@ -116,9 +110,6 @@ mod tests {
             status: "approved".into(),
             device_token: Some("t".into()),
             transport: Some("s3".into()),
-            webdav_url: None,
-            username: None,
-            password: None,
             remote_folder: Some("Cust".into()),
             credential_profile_id: None,
             credential_version: None,
@@ -132,12 +123,12 @@ mod tests {
         };
         assert!(is_s3_approval(&s3));
 
-        let webdav = PairStatusResponse {
+        let not_s3 = PairStatusResponse {
             transport: None,
             s3_endpoint: None,
             s3_bucket: None,
             ..s3
         };
-        assert!(!is_s3_approval(&webdav));
+        assert!(!is_s3_approval(&not_s3));
     }
 }

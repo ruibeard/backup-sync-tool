@@ -10,7 +10,7 @@
 | Sync app | this repo |
 | Object storage | MinIO → `https://s3.rui.cam` |
 
-Do not conflate pairing (`backup.rui.cam`) with object storage (`s3.rui.cam`). Legacy `box.rui.cam` = old WebDAV host.
+Do not conflate pairing (`backup.rui.cam`) with object storage (`s3.rui.cam`).
 
 **Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy. Cutover status: `docs/plans/2026-07-11-HANDOFF.md` / `SPEC.md` checklist.
 
@@ -44,7 +44,7 @@ Confirm: release build 0 errors · root `backupsynctool.exe` copied · app runni
 - **First backup:** no local manifest + `sync_remote_changes` false → upload all local files.
 - Local manifest updated only after successful upload; remote manifest from server listing only.
 - S3: PutObject ≤ `s3_part_size_mib`; larger = persistent multipart. File concurrency capped at 2.
-- Pair start sends `supported_transports: ["s3"]`. Empty/`webdav` `transport` → re-pair.
+- Pair start sends `supported_transports: ["s3"]`. Non-`s3` `transport` → re-pair.
 - Default `pair_api_base` = `https://backup.rui.cam`.
 - Logs always on under `logs/` next to exe.
 

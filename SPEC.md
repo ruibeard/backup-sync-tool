@@ -46,7 +46,7 @@ flowchart TD
 | --- | --- |
 | `src/main.rs` | Entry, message loop |
 | `src/ui/` | Window, commands, pairing UX, activity list |
-| `src/config.rs` | Load/save config (`transport` must be `s3`; legacy WebDAV fields ignored) |
+| `src/config.rs` | Load/save config (`transport` must be `s3`) |
 | `src/sync.rs` | Watcher, manifests, upload/download engine via `BackupTransport` |
 | `src/transport/` | Object-safe S3 storage backend (`s3.rs`) |
 | `src/pairing.rs` | Pair start/status client (S3 approved payloads only) |
@@ -83,7 +83,7 @@ Laravel = control plane only. Never proxies backup bytes.
 | Sync app | this repo | Win32 client; Win7-compatible exe |
 | Object storage | Proxmox MinIO CT 101 → `https://s3.rui.cam` | PutObject / multipart bytes |
 
-Do not conflate pairing URL (`backup.rui.cam`) with S3 endpoint (`s3.rui.cam`). Legacy `box.rui.cam` was the old WebDAV pairing host.
+Do not conflate pairing URL (`backup.rui.cam`) with S3 endpoint (`s3.rui.cam`).
 
 ## Cutover checklist (current)
 
@@ -105,18 +105,14 @@ Still operator-only (agents never access Forge):
 - [ ] Forge deploys branch with S3 pairing (`s3-multipart-implementation`) + `config:clear`
 - [ ] `storage:ensure-device` → approve a test pair → client receives `s3_endpoint: https://s3.rui.cam`
 - [ ] Win10 VM 102: `git pull` + `.\build-local.ps1` (Win7 target)
-- [ ] Re-pair any device still on old WebDAV config; smoke upload to MinIO
+- [ ] Smoke upload to MinIO after pair
 
 See `docs/plans/2026-07-11-HANDOFF.md`.
 
 ## Configuration
 
 `backupsynctool.json` beside `backupsynctool.exe`. Secrets never plaintext.
-Missing / empty / `webdav` `transport` is rejected — pair again for S3.
-
-### Legacy WebDAV fields
-
-`webdav_url` / `username` / `password_enc` may still appear in old JSON and deserialize, but sync ignores them.
+Missing / empty / non-`s3` `transport` is rejected — pair again.
 
 ### S3 (PutObject + persistent multipart)
 
@@ -149,7 +145,7 @@ Missing / empty / `webdav` `transport` is rejected — pair again for S3.
 | `device_token_enc` | Present ⇒ paired |
 | `s3_bucket` | Per-device bucket from pairing (do not assume a shared bucket) |
 | `s3_prefix` | Optional; may be empty. Object key is `{prefix}/{relative}` when set, else `{relative}` |
-| `s3_secret_enc` / `password_enc` / `device_token_enc` | DPAPI; entropy remains `webdavsync-v1` |
+| `s3_secret_enc` / `device_token_enc` | DPAPI; entropy remains `webdavsync-v1` |
 | `s3_part_size_mib` | Default `32`; clamped 16–64 MiB. Files ≤ this use `PutObject`; larger use multipart (part size may grow to keep ≤ 10 000 parts; non-final parts ≥ 5 MiB) |
 | `server_approved_at` | Local timestamp written when pairing approval is accepted |
 | `sync_remote_changes` | UI: **Download from server**; enables remote poll + download baseline |
@@ -243,24 +239,6 @@ Response: `code`, `approve_url`, `poll_token`, `poll_interval_ms`.
 Do not use `denied`.
 
 ### Approved payload (once)
-
-WebDAV approvals are no longer accepted. Historical shape (ignored by current client):
-
-```json
-{
-  "status": "approved",
-  "device_token": "...",
-  "transport": "webdav",
-  "webdav_url": "https://...",
-  "username": "...",
-  "password": "...",
-  "remote_folder": "XDPT.59655-Palmeira-Minimercado",
-  "credential_profile_id": 10,
-  "credential_version": 1
-}
-```
-
-S3:
 
 ```json
 {
@@ -449,6 +427,6 @@ Desktop lock = accident prevention, not anti-tamper. Hard isolation = one S3 buc
 - [ ] Local manifest: success upload only
 - [ ] Remote manifest: from server listing only
 - [ ] First run, no manifest, download off → upload all local files
-- [ ] Missing / webdav `transport` → refuse sync; require re-pair for S3
+- [ ] Missing / non-`s3` `transport` → refuse sync; require re-pair
 - [ ] Downloads stream to `.part` then rename (no whole-file `Vec` buffering)
 - [ ] S3: PutObject for files ≤ `s3_part_size_mib`; persistent multipart above that with token HEAD verify

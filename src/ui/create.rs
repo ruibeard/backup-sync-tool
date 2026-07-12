@@ -23,14 +23,12 @@ unsafe fn on_create(hwnd: HWND) {
             cfg.watch_folder = path;
         }
     }
-    let pass = secret::decrypt(&cfg.password_enc).unwrap_or_default();
     let s3_secret = secret::decrypt(&cfg.s3_secret_enc).unwrap_or_default();
     let sync_configured = is_sync_configured(&cfg, &s3_secret);
     let (bridge_icon_pc, bridge_icon_cloud) = load_bridge_icons(hwnd);
 
     let state = Box::new(WndState {
         config: cfg.clone(),
-        password_plain: pass.clone(),
         s3_secret_plain: s3_secret.clone(),
         sync_engine: None,
         update_url: None,

@@ -242,9 +242,6 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             return LRESULT(0);
         }
     };
-    candidate_config.webdav_url.clear();
-    candidate_config.username.clear();
-    candidate_config.password_enc.clear();
     candidate_config.transport = "s3".to_string();
     candidate_config.s3_endpoint = pair.s3_endpoint.clone();
     candidate_config.s3_region = if pair.s3_region.trim().is_empty() {
@@ -269,7 +266,6 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             return LRESULT(0);
         }
     };
-    let candidate_password_plain = String::new();
     let candidate_s3_secret_plain = pair.s3_secret_key.clone();
 
     candidate_config.remote_folder = pair.remote_folder.clone();
@@ -289,7 +285,6 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     {
         let st = stmut(hwnd);
         st.config = candidate_config;
-        st.password_plain = candidate_password_plain;
         st.s3_secret_plain = candidate_s3_secret_plain;
         st.remote_folder_from_xd = false;
         st.auth_failure_notified = false;

@@ -542,7 +542,6 @@ struct ActivityRow {
 // ── Window state ──────────────────────────────────────────────────────────────
 struct WndState {
     config: Config,
-    password_plain: String,
     s3_secret_plain: String,
     sync_engine: Option<crate::sync::SyncEngine>,
     update_url: Option<String>,
@@ -621,17 +620,12 @@ struct WndState {
     failed_upload_paths: Vec<String>,
 }
 
-fn config_is_paired(cfg: &Config) -> bool {
+fn is_paired(cfg: &Config) -> bool {
     !cfg.device_token_enc.trim().is_empty()
 }
 
-fn is_root_remote_folder(folder: &str) -> bool {
-    let trimmed = folder.trim();
-    trimmed.is_empty() || trimmed == "/" || trimmed == "\\"
-}
-
 fn bridge_show_sync_band(st: &WndState) -> bool {
-    config_is_paired(&st.config) && !st.auth_failure_notified
+    is_paired(&st.config) && !st.auth_failure_notified
 }
 
 fn bridge_syncing_progress(st: &WndState) -> bool {

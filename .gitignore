@@ -14,3 +14,6 @@ obj/
 /config.json
 /logs/
 .env
+
+# Build artifacts
+*.exe

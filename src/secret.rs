@@ -1,4 +1,4 @@
-// secret.rs — DPAPI encrypt/decrypt for password / S3 secret / device token storage
+// secret.rs — DPAPI encrypt/decrypt for S3 secret / device token storage
 // CryptProtectData / CryptUnprotectData bind the blob to the current user + machine.
 // Entropy label remains `webdavsync-v1` so existing stored secrets stay valid.
 
@@ -95,25 +95,5 @@ pub fn decrypt(encoded: &str) -> Result<String, String> {
         } else {
             Err("CryptUnprotectData failed".into())
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decrypt_password_matches_env() {
-        let cfg_text = std::fs::read_to_string("backupsynctool.json").expect("config");
-        let v: serde_json::Value = serde_json::from_str(&cfg_text).expect("json");
-        let enc = v["password_enc"].as_str().expect("password_enc");
-        let pass = decrypt(enc).expect("decrypt");
-        let env_pass = std::fs::read_to_string(".env")
-            .expect(".env")
-            .lines()
-            .nth(2)
-            .expect("password line")
-            .to_string();
-        assert_eq!(pass, env_pass);
     }
 }

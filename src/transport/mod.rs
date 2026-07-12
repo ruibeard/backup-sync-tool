@@ -118,8 +118,8 @@ pub fn build(cfg: &Config, s3_secret: &str) -> Result<Arc<dyn BackupTransport>, 
         }
         None => {
             let configured = cfg.transport.trim();
-            if configured.is_empty() || configured.eq_ignore_ascii_case("webdav") {
-                Err("WebDAV is no longer supported. Pair again for S3 storage.".into())
+            if configured.is_empty() {
+                Err("Not paired for S3. Pair again to get storage credentials.".into())
             } else {
                 Err(format!("Unsupported backup transport: {configured}"))
             }
@@ -182,12 +182,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_webdav_config_is_rejected() {
-        let mut cfg = Config::default();
-        cfg.transport = "webdav".into();
+    fn empty_transport_is_rejected() {
+        let cfg = Config::default();
         match build(&cfg, "secret") {
-            Ok(_) => panic!("webdav was accepted"),
-            Err(err) => assert!(err.contains("WebDAV is no longer supported")),
+            Ok(_) => panic!("empty transport was accepted"),
+            Err(err) => assert!(err.contains("Not paired for S3")),
         }
     }
 }

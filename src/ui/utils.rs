@@ -103,10 +103,6 @@ unsafe fn restore_server_status_after_pair_cancel(hwnd: HWND) {
     set_status_dot_color(hwnd, C_RED);
 }
 
-fn is_paired(cfg: &Config) -> bool {
-    !cfg.device_token_enc.trim().is_empty()
-}
-
 fn sync_is_busy(st: &WndState) -> bool {
     st.sync_status_state == crate::sync::ActivityState::Checking as usize
         || st.sync_status_state == crate::sync::ActivityState::Syncing as usize

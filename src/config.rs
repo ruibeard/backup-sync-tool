@@ -1,5 +1,5 @@
 // config.rs — load/save JSON config next to the .exe
-// Password / S3 secret stored as base64-encoded DPAPI blobs via secret.rs
+// S3 secret / device token stored as base64-encoded DPAPI blobs via secret.rs
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -12,18 +12,9 @@ pub enum TransportKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub watch_folder: String,
-    /// Legacy field kept so old JSON still deserializes; unused by sync.
-    #[serde(default)]
-    pub webdav_url: String,
-    /// Legacy field kept so old JSON still deserializes; unused by sync.
-    #[serde(default)]
-    pub username: String,
-    /// Legacy DPAPI blob field; unused by S3 sync.
-    #[serde(default)]
-    pub password_enc: String,
     #[serde(default)]
     pub remote_folder: String,
-    /// Must be `"s3"`. Empty / `"webdav"` is rejected.
+    /// Must be `"s3"`. Anything else → re-pair.
     #[serde(default)]
     pub transport: String,
     #[serde(default)]
@@ -67,9 +58,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             watch_folder: String::new(),
-            webdav_url: String::new(),
-            username: String::new(),
-            password_enc: String::new(),
             remote_folder: String::new(),
             transport: String::new(),
             s3_endpoint: String::new(),
@@ -149,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_or_webdav_transport_is_not_s3() {
+    fn legacy_json_fields_are_ignored() {
         let json = r#"{
             "watch_folder": "C:\\backups",
             "webdav_url": "https://example.com/webdav",
@@ -165,10 +153,15 @@ mod tests {
         assert_eq!(cfg.s3_part_size_mib, 32);
         assert!(cfg.auto_update);
         assert_eq!(cfg.parallel_uploads, 2);
+    }
 
-        let mut webdav = cfg.clone();
-        webdav.transport = "webdav".into();
-        assert_eq!(transport_kind(&webdav), None);
+    #[test]
+    fn non_s3_transport_is_rejected() {
+        let mut cfg = Config::default();
+        cfg.transport = "webdav".into();
+        assert_eq!(transport_kind(&cfg), None);
+        cfg.transport = "future".into();
+        assert_eq!(transport_kind(&cfg), None);
     }
 
     #[test]
