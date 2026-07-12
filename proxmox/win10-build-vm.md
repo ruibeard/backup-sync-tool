@@ -13,6 +13,16 @@ Compiles `backupsynctool.exe`. **App target stays Win7** (`x86_64-win7-windows-m
 
 ## Build
 
+From a clean Mac/Linux checkout of this branch:
+
+```bash
+./scripts/push-build-win10.sh
+```
+
+That script: `git push` → SSH `root@192.168.0.46` → VM **102** `git pull` → `.\build-local.ps1 -NoLaunch` → polls until `build-exitcode.txt`.
+
+Manual on the guest:
+
 ```powershell
 cd C:\Users\user\code\backup-sync-tool
 git fetch

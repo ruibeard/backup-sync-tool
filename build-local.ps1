@@ -1,11 +1,20 @@
+param(
+    [switch]$NoLaunch
+)
+
 $ErrorActionPreference = "Stop"
 $env:PATH += ";$env:USERPROFILE\.cargo\bin"
 
 Set-Location $PSScriptRoot
 
+function Write-BuildExitCode([int]$Code) {
+    Set-Content -Path (Join-Path $PSScriptRoot "build-exitcode.txt") -Value "EXITCODE=$Code" -Encoding ascii
+}
+
 $target = "x86_64-win7-windows-msvc"
 $rootExe = "backupsynctool.exe"
 $builtExe = "target\$target\release\backupsynctool.exe"
+Remove-Item (Join-Path $PSScriptRoot "build-exitcode.txt") -ErrorAction SilentlyContinue
 
 Write-Host "Stopping running Backup Sync Tool instance..."
 $existing = Get-Process -Name "backupsynctool" -ErrorAction SilentlyContinue
@@ -19,6 +28,7 @@ if ($existing) {
 
     if ($existing) {
         Write-Error "Could not stop backupsynctool.exe before copying the new build."
+        Write-BuildExitCode 1
         exit 1
     }
 }
@@ -32,6 +42,7 @@ rustup toolchain install nightly
 if ($LASTEXITCODE -ne 0) {
     $ErrorActionPreference = $previousErrorAction
     Write-Error "rustup toolchain install nightly failed"
+    Write-BuildExitCode 1
     exit 1
 }
 
@@ -40,6 +51,7 @@ rustup component add rust-src --toolchain nightly
 if ($LASTEXITCODE -ne 0) {
     $ErrorActionPreference = $previousErrorAction
     Write-Error "rustup component add rust-src failed"
+    Write-BuildExitCode 1
     exit 1
 }
 
@@ -57,11 +69,13 @@ $env:RUSTFLAGS = $previousRustFlags
 $ErrorActionPreference = $previousErrorAction
 if ($buildExit -ne 0) {
     Write-Error "cargo build failed"
+    Write-BuildExitCode 1
     exit 1
 }
 
 if (-not (Test-Path $builtExe)) {
     Write-Error "Build succeeded, but $builtExe was not found."
+    Write-BuildExitCode 1
     exit 1
 }
 
@@ -112,6 +126,7 @@ if ($imports) {
     foreach ($blockedImport in $blockedImports) {
         if ($imports -match "\b$([regex]::Escape($blockedImport))\b") {
             Write-Error "Windows 7 incompatible import found: $blockedImport"
+            Write-BuildExitCode 1
             exit 1
         }
     }
@@ -123,6 +138,13 @@ if ($imports) {
 
 Copy-Item $builtExe $rootExe -Force
 Write-Host "Copied $builtExe to repo root $rootExe."
+
+if ($NoLaunch) {
+    Write-Host "Skipping launch (-NoLaunch)."
+    Write-BuildExitCode 0
+    Write-Host "Done. Windows 7-compatible release build succeeded with 0 errors."
+    exit 0
+}
 
 Write-Host "Launching backupsynctool.exe from repo root..."
 $expectedPath = (Resolve-Path $rootExe).Path
@@ -139,7 +161,9 @@ $running = Get-Process -Name "backupsynctool" -ErrorAction SilentlyContinue | Wh
 
 if (-not $running) {
     Write-Error "Build succeeded, but root backupsynctool.exe is not running."
+    Write-BuildExitCode 1
     exit 1
 }
 
+Write-BuildExitCode 0
 Write-Host "Done. Windows 7-compatible release build succeeded with 0 errors and Backup Sync Tool is running from repo root."
