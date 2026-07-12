@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const REMOTE_HEAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MANIFEST_NAME: &str = ".backupsynctool-manifest.json";
 const MANIFEST_VERSION: u32 = 2;
+const _: () = assert!(MANIFEST_VERSION == 2, "paths::manifest_state_dir assumes state-v2");
 const REMOTE_MANIFEST_NAME_S3: &str = ".backupsynctool-remote-manifest.json";
 
 fn remote_manifest_name(_cfg: &Config) -> &'static str {
@@ -1131,7 +1132,13 @@ fn relative_path_for_watch(watch_folder: &str, path: &Path) -> Option<String> {
 }
 
 fn local_path_for_relative(cfg: &Config, relative: &str) -> PathBuf {
-    PathBuf::from(&cfg.watch_folder).join(relative.replace('/', "\\"))
+    relative
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .fold(PathBuf::from(&cfg.watch_folder), |mut path, part| {
+            path.push(part);
+            path
+        })
 }
 
 fn load_local_manifest(cfg: &Config) -> SyncManifest {
@@ -1145,7 +1152,7 @@ fn save_local_manifest(cfg: &Config, manifest: &SyncManifest) {
     if let Ok(data) = serde_json::to_string_pretty(manifest) {
         let path = local_manifest_path(cfg);
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            let _ = crate::paths::ensure_dir(parent);
         }
         let temporary = path.with_extension("tmp");
         if fs::write(&temporary, data).is_ok() {
@@ -1157,11 +1164,7 @@ fn save_local_manifest(cfg: &Config, manifest: &SyncManifest) {
 fn local_manifest_path(cfg: &Config) -> PathBuf {
     use sha2::{Digest, Sha256};
 
-    let root = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("BackupSyncTool")
-        .join(format!("state-v{MANIFEST_VERSION}"));
+    let root = crate::paths::manifest_state_dir();
     let identity = if cfg.device_uuid.trim().is_empty() {
         format!("{}|{}", cfg.s3_endpoint, cfg.s3_bucket)
     } else {

@@ -103,9 +103,32 @@ pub fn effective_parallel_uploads(cfg: &Config) -> usize {
 }
 
 fn config_path() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap_or_default();
-    p.set_file_name("backupsynctool.json");
-    p
+    #[cfg(target_os = "macos")]
+    {
+        // Stable path so install to ~/.local/bin does not drop pairing.
+        let support = crate::paths::app_support_dir().join("backupsynctool.json");
+        if support.is_file() {
+            return support;
+        }
+        let mut beside = std::env::current_exe().unwrap_or_default();
+        beside.set_file_name("backupsynctool.json");
+        if beside.is_file() {
+            if let Some(parent) = support.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::copy(&beside, &support).is_ok() {
+                return support;
+            }
+            return beside;
+        }
+        support
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut p = std::env::current_exe().unwrap_or_default();
+        p.set_file_name("backupsynctool.json");
+        p
+    }
 }
 
 fn default_true() -> bool {

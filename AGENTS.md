@@ -1,6 +1,6 @@
 # Agent Instructions
 
-`SPEC.md` is the technical spec. `README.md` is the GitHub-facing summary. Do not add separate feature/spec markdown for implemented behavior; update `SPEC.md` instead.
+Docs: `SPEC.md` = technical contract + platform checklists. `README.md` = short GitHub summary. **Do not add more markdown** for product/behavior — edit `SPEC.md`. Leave `proxmox/` and `license-inspector/` alone (unrelated tooling).
 
 ## Three systems
 
@@ -16,7 +16,9 @@ Do not conflate pairing (`backup.rui.cam`) with object storage (`s3.rui.cam`).
 
 ## Build & Launch Rules
 
-After every code change, on a **Windows** host (Proxmox VM 102):
+After **every** code change that affects the running app, build and relaunch. Do not leave the user on a stale binary.
+
+### Windows (Proxmox VM 102)
 
 ```powershell
 .\build-local.ps1
@@ -25,6 +27,14 @@ After every code change, on a **Windows** host (Proxmox VM 102):
 Always from repo root. Target is **`x86_64-win7-windows-msvc`** (Win7-compatible). Never launch from `target/debug` or `target/release`.
 
 Confirm: release build 0 errors · root `backupsynctool.exe` copied · app running from repo root.
+
+### macOS (this machine / Darwin host)
+
+```bash
+./build-macos.sh
+```
+
+Script builds, codesigns, kills old process, launches `.app`, checks pid. Confirm: 0 errors · process running. Details in `SPEC.md`.
 
 ## Project Rules
 

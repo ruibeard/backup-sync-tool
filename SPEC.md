@@ -2,21 +2,26 @@
 
 ## Architecture
 
-| Layer | Implementation |
-| --- | --- |
-| UI | Raw Win32 through `windows-rs` |
-| HTTP | Blocking `ureq` |
-| S3 request construction | `rusty_s3` Sans-I/O actions |
-| Watcher | `notify` |
-| Secrets | Windows DPAPI |
-| Control plane | `https://backup.rui.cam` |
-| Object storage | Garage at `https://s3.rui.cam` |
+| Layer | Windows | macOS (v1) |
+| --- | --- | --- |
+| UI | Raw Win32 through `windows-rs` | Menu bar app (default); `--daemon` for LaunchAgent |
+| HTTP | Blocking `ureq` | same |
+| S3 request construction | `rusty_s3` Sans-I/O actions | same |
+| Watcher | `notify` | `notify` (FSEvents) |
+| Secrets | Windows DPAPI | Keychain (`cam.rui.backupsynctool`) |
+| Control plane | `https://backup.rui.cam` | same |
+| Object storage | Garage at `https://s3.rui.cam` | same |
 
-The client supports Windows 7 SP1 x64 through Windows 11. It contains no WebDAV compatibility, async runtime, AWS SDK, embedded browser, or data-migration logic.
+Windows client: Windows 7 SP1 x64 through Windows 11.  
+macOS client: Apple Silicon / Intel Darwin; unsigned sideload OK for now (no notarization required in v1).
+
+Neither client uses WebDAV, async runtime, AWS SDK, Electron/webview, or data-migration logic. **XD licence detection is Windows-only.**
 
 ## Configuration
 
 `backupsynctool.json` sits next to the executable. Only `schema_version: 2` with `transport: "s3"` is accepted as paired configuration. Everything else starts unpaired.
+
+On macOS, `s3_secret_enc` / `device_token_enc` store Keychain handles (`kc1:…`), not DPAPI blobs. `start_with_windows` means **start at login** (LaunchAgent → `backupsynctool --daemon`).
 
 ```json
 {
@@ -42,6 +47,13 @@ The client supports Windows 7 SP1 x64 through Windows 11. It contains no WebDAV 
 }
 ```
 
+Local sync state:
+
+| Platform | Manifest / multipart root |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\BackupSyncTool` |
+| macOS | `~/Library/Application Support/BackupSyncTool` |
+
 ## XD detection and pairing
 
 XD detection is optional and checks only:
@@ -53,7 +65,7 @@ XD detection is optional and checks only:
 
 The app decrypts `Number` and `ClientComercialName` and sends them separately with the detected install/backup paths and suggested customer label. A manually chosen folder does not pretend to be an XD installation. Pairing remains available when detection fails.
 
-The QR popup opens immediately, then displays the Laravel approval URL and code. The client polls until approved/rejected/expired. An approved response must contain `device_uuid`, device token, S3 endpoint/region/bucket/access key/secret, and the admin-approved customer name. Approval is persisted with DPAPI and immediately starts the upload engine.
+The QR popup is a dedicated pairing window (~380×500): title “Scan to pair…”, large QR of the approve URL, status “Waiting for admin approval…”, pairing code, expiry note, and approve link. Windows uses Win32 (`pair_qr.rs`); macOS uses a modeless `NSPanel` with the same layout. The client polls until approved/rejected/expired. An approved response must contain `device_uuid`, device token, S3 endpoint/region/bucket/access key/secret, and the admin-approved customer name. Approval is persisted with DPAPI (Windows) or Keychain (macOS) and immediately starts the upload engine. macOS never sends XD detection fields.
 
 Wire contract: `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`.
 
@@ -62,14 +74,14 @@ Wire contract: `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`.
 - Upload-only: startup scan plus recursive watcher for new/changed files.
 - Preserve each relative path at the customer bucket root.
 - Never delete a remote object because a local file disappeared.
-- Local manifest is keyed to `device_uuid` and stored atomically under `%LOCALAPPDATA%\BackupSyncTool\state-v2`.
+- Local manifest is keyed to `device_uuid` and stored atomically under the platform app-support `state-v2` directory (see table above).
 - Update the manifest only after S3 verifies the successful object size.
 - Periodically rescan and heal missing/size-mismatched objects.
 - Maximum two concurrent file uploads.
 
 Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use persistent multipart:
 
-- State under `%LOCALAPPDATA%\BackupSyncTool\multipart-v1` records source identity, upload ID, completed part number/size/ETag/digest, and phase.
+- State under app-support `multipart-v1` records source identity, upload ID, completed part number/size/ETag/digest, and phase.
 - Reconcile saved state with ListParts and never adopt server-only parts.
 - Retry transient idempotent operations.
 - Abort/restart if the source size or nanosecond mtime changes.
@@ -90,4 +102,22 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 ## Build and verification
 
-Use `build-local.ps1` on Windows VM 102. It builds `x86_64-win7-windows-msvc`, checks forbidden Windows 8+ imports, copies the executable to the repository root, and launches that copy. Validate release builds on both the Win7 test VM and a modern Windows VM.
+**Windows:** Use `build-local.ps1` on Windows VM 102. It builds `x86_64-win7-windows-msvc`, checks forbidden Windows 8+ imports, copies the executable to the repository root, and launches that copy. Validate release builds on both the Win7 test VM and a modern Windows VM.
+
+**macOS:** `./build-macos.sh` builds, signs, and launches `dist/macos/Backup Sync Tool.app`. Optional `--install` copies to `/Applications` then launches that copy. `--no-launch` builds only. Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
+
+| Action | How |
+| --- | --- |
+| Home | launch popup, or menu → Show Home… |
+| Watch folder | Set Watch Folder… |
+| Pair | Pair Device… → QR/code window → approve on backup.rui.cam |
+| Restore | Restore Backup… |
+| Logs | Open Logs |
+| Start at login | Toggle Start at Login (LaunchAgent → `--daemon`) |
+| Daemon only | `backupsynctool --daemon` |
+
+Config/state: `~/Library/Application Support/BackupSyncTool/` · Secrets: Keychain `cam.rui.backupsynctool`.
+
+Checklist: menubar icon · watch folder · pair QR window → sync · drop file uploads · quit/relaunch keeps Keychain · restore · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
+
+Limits: not notarized; update asset `backupsynctool-macos-*.tar.gz` on GitHub Releases.

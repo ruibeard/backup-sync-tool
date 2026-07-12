@@ -1,27 +1,43 @@
 // main.rs — entry point
 // #![windows_subsystem = "windows"] suppresses the console window on release builds.
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
+// Shared sync/transport still expose Windows UI entry points (`retry_uploads`,
+// `test_connection`, remote-manifest helpers). Those call sites live in
+// `src/ui` (Windows-only), so macOS release builds would spam dead_code noise.
+#![cfg_attr(not(windows), allow(dead_code))]
 
 mod config;
 mod logs;
 mod pairing;
+mod paths;
 mod secret;
 mod sync;
 mod transport;
-mod tray;
-mod ui;
 mod updater;
+
+#[cfg(target_os = "macos")]
+mod host;
+
+#[cfg(windows)]
+mod tray;
+#[cfg(windows)]
+mod ui;
+#[cfg(windows)]
 mod xd;
 
-use windows::core::w;
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, MUTEX_ALL_ACCESS};
-use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
-};
+#[cfg(target_os = "macos")]
+mod macos;
 
+#[cfg(windows)]
 fn main() {
+    use windows::core::w;
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, MUTEX_ALL_ACCESS};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+
     let start_minimized = !std::env::args().any(|arg| arg == "--show");
     unsafe {
         if OpenMutexW(MUTEX_ALL_ACCESS, false, w!("BackupSyncToolSingleton")).is_ok() {
@@ -39,4 +55,18 @@ fn main() {
         ui::run(hinstance, start_minimized);
         drop(instance_mutex);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    macos::run();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn main() {
+    eprintln!(
+        "backupsynctool: unsupported platform ({}). Windows and macOS only.",
+        std::env::consts::OS
+    );
+    std::process::exit(1);
 }

@@ -1,6 +1,9 @@
-// updater.rs — check GitHub releases API for a newer version, download, replace in place, restart
+//! updater.rs — check GitHub releases, download, replace in place, restart.
+//! Windows: `.exe` asset + `.bat` swap. macOS: `backupsynctool-macos-*.tar.gz` or raw binary.
 
 use serde::Deserialize;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 const RELEASES_API: &str = "https://api.github.com/repos/ruibeard/backup-sync-tool/releases/latest";
 
@@ -53,11 +56,13 @@ pub fn check(current_version: &str) -> CheckResult {
         return CheckResult::UpToDate;
     }
 
-    // Find the .exe asset
-    let asset = match release.assets.iter().find(|a| a.name.ends_with(".exe")) {
+    let asset = match find_asset_for_platform(&release.assets) {
         Some(asset) => asset,
         None => {
-            return CheckResult::Error(format!("Release {version} has no .exe asset attached"));
+            return CheckResult::Error(format!(
+                "Release {version} has no asset for this platform ({})",
+                std::env::consts::OS
+            ));
         }
     };
 
@@ -65,6 +70,38 @@ pub fn check(current_version: &str) -> CheckResult {
         version,
         url: asset.browser_download_url.clone(),
     })
+}
+
+fn find_asset_for_platform(assets: &[GhAsset]) -> Option<&GhAsset> {
+    #[cfg(windows)]
+    {
+        return assets.iter().find(|a| a.name.ends_with(".exe"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let arch = std::env::consts::ARCH; // aarch64 | x86_64
+        let arch_aliases: &[&str] = match arch {
+            "aarch64" => &["aarch64", "arm64"],
+            other => &[other],
+        };
+        for alias in arch_aliases {
+            let want = format!("backupsynctool-macos-{alias}.tar.gz");
+            if let Some(a) = assets.iter().find(|a| a.name == want) {
+                return Some(a);
+            }
+        }
+        if let Some(a) = assets.iter().find(|a| {
+            a.name.starts_with("backupsynctool-macos-") && a.name.ends_with(".tar.gz")
+        }) {
+            return Some(a);
+        }
+        return assets.iter().find(|a| a.name == "backupsynctool");
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = assets;
+        None
+    }
 }
 
 pub fn download_and_replace(url: &str, progress: impl Fn(u8)) -> Result<(), String> {
@@ -85,7 +122,6 @@ pub fn download_and_replace(url: &str, progress: impl Fn(u8)) -> Result<(), Stri
     let mut chunk = [0u8; 65536];
 
     loop {
-        use std::io::Read;
         let n = reader.read(&mut chunk).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
@@ -97,12 +133,34 @@ pub fn download_and_replace(url: &str, progress: impl Fn(u8)) -> Result<(), Stri
         }
     }
 
-    // Write to .tmp next to the current exe, then bat-swap-restart
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+
+    #[cfg(windows)]
+    {
+        replace_windows(&exe, &buf)?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        replace_macos(&exe, url, &buf)?;
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (exe, buf, url);
+        return Err("auto-update unsupported on this OS".into());
+    }
+
+    #[allow(unreachable_code)]
+    {
+        std::process::exit(0);
+    }
+}
+
+#[cfg(windows)]
+fn replace_windows(exe: &Path, buf: &[u8]) -> Result<(), String> {
     let tmp = exe.with_extension("tmp");
     let bat_path = exe.with_extension("update.bat");
 
-    std::fs::write(&tmp, &buf).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, buf).map_err(|e| e.to_string())?;
 
     let bat = format!(
         "@echo off\r\ntimeout /t 2 /nobreak >nul\r\nmove /y \"{tmp}\" \"{exe}\"\r\nstart \"\" \"{exe}\"\r\ndel \"%~f0\"\r\n",
@@ -115,8 +173,96 @@ pub fn download_and_replace(url: &str, progress: impl Fn(u8)) -> Result<(), Stri
         .args(["/c", &bat_path.to_string_lossy()])
         .spawn()
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
-    std::process::exit(0);
+#[cfg(target_os = "macos")]
+fn replace_macos(exe: &Path, url: &str, buf: &[u8]) -> Result<(), String> {
+    let new_bin = if url.contains(".tar.gz") || looks_like_gzip(buf) {
+        extract_via_system_tar(buf)?
+    } else {
+        buf.to_vec()
+    };
+
+    let tmp = exe.with_extension("tmp");
+    std::fs::write(&tmp, &new_bin).map_err(|e| e.to_string())?;
+    set_executable(&tmp)?;
+
+    let script = format!(
+        "#!/bin/bash\nsleep 1\nmv -f \"{tmp}\" \"{exe}\"\nchmod +x \"{exe}\"\nrm -f \"{script}\"\nexec \"{exe}\"\n",
+        tmp = tmp.display(),
+        exe = exe.display(),
+        script = exe.with_extension("update.sh").display(),
+    );
+    let script_path = exe.with_extension("update.sh");
+    std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
+    set_executable(&script_path)?;
+
+    std::process::Command::new("bash")
+        .arg(&script_path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn looks_like_gzip(buf: &[u8]) -> bool {
+    buf.len() >= 2 && buf[0] == 0x1f && buf[1] == 0x8b
+}
+
+#[cfg(target_os = "macos")]
+fn extract_via_system_tar(buf: &[u8]) -> Result<Vec<u8>, String> {
+    let dir = std::env::temp_dir().join(format!(
+        "backupsynctool-update-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let tgz = dir.join("update.tar.gz");
+    std::fs::write(&tgz, buf).map_err(|e| e.to_string())?;
+
+    let status = std::process::Command::new("tar")
+        .args(["-xzf", &tgz.to_string_lossy(), "-C", &dir.to_string_lossy()])
+        .status()
+        .map_err(|e| format!("tar: {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err("tar extract failed".into());
+    }
+
+    let found = find_file_named(&dir, "backupsynctool")?;
+    let bytes = std::fs::read(&found).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn find_file_named(root: &Path, name: &str) -> Result<PathBuf, String> {
+    fn walk(dir: &Path, name: &str) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = walk(&path, name) {
+                    return Some(found);
+                }
+            } else if path.file_name().and_then(|s| s.to_str()) == Some(name) {
+                return Some(path);
+            }
+        }
+        None
+    }
+    walk(root, name).ok_or_else(|| format!("archive has no {name} binary"))
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)
+        .map_err(|e| e.to_string())?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).map_err(|e| e.to_string())
 }
 
 fn is_newer(candidate: &str, current: &str) -> bool {
@@ -128,6 +274,20 @@ fn is_newer(candidate: &str, current: &str) -> bool {
         (major, minor, patch)
     }
     parse(candidate) > parse(current)
+}
+
+/// Background-friendly check; returns a short status string for logs/UI.
+pub fn check_status_line(current_version: &str) -> String {
+    match check(current_version) {
+        CheckResult::UpToDate => "updater: up to date".into(),
+        CheckResult::UpdateAvailable(info) => {
+            format!(
+                "updater: v{} available — choose [6] to install",
+                info.version
+            )
+        }
+        CheckResult::Error(e) => format!("updater: check failed ({e})"),
+    }
 }
 
 #[cfg(test)]
@@ -155,7 +315,6 @@ mod tests {
         match check("2026.0.0") {
             CheckResult::UpdateAvailable(info) => {
                 assert!(!info.url.is_empty());
-                assert!(info.url.ends_with(".exe"));
                 assert!(is_newer(&info.version, "2026.0.0"));
             }
             CheckResult::UpToDate => panic!("expected update from 2026.0.0"),

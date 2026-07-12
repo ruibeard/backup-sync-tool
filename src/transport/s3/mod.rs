@@ -20,7 +20,6 @@ use quick_xml::Reader;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 

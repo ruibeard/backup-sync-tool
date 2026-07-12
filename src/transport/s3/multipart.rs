@@ -1,6 +1,6 @@
 //! Persistent S3 multipart upload helpers (Phase 2).
 //!
-//! Resume state lives under `%LOCALAPPDATA%/BackupSyncTool/multipart-v1/`
+//! Resume state lives under [`crate::paths::multipart_state_dir`]
 //! (outside the watched folder). Filename is SHA-256 of the storage identity.
 
 use crate::transport::TransportError;
@@ -117,16 +117,7 @@ pub fn storage_identity(endpoint: &str, bucket: &str, object_key: &str) -> Strin
 }
 
 pub fn multipart_state_dir() -> PathBuf {
-    if let Ok(base) = std::env::var("LOCALAPPDATA") {
-        if !base.trim().is_empty() {
-            return PathBuf::from(base)
-                .join("BackupSyncTool")
-                .join("multipart-v1");
-        }
-    }
-    std::env::temp_dir()
-        .join("BackupSyncTool")
-        .join("multipart-v1")
+    crate::paths::multipart_state_dir()
 }
 
 pub fn state_path_for_identity(dir: &Path, identity: &str) -> PathBuf {
@@ -355,7 +346,7 @@ pub fn new_client_upload_token() -> String {
 }
 
 pub fn ensure_state_dir(dir: &Path) -> Result<(), TransportError> {
-    fs::create_dir_all(dir).map_err(|e| TransportError::Other(e.to_string()))
+    crate::paths::ensure_dir(dir).map_err(|e| TransportError::Other(e.to_string()))
 }
 
 pub fn load_state(path: &Path) -> Result<Option<MultipartState>, TransportError> {

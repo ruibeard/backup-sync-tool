@@ -8,24 +8,6 @@ name = "backupsynctool"
 path = "src/main.rs"
 
 [dependencies]
-# Win32 API bindings — only features we actually use
-windows = { version = "0.62.2", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Controls",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_Common",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_Graphics_Gdi",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_System_Com",
-    "Win32_System_Registry",
-    "Win32_System_SystemInformation",
-    "Win32_Security_Cryptography",
-    "Win32_Storage_FileSystem",
-] }
-
 bytemuck = "1"
 
 # JSON config
@@ -55,6 +37,58 @@ qrcodegen = "1"
 # Bridge icons rendered from mockups.html emoji tiles
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Win32 API bindings — Windows targets only
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+] }
+
+# Keychain + menubar (macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+tray-icon = { version = "0.24", default-features = false }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSThread",
+    "NSData",
+    "NSURL",
+    "NSGeometry",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSRunningApplication",
+    "NSResponder",
+    "NSAlert",
+    "NSImage",
+    "NSImageView",
+    "NSView",
+    "NSWindow",
+    "NSPanel",
+    "NSButton",
+    "NSTextField",
+    "NSControl",
+    "NSColor",
+    "NSFont",
+    "NSWorkspace",
+    "NSGraphics",
+] }
+dispatch = "0.2"
+
 [profile.release]
 opt-level = "z"       # optimise for size
 lto = true            # link-time optimisation
@@ -62,6 +96,6 @@ codegen-units = 1     # single codegen unit for max LTO
 strip = true          # strip debug symbols
 panic = "abort"       # no unwinding machinery
 
-[build-dependencies]
-# embed manifest + icon into the .exe
+# embed manifest + icon into the .exe (Windows host/target only)
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
