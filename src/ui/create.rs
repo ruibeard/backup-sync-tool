@@ -123,6 +123,9 @@ unsafe fn on_create(hwnd: HWND) {
     );
     apply_server_readonly(hwnd);
     update_pair_button_enabled(hwnd);
+    if !is_paired(&cfg) && !cfg.watch_folder.trim().is_empty() {
+        apply_pairing_folder_hint(hwnd, &cfg.watch_folder);
+    }
 
     let hicon = LoadIconW(hi, w!("APP_ICON_IDLE"))
         .unwrap_or(LoadIconW(None, IDI_APPLICATION).unwrap_or_default());
@@ -149,9 +152,7 @@ unsafe fn on_create(hwnd: HWND) {
         }
     }
 
-    if !is_paired(&cfg)
-        && (cfg.remote_folder.trim().is_empty() || is_root_remote_folder(&cfg.remote_folder))
-    {
+    if !is_paired(&cfg) {
         std::thread::spawn(move || {
             if let Some(detected) = crate::xd::detect_customer_hint() {
                 unsafe {

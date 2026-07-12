@@ -380,23 +380,22 @@ unsafe fn on_app_remote_folder(hwnd: HWND, lp: LPARAM) -> LRESULT {
     if is_paired(&stmut(hwnd).config) {
         return LRESULT(0);
     }
-    if stmut(hwnd).config.remote_folder.trim().is_empty() {
-        let st = stmut(hwnd);
-        st.config.remote_folder = detected.folder.clone();
-        st.detected_customer = non_empty(detected.customer.clone());
-        st.remote_folder_from_xd = true;
-        let display = destination_display_text(
-            &st.config,
-            st.remote_folder_from_xd,
-            st.detected_customer.as_deref(),
-        );
-        let _ = SetWindowTextW(
-            GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-            &hstring(&display),
-        );
-        invalidate_bridge(hwnd);
-        update_server_tooltip(hwnd);
-    }
+
+    let st = stmut(hwnd);
+    st.config.remote_folder = detected.folder.clone();
+    st.detected_customer = non_empty(detected.customer.clone());
+    st.remote_folder_from_xd = true;
+    let display = destination_display_text(
+        &st.config,
+        st.remote_folder_from_xd,
+        st.detected_customer.as_deref(),
+    );
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
+        &hstring(&display),
+    );
+    invalidate_bridge(hwnd);
+    update_server_tooltip(hwnd);
     LRESULT(0)
 }
 

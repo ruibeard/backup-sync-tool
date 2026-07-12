@@ -51,6 +51,40 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
     LRESULT(0)
 }
 
+unsafe fn apply_pairing_folder_hint(hwnd: HWND, watch_folder: &str) {
+    if is_paired(&stmut(hwnd).config) {
+        return;
+    }
+
+    let (folder, customer, from_xd) = if let Some(detected) = crate::xd::detect_customer_hint() {
+        (
+            detected.folder,
+            non_empty(detected.customer),
+            true,
+        )
+    } else if let Some(hint) = crate::xd::build_host_folder_hint(watch_folder) {
+        (hint, None, false)
+    } else {
+        return;
+    };
+
+    let st = stmut(hwnd);
+    st.config.remote_folder = folder;
+    st.detected_customer = customer;
+    st.remote_folder_from_xd = from_xd;
+    let display = destination_display_text(
+        &st.config,
+        st.remote_folder_from_xd,
+        st.detected_customer.as_deref(),
+    );
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
+        &hstring(&display),
+    );
+    invalidate_bridge(hwnd);
+    update_server_tooltip(hwnd);
+}
+
 unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
     let title: Vec<u16> = "Select local folder\0".encode_utf16().collect();
     let previous_folder = gettext(hwnd, IDC_WATCH_FOLDER);
@@ -97,23 +131,7 @@ unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
             let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
             read_ctrls(hwnd, stmut(hwnd));
             update_pair_button_enabled(hwnd);
-            if !is_paired(&stmut(hwnd).config) && !stmut(hwnd).remote_folder_from_xd {
-                if let Some(hint) = crate::xd::build_host_folder_hint(&s) {
-                    let st = stmut(hwnd);
-                    st.config.remote_folder = hint.clone();
-                    let display = destination_display_text(
-                        &st.config,
-                        st.remote_folder_from_xd,
-                        st.detected_customer.as_deref(),
-                    );
-                    let _ = SetWindowTextW(
-                        GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-                        &hstring(&display),
-                    );
-                    invalidate_bridge(hwnd);
-                    update_server_tooltip(hwnd);
-                }
-            }
+            apply_pairing_folder_hint(hwnd, &s);
             layout_main(hwnd);
             if persist_after_select && !s.trim().is_empty() {
                 if is_paired(&stmut(hwnd).config) {

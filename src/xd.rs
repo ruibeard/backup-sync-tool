@@ -33,7 +33,13 @@ pub fn detect_customer_hint() -> Option<DetectedCustomer> {
         return None;
     }
 
-    detect_customer_hint_native().ok()
+    match detect_customer_hint_native() {
+        Ok(detected) => Some(detected),
+        Err(err) => {
+            crate::logs::append(&format!("XD licence detection failed: {err}"));
+            None
+        }
+    }
 }
 
 /// Folder hint for pairing when XD licence data is unavailable.
