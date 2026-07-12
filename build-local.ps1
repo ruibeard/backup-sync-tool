@@ -23,9 +23,14 @@ if ($existing) {
     }
 }
 
+# Native tools write progress to stderr; do not treat that as terminating under Stop.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+
 Write-Host "Ensuring nightly Rust toolchain is installed..."
 rustup toolchain install nightly
 if ($LASTEXITCODE -ne 0) {
+    $ErrorActionPreference = $previousErrorAction
     Write-Error "rustup toolchain install nightly failed"
     exit 1
 }
@@ -33,6 +38,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Ensuring nightly rust-src is installed..."
 rustup component add rust-src --toolchain nightly
 if ($LASTEXITCODE -ne 0) {
+    $ErrorActionPreference = $previousErrorAction
     Write-Error "rustup component add rust-src failed"
     exit 1
 }
@@ -48,6 +54,7 @@ if ([string]::IsNullOrWhiteSpace($env:RUSTFLAGS)) {
 cargo +nightly build -Z build-std=std,panic_abort --release --target $target
 $buildExit = $LASTEXITCODE
 $env:RUSTFLAGS = $previousRustFlags
+$ErrorActionPreference = $previousErrorAction
 if ($buildExit -ne 0) {
     Write-Error "cargo build failed"
     exit 1
