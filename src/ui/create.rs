@@ -124,7 +124,11 @@ unsafe fn on_create(hwnd: HWND) {
     apply_server_readonly(hwnd);
     update_pair_button_enabled(hwnd);
     if !is_paired(&cfg) && !cfg.watch_folder.trim().is_empty() {
-        apply_pairing_folder_hint(hwnd, &cfg.watch_folder);
+        if crate::xd::is_xd_default_watch_folder(&cfg.watch_folder) {
+            // leave async XD detection below
+        } else {
+            apply_pairing_folder_hint(hwnd, &cfg.watch_folder);
+        }
     }
 
     let hicon = LoadIconW(hi, w!("APP_ICON_IDLE"))
@@ -152,7 +156,11 @@ unsafe fn on_create(hwnd: HWND) {
         }
     }
 
-    if !is_paired(&cfg) {
+    let watch_for_xd = cfg.watch_folder.clone();
+    if !is_paired(&cfg)
+        && (watch_for_xd.trim().is_empty()
+            || crate::xd::is_xd_default_watch_folder(&watch_for_xd))
+    {
         std::thread::spawn(move || {
             if let Some(detected) = crate::xd::detect_customer_hint() {
                 unsafe {

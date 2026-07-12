@@ -25,6 +25,28 @@ pub fn default_watch_folder() -> Option<String> {
     path.is_dir().then(|| path.display().to_string())
 }
 
+/// True when the watch folder is still the XD default backups path.
+/// Custom folders (user Chose another path) must not use the XD customer name.
+pub fn is_xd_default_watch_folder(watch_folder: &str) -> bool {
+    let trimmed = watch_folder.trim().trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return false;
+    }
+    let left = Path::new(trimmed);
+    let right = Path::new(DEFAULT_WATCH_FOLDER);
+    path_eq_ignore_case(left, right)
+}
+
+fn path_eq_ignore_case(left: &Path, right: &Path) -> bool {
+    let Some(left_s) = left.to_str() else {
+        return false;
+    };
+    let Some(right_s) = right.to_str() else {
+        return false;
+    };
+    left_s.eq_ignore_ascii_case(right_s)
+}
+
 pub fn detect_customer_hint() -> Option<DetectedCustomer> {
     if !Path::new(XD_ROOT).is_dir()
         || !Path::new(XD_LICENSE_PATH).is_file()
@@ -42,7 +64,7 @@ pub fn detect_customer_hint() -> Option<DetectedCustomer> {
     }
 }
 
-/// Folder hint for pairing when XD licence data is unavailable.
+/// Folder hint for pairing when XD licence data is unavailable / not applicable.
 /// Uses `{COMPUTERNAME}-{watch-folder-basename}` (same shape as XD `Number-Customer`).
 pub fn build_host_folder_hint(watch_folder: &str) -> Option<String> {
     let path = Path::new(watch_folder.trim());
@@ -69,11 +91,17 @@ pub fn build_host_folder_hint(watch_folder: &str) -> Option<String> {
     }
 }
 
-/// Prefer XD licence folder; otherwise derive from hostname + selected watch folder.
+/// Pairing `detected_folder` hint:
+/// - watch folder is XD default (`C:\XDSoftware\backups`) → XD licence name
+/// - user chose any other folder → `{hostname}-{folder}` (XD ignored)
 pub fn pairing_folder_hint(watch_folder: &str) -> Option<String> {
-    detect_customer_hint()
-        .and_then(|detected| non_empty_folder(detected.folder))
-        .or_else(|| build_host_folder_hint(watch_folder))
+    if is_xd_default_watch_folder(watch_folder) {
+        return detect_customer_hint()
+            .and_then(|detected| non_empty_folder(detected.folder))
+            .or_else(|| build_host_folder_hint(watch_folder));
+    }
+
+    build_host_folder_hint(watch_folder)
 }
 
 fn non_empty_folder(value: String) -> Option<String> {
@@ -210,8 +238,8 @@ fn slugify(value: &str) -> String {
 mod tests {
     use super::{
         build_host_folder_hint, build_remote_folder, detect_customer_hint,
-        is_encrypted_empty_placeholder, pairing_folder_hint, slugify, strip_utf8_bom,
-        XD_LICENSE_PATH, XD_PEM_PATH,
+        is_encrypted_empty_placeholder, is_xd_default_watch_folder, pairing_folder_hint, slugify,
+        strip_utf8_bom, DEFAULT_WATCH_FOLDER, XD_LICENSE_PATH, XD_PEM_PATH,
     };
     use std::path::Path;
     use std::process::Command;
@@ -253,6 +281,27 @@ mod tests {
         }
         let hint = pairing_folder_hint(dir.to_str().unwrap()).expect("pairing hint");
         assert_eq!(hint, format!("{host_slug}-pairing-hint-test"));
+    }
+
+    #[test]
+    fn xd_default_watch_folder_is_detected() {
+        assert!(is_xd_default_watch_folder(DEFAULT_WATCH_FOLDER));
+        assert!(is_xd_default_watch_folder(r"C:\XDSoftware\backups\"));
+        assert!(is_xd_default_watch_folder(r"c:\xdsoftware\backups"));
+        assert!(!is_xd_default_watch_folder(r"C:\Users\user\Desktop\sync"));
+        assert!(!is_xd_default_watch_folder(""));
+    }
+
+    #[test]
+    fn pairing_hint_uses_host_when_watch_is_custom() {
+        let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "TEST-PC".into());
+        let host_slug = slugify(host.trim());
+        let dir = std::env::temp_dir().join("custom-sync-folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hint = pairing_folder_hint(dir.to_str().unwrap()).expect("host hint");
+        assert_eq!(hint, format!("{host_slug}-custom-sync-folder"));
+        // Must not return an XD licence folder even if XD is present on this machine.
+        assert!(!hint.starts_with("XDPT."));
     }
 
     #[test]

@@ -380,6 +380,12 @@ unsafe fn on_app_remote_folder(hwnd: HWND, lp: LPARAM) -> LRESULT {
     if is_paired(&stmut(hwnd).config) {
         return LRESULT(0);
     }
+    // User already Chose a non-XD folder — do not overwrite with licence name.
+    if !crate::xd::is_xd_default_watch_folder(&stmut(hwnd).config.watch_folder)
+        && !stmut(hwnd).config.watch_folder.trim().is_empty()
+    {
+        return LRESULT(0);
+    }
 
     let st = stmut(hwnd);
     st.config.remote_folder = detected.folder.clone();

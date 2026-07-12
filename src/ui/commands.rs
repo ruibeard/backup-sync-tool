@@ -56,12 +56,19 @@ unsafe fn apply_pairing_folder_hint(hwnd: HWND, watch_folder: &str) {
         return;
     }
 
-    let (folder, customer, from_xd) = if let Some(detected) = crate::xd::detect_customer_hint() {
-        (
-            detected.folder,
-            non_empty(detected.customer),
-            true,
-        )
+    let use_xd = crate::xd::is_xd_default_watch_folder(watch_folder);
+    let (folder, customer, from_xd) = if use_xd {
+        if let Some(detected) = crate::xd::detect_customer_hint() {
+            (
+                detected.folder,
+                non_empty(detected.customer),
+                true,
+            )
+        } else if let Some(hint) = crate::xd::build_host_folder_hint(watch_folder) {
+            (hint, None, false)
+        } else {
+            return;
+        }
     } else if let Some(hint) = crate::xd::build_host_folder_hint(watch_folder) {
         (hint, None, false)
     } else {
@@ -197,16 +204,24 @@ unsafe fn do_pair_device(hwnd: HWND) {
     let st = stmut(hwnd);
     let api_base = st.config.pair_api_base.clone();
     let watch_folder = st.config.watch_folder.clone();
-    let detected_folder = crate::xd::pairing_folder_hint(&watch_folder);
+    // XD name only while watch is still C:\XDSoftware\backups.
+    // Any other Chosen folder → hostname-folder, XD ignored.
+    let xd = if crate::xd::is_xd_default_watch_folder(&watch_folder) {
+        crate::xd::detect_customer_hint()
+    } else {
+        None
+    };
+    let detected_folder = xd
+        .as_ref()
+        .and_then(|d| {
+            let folder = d.folder.trim();
+            (!folder.is_empty()).then(|| d.folder.clone())
+        })
+        .or_else(|| crate::xd::build_host_folder_hint(&watch_folder));
     if let Some(folder) = detected_folder.as_ref() {
-        if let Some(detected) = crate::xd::detect_customer_hint() {
-            st.config.remote_folder = detected.folder.clone();
-            st.detected_customer = non_empty(detected.customer);
-            st.remote_folder_from_xd = true;
-        } else {
-            st.config.remote_folder = folder.clone();
-            st.remote_folder_from_xd = false;
-        }
+        st.config.remote_folder = folder.clone();
+        st.remote_folder_from_xd = xd.is_some();
+        st.detected_customer = xd.as_ref().and_then(|d| non_empty(d.customer.clone()));
         let display = destination_display_text(
             &st.config,
             st.remote_folder_from_xd,
