@@ -82,9 +82,9 @@ fn non_empty_folder(value: String) -> Option<String> {
 }
 
 fn detect_customer_hint_native() -> Result<DetectedCustomer, String> {
-    let license = fs::read_to_string(XD_LICENSE_PATH).map_err(|err| err.to_string())?;
+    let license = read_text_file(XD_LICENSE_PATH)?;
     let root: Value = serde_json::from_str(&license).map_err(|err| err.to_string())?;
-    let pem = fs::read_to_string(XD_PEM_PATH).map_err(|err| err.to_string())?;
+    let pem = read_text_file(XD_PEM_PATH)?;
     let public_key = read_public_key(&pem)?;
 
     let number = decrypt_required_json_field(&root, "Number", &public_key)?;
@@ -95,6 +95,16 @@ fn detect_customer_hint_native() -> Result<DetectedCustomer, String> {
     }
 
     Ok(DetectedCustomer { folder, customer })
+}
+
+fn read_text_file(path: &str) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|err| err.to_string())?;
+    let text = String::from_utf8(bytes).map_err(|err| err.to_string())?;
+    Ok(strip_utf8_bom(&text).to_string())
+}
+
+fn strip_utf8_bom(value: &str) -> &str {
+    value.strip_prefix('\u{feff}').unwrap_or(value)
 }
 
 fn read_public_key(pem: &str) -> Result<RsaPublicKey, String> {
@@ -200,7 +210,7 @@ fn slugify(value: &str) -> String {
 mod tests {
     use super::{
         build_host_folder_hint, build_remote_folder, detect_customer_hint,
-        is_encrypted_empty_placeholder, pairing_folder_hint, slugify,
+        is_encrypted_empty_placeholder, pairing_folder_hint, slugify, strip_utf8_bom,
         XD_LICENSE_PATH, XD_PEM_PATH,
     };
     use std::path::Path;
@@ -243,6 +253,12 @@ mod tests {
         }
         let hint = pairing_folder_hint(dir.to_str().unwrap()).expect("pairing hint");
         assert_eq!(hint, format!("{host_slug}-pairing-hint-test"));
+    }
+
+    #[test]
+    fn strip_utf8_bom_removes_leading_bom() {
+        assert_eq!(strip_utf8_bom("\u{feff}{\"Number\":\"x\"}"), "{\"Number\":\"x\"}");
+        assert_eq!(strip_utf8_bom("{\"Number\":\"x\"}"), "{\"Number\":\"x\"}");
     }
 
     #[test]

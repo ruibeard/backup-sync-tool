@@ -197,11 +197,28 @@ unsafe fn do_pair_device(hwnd: HWND) {
     let st = stmut(hwnd);
     let api_base = st.config.pair_api_base.clone();
     let watch_folder = st.config.watch_folder.clone();
-    let mut detected_folder = if st.remote_folder_from_xd {
-        non_empty(st.config.remote_folder.clone())
-    } else {
-        None
-    };
+    let detected_folder = crate::xd::pairing_folder_hint(&watch_folder);
+    if let Some(folder) = detected_folder.as_ref() {
+        if let Some(detected) = crate::xd::detect_customer_hint() {
+            st.config.remote_folder = detected.folder.clone();
+            st.detected_customer = non_empty(detected.customer);
+            st.remote_folder_from_xd = true;
+        } else {
+            st.config.remote_folder = folder.clone();
+            st.remote_folder_from_xd = false;
+        }
+        let display = destination_display_text(
+            &st.config,
+            st.remote_folder_from_xd,
+            st.detected_customer.as_deref(),
+        );
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
+            &hstring(&display),
+        );
+        invalidate_bridge(hwnd);
+        update_server_tooltip(hwnd);
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     st.pair_id = st.pair_id.wrapping_add(1);
     let pair_id = st.pair_id;
@@ -214,11 +231,6 @@ unsafe fn do_pair_device(hwnd: HWND) {
     set_status_strip_text(hwnd, "Pairing \u{00B7} waiting for approval");
 
     std::thread::spawn(move || {
-        if detected_folder.is_none() {
-            if let Some(hint) = crate::xd::pairing_folder_hint(&watch_folder) {
-                detected_folder.get_or_insert(hint);
-            }
-        }
         let machine = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_string());
         let windows_user = std::env::var("USERNAME").unwrap_or_default();
         let version = env!("CARGO_PKG_VERSION");
