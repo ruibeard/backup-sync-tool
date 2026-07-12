@@ -87,22 +87,27 @@ Do not conflate pairing URL (`backup.rui.cam`) with S3 endpoint (`s3.rui.cam`). 
 
 ## Cutover checklist (current)
 
+**Cutover is not finished** until operator Forge wiring + Windows build + re-pair smoke succeed. Code and MinIO edge are ahead of production.
+
 Verified from Mac (2026-07-12):
 
 | Check | Status |
 | --- | --- |
-| `https://s3.rui.cam/minio/health/live` | 200, Let's Encrypt |
+| `https://s3.rui.cam/minio/health/live` | 200, Let's Encrypt — **certs OK**; router `:443` enough |
+| MinIO `:9000`/`:9001` public | must stay closed (Caddy terminates TLS) |
 | `https://backup.rui.cam/api/pair/start` | 200, `approve_url` on backup.rui.cam |
 | Proxmox `/root/s3-minio-creds.txt` | present |
 | Win10 VM 102 | QEMU running; build via guest agent / desktop |
 
-Still operator / Forge (not verifiable from client repo alone):
+Still operator-only (agents never access Forge):
 
-- [ ] Forge `.env` has `S3_BACKUP_PUBLIC_ENDPOINT=https://s3.rui.cam` (not backup.rui.cam) + admin keys from Proxmox creds file
-- [ ] Forge deploys branch with S3 pairing (`s3-multipart-implementation`)
-- [ ] Approve a test pair → client receives `s3_endpoint: https://s3.rui.cam`
+- [ ] Forge `.env` has `S3_BACKUP_PUBLIC_ENDPOINT=https://s3.rui.cam` (not backup.rui.cam, not LAN) + admin keys from Proxmox creds file + `S3_BACKUP_BUCKET`
+- [ ] Forge deploys branch with S3 pairing (`s3-multipart-implementation`) + `config:clear`
+- [ ] `storage:ensure-device` → approve a test pair → client receives `s3_endpoint: https://s3.rui.cam`
 - [ ] Win10 VM 102: `git pull` + `.\build-local.ps1` (Win7 target)
-- [ ] Re-pair any device still on old WebDAV config; smoke upload
+- [ ] Re-pair any device still on old WebDAV config; smoke upload to MinIO
+
+See `docs/plans/2026-07-11-HANDOFF.md`.
 
 ## Configuration
 

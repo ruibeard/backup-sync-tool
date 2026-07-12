@@ -1171,6 +1171,9 @@ fn destination_display_text(
         }
         return cfg.remote_folder.clone();
     }
+    if !cfg.remote_folder.trim().is_empty() {
+        return cfg.remote_folder.clone();
+    }
     "Waiting for pairing approval".to_string()
 }
 

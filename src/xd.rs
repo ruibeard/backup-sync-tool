@@ -36,6 +36,45 @@ pub fn detect_customer_hint() -> Option<DetectedCustomer> {
     detect_customer_hint_native().ok()
 }
 
+/// Folder hint for pairing when XD licence data is unavailable.
+/// Uses `{COMPUTERNAME}-{watch-folder-basename}` (same shape as XD `Number-Customer`).
+pub fn build_host_folder_hint(watch_folder: &str) -> Option<String> {
+    let path = Path::new(watch_folder.trim());
+    if !path.is_dir() {
+        return None;
+    }
+
+    let folder_name = path.file_name()?.to_str()?.trim();
+    if folder_name.is_empty() {
+        return None;
+    }
+
+    let hostname = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows-PC".to_string());
+    let host_slug = slugify(hostname.trim());
+    if host_slug.is_empty() {
+        return None;
+    }
+
+    let folder_slug = slugify(folder_name);
+    if folder_slug.is_empty() {
+        Some(host_slug)
+    } else {
+        Some(format!("{host_slug}-{folder_slug}"))
+    }
+}
+
+/// Prefer XD licence folder; otherwise derive from hostname + selected watch folder.
+pub fn pairing_folder_hint(watch_folder: &str) -> Option<String> {
+    detect_customer_hint()
+        .and_then(|detected| non_empty_folder(detected.folder))
+        .or_else(|| build_host_folder_hint(watch_folder))
+}
+
+fn non_empty_folder(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn detect_customer_hint_native() -> Result<DetectedCustomer, String> {
     let license = fs::read_to_string(XD_LICENSE_PATH).map_err(|err| err.to_string())?;
     let root: Value = serde_json::from_str(&license).map_err(|err| err.to_string())?;
@@ -154,7 +193,8 @@ fn slugify(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_remote_folder, detect_customer_hint, is_encrypted_empty_placeholder, slugify,
+        build_host_folder_hint, build_remote_folder, detect_customer_hint,
+        is_encrypted_empty_placeholder, pairing_folder_hint, slugify,
         XD_LICENSE_PATH, XD_PEM_PATH,
     };
     use std::path::Path;
@@ -174,6 +214,29 @@ mod tests {
             "XDPT.59655-Palmeira-Minimercado"
         );
         assert_eq!(build_remote_folder("XDPT.59655", ""), "XDPT.59655");
+    }
+
+    #[test]
+    fn build_host_folder_hint_uses_hostname_and_folder_basename() {
+        let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "TEST-PC".into());
+        let host_slug = slugify(host.trim());
+        let dir = std::env::temp_dir().join("Palmeira Backups");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hint = build_host_folder_hint(dir.to_str().unwrap()).expect("host hint");
+        assert_eq!(hint, format!("{host_slug}-Palmeira-Backups"));
+    }
+
+    #[test]
+    fn pairing_folder_hint_falls_back_to_host_folder_when_xd_missing() {
+        let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "TEST-PC".into());
+        let host_slug = slugify(host.trim());
+        let dir = std::env::temp_dir().join("pairing-hint-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        if detect_customer_hint().is_some() {
+            return;
+        }
+        let hint = pairing_folder_hint(dir.to_str().unwrap()).expect("pairing hint");
+        assert_eq!(hint, format!("{host_slug}-pairing-hint-test"));
     }
 
     #[test]

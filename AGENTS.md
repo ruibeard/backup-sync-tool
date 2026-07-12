@@ -10,6 +10,10 @@
 | Sync app | this repo |
 | Object storage | MinIO → `https://s3.rui.cam` |
 
+Do not conflate pairing (`backup.rui.cam`) with object storage (`s3.rui.cam`). Legacy `box.rui.cam` = old WebDAV host.
+
+**Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy. Cutover status: `docs/plans/2026-07-11-HANDOFF.md` / `SPEC.md` checklist.
+
 ## Build & Launch Rules
 
 After every code change, on a **Windows** host (Proxmox VM 102):

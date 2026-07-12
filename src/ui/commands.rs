@@ -97,6 +97,23 @@ unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
             let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
             read_ctrls(hwnd, stmut(hwnd));
             update_pair_button_enabled(hwnd);
+            if !is_paired(&stmut(hwnd).config) && !stmut(hwnd).remote_folder_from_xd {
+                if let Some(hint) = crate::xd::build_host_folder_hint(&s) {
+                    let st = stmut(hwnd);
+                    st.config.remote_folder = hint.clone();
+                    let display = destination_display_text(
+                        &st.config,
+                        st.remote_folder_from_xd,
+                        st.detected_customer.as_deref(),
+                    );
+                    let _ = SetWindowTextW(
+                        GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
+                        &hstring(&display),
+                    );
+                    invalidate_bridge(hwnd);
+                    update_server_tooltip(hwnd);
+                }
+            }
             layout_main(hwnd);
             if persist_after_select && !s.trim().is_empty() {
                 if is_paired(&stmut(hwnd).config) {
@@ -161,6 +178,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
     }
     let st = stmut(hwnd);
     let api_base = st.config.pair_api_base.clone();
+    let watch_folder = st.config.watch_folder.clone();
     let mut detected_folder = if st.remote_folder_from_xd {
         non_empty(st.config.remote_folder.clone())
     } else {
@@ -179,10 +197,8 @@ unsafe fn do_pair_device(hwnd: HWND) {
 
     std::thread::spawn(move || {
         if detected_folder.is_none() {
-            if let Some(detected) = crate::xd::detect_customer_hint() {
-                if let Some(folder) = non_empty(detected.folder) {
-                    detected_folder.get_or_insert(folder);
-                }
+            if let Some(hint) = crate::xd::pairing_folder_hint(&watch_folder) {
+                detected_folder.get_or_insert(hint);
             }
         }
         let machine = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_string());

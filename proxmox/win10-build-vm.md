@@ -23,6 +23,8 @@ git pull
 
 Must use Win7 target inside that script. Config beside root `backupsynctool.exe`.
 
+After build: pair against `https://backup.rui.cam`, expect approve payload `s3_endpoint: https://s3.rui.cam`. Cutover checklist: `docs/plans/2026-07-11-HANDOFF.md`.
+
 ## Remote (optional)
 
 ```bash
