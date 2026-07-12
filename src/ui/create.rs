@@ -18,7 +18,8 @@ unsafe fn on_create(hwnd: HWND) {
 
     let mut cfg = crate::config::load();
     let remote_folder_from_xd = false;
-    if cfg.watch_folder.is_empty() {
+    // Empty or stale path (e.g. old Desktop\Sync) → XD default when present.
+    if !watch_folder_is_valid(&cfg.watch_folder) {
         if let Some(path) = crate::xd::default_watch_folder() {
             cfg.watch_folder = path;
         }

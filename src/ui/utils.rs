@@ -358,7 +358,7 @@ unsafe fn update_pair_button_enabled(hwnd: HWND) {
 
 unsafe fn ensure_default_watch_folder(hwnd: HWND) {
     let st = stmut(hwnd);
-    if !st.config.watch_folder.trim().is_empty() {
+    if watch_folder_is_valid(&st.config.watch_folder) {
         return;
     }
     if let Some(path) = crate::xd::default_watch_folder() {
