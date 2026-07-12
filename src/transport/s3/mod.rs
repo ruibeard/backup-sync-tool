@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 const EMPTY_PAYLOAD_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const META_MTIME: &str = "x-amz-meta-backup-mtime";
