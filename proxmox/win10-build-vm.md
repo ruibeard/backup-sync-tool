@@ -1,6 +1,6 @@
 # Win10 build VM (Proxmox) — compile host only
 
-Compiles `backupsynctool.exe`. **App target stays Win7** (`x86_64-win7-windows-msvc` via `build-local.ps1`). This VM is not MinIO and not Laravel.
+Compiles `backupsynctool.exe`. **App target stays Win7** (`x86_64-win7-windows-msvc` via `build-local.ps1`). This VM is not Garage and not Laravel.
 
 ## Identity
 
@@ -23,7 +23,7 @@ git pull
 
 Must use Win7 target inside that script. Config beside root `backupsynctool.exe`.
 
-After build: pair against `https://backup.rui.cam`, expect approve payload `s3_endpoint: https://s3.rui.cam`. Cutover checklist: `docs/plans/2026-07-11-HANDOFF.md`.
+After build: pair against `https://backup.rui.cam`, expect schema v2 approval with `s3_endpoint: https://s3.rui.cam` and `s3_region: garage`.
 
 ## Remote (optional)
 
@@ -38,4 +38,4 @@ Bootstrap (new VM): `scripts/win10-build-bootstrap.ps1`.
 ## Other systems
 
 - Pairing: `backup.rui.cam` (Laravel)
-- Storage: `s3.rui.cam` (MinIO) — see `docs/plans/2026-07-11-s3-rui-cam-ops.md` / host `proxmox/s3-minio-ct.md`
+- Storage: `s3.rui.cam` (Garage) — host notes are in `proxmox/garage/README.md`

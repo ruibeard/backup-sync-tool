@@ -16,8 +16,13 @@ const XD_PEM_PATH: &str = r"C:\XDSoftware\cfg\xd.pem";
 
 #[derive(Debug, Clone)]
 pub struct DetectedCustomer {
+    pub number: String,
     pub folder: String,
     pub customer: String,
+}
+
+pub fn install_path() -> Option<String> {
+    Path::new(XD_ROOT).is_dir().then(|| XD_ROOT.to_string())
 }
 
 pub fn default_watch_folder() -> Option<String> {
@@ -122,7 +127,11 @@ fn detect_customer_hint_native() -> Result<DetectedCustomer, String> {
         return Err("Decrypted licence number is empty.".to_string());
     }
 
-    Ok(DetectedCustomer { folder, customer })
+    Ok(DetectedCustomer {
+        number,
+        folder,
+        customer,
+    })
 }
 
 fn read_text_file(path: &str) -> Result<String, String> {
@@ -306,7 +315,10 @@ mod tests {
 
     #[test]
     fn strip_utf8_bom_removes_leading_bom() {
-        assert_eq!(strip_utf8_bom("\u{feff}{\"Number\":\"x\"}"), "{\"Number\":\"x\"}");
+        assert_eq!(
+            strip_utf8_bom("\u{feff}{\"Number\":\"x\"}"),
+            "{\"Number\":\"x\"}"
+        );
         assert_eq!(strip_utf8_bom("{\"Number\":\"x\"}"), "{\"Number\":\"x\"}");
     }
 

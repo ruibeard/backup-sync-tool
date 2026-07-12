@@ -1,6 +1,6 @@
 [package]
 name = "backupsynctool"
-version = "2026.0.7"
+version = "2026.1.0"
 edition = "2021"
 
 [[bin]]
@@ -36,8 +36,8 @@ serde_json = "1"
 ureq = { version = "2", features = ["tls"] }
 quick-xml = "0.31"
 
-# S3 SigV4 (blocking; no AWS SDK)
-hmac = "0.12"
+# S3 request construction/signing (blocking I/O remains in ureq)
+rusty-s3 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 

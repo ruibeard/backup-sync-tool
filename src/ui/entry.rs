@@ -215,6 +215,14 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_PAIR_STARTED => on_app_pair_started(hwnd, lparam),
         WM_APP_PAIR_RESULT => on_app_pair_result(hwnd, wparam, lparam),
         WM_APP_AUTH_FAILED => on_app_auth_failed(hwnd),
+        WM_APP_RESTORE_DONE => {
+            stmut(hwnd).restore_cancel = None;
+            let _ = SetWindowTextW(
+                GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32),
+                &hstring("Restore"),
+            );
+            LRESULT(0)
+        }
         WM_TIMER => on_timer(hwnd, wparam),
 
         WM_CLOSE => {

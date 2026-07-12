@@ -242,10 +242,12 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
             return LRESULT(0);
         }
     };
+    candidate_config.schema_version = 2;
+    candidate_config.device_uuid = pair.device_uuid.clone();
     candidate_config.transport = "s3".to_string();
     candidate_config.s3_endpoint = pair.s3_endpoint.clone();
     candidate_config.s3_region = if pair.s3_region.trim().is_empty() {
-        "us-east-1".to_string()
+        "garage".to_string()
     } else {
         pair.s3_region.clone()
     };

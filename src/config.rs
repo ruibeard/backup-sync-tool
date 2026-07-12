@@ -11,6 +11,8 @@ pub enum TransportKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub schema_version: u32,
     pub watch_folder: String,
     #[serde(default)]
     pub remote_folder: String,
@@ -39,6 +41,8 @@ pub struct Config {
     #[serde(default)]
     pub device_token_enc: String,
     #[serde(default)]
+    pub device_uuid: String,
+    #[serde(default)]
     pub credential_profile_id: Option<u64>,
     #[serde(default)]
     pub credential_version: Option<u64>,
@@ -46,7 +50,7 @@ pub struct Config {
     pub server_approved_at: Option<String>,
     #[serde(default = "default_true")]
     pub start_with_windows: bool,
-    #[serde(default)]
+    #[serde(skip)]
     pub sync_remote_changes: bool,
     #[serde(default = "default_true")]
     pub auto_update: bool,
@@ -57,6 +61,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            schema_version: 2,
             watch_folder: String::new(),
             remote_folder: String::new(),
             transport: String::new(),
@@ -70,6 +75,7 @@ impl Default for Config {
             s3_part_size_mib: default_s3_part_size_mib(),
             pair_api_base: default_pair_api_base(),
             device_token_enc: String::new(),
+            device_uuid: String::new(),
             credential_profile_id: None,
             credential_version: None,
             server_approved_at: None,
@@ -82,6 +88,10 @@ impl Default for Config {
 }
 
 pub fn transport_kind(cfg: &Config) -> Option<TransportKind> {
+    if cfg.schema_version != 2 {
+        return None;
+    }
+
     match cfg.transport.trim().to_ascii_lowercase().as_str() {
         "s3" => Some(TransportKind::S3),
         _ => None,
@@ -111,7 +121,7 @@ fn default_pair_api_base() -> String {
 }
 
 fn default_s3_region() -> String {
-    "us-east-1".to_string()
+    "garage".to_string()
 }
 
 fn default_s3_part_size_mib() -> u64 {
@@ -121,7 +131,12 @@ fn default_s3_part_size_mib() -> u64 {
 pub fn load() -> Config {
     let path = config_path();
     if let Ok(data) = std::fs::read_to_string(&path) {
-        serde_json::from_str(&data).unwrap_or_default()
+        let parsed: Config = serde_json::from_str(&data).unwrap_or_default();
+        if parsed.schema_version == 2 {
+            parsed
+        } else {
+            Config::default()
+        }
     } else {
         Config::default()
     }
@@ -146,9 +161,10 @@ mod tests {
             "remote_folder": "Customer"
         }"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.schema_version, 0);
         assert!(cfg.transport.is_empty());
         assert_eq!(transport_kind(&cfg), None);
-        assert_eq!(cfg.s3_region, "us-east-1");
+        assert_eq!(cfg.s3_region, "garage");
         assert!(cfg.s3_path_style);
         assert_eq!(cfg.s3_part_size_mib, 32);
         assert!(cfg.auto_update);
@@ -167,6 +183,7 @@ mod tests {
     #[test]
     fn s3_transport_parses() {
         let json = r#"{
+            "schema_version": 2,
             "watch_folder": "C:\\backups",
             "transport": "s3",
             "remote_folder": "Customer",

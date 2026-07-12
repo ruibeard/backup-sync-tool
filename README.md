@@ -1,71 +1,34 @@
 # Backup Sync Tool
 
-Native Windows tray app that backs up one local folder to **S3** (MinIO). Pairing via Laravel supplies per-device credentials; uploads go direct to storage (no proxy).
+Native Windows 7–11 tray app that uploads a local backup folder directly to Garage S3 storage after an administrator approves the device in Laravel.
 
-## Three systems
+## Workflow
 
-| System | Host / repo |
-| --- | --- |
-| Pairing (control plane) | `https://backup.rui.cam` — Laravel `box-rui-cam` |
-| Sync app (this) | Win7-compatible `backupsynctool.exe` |
-| Object storage | `https://s3.rui.cam` — MinIO on Proxmox |
+1. The app uses `C:\XDSoftware\backups` when available, and reads the XD licence number/name from `C:\XDSoftware\cfg` as an optional pairing hint.
+2. **Connect Server** opens the QR/code window.
+3. An authenticated admin explicitly assigns an existing customer or creates a new one at `backup.rui.cam`.
+4. Laravel returns a one-time Garage key scoped to that customer bucket.
+5. The app uploads directly to `s3.rui.cam`; Laravel never handles backup bytes.
 
-## Screenshots
+Uploads are one-way and local deletions are not propagated. **Restore** downloads the complete approved customer bucket into a new, non-overwriting restore directory selected by the user.
 
-![Backup Sync Tool main window](assets/readme/main-window.png)
+## Storage and safety
 
-![Server pairing QR code](assets/readme/pairing-qr.png)
+- One Garage bucket per customer; multiple approved devices intentionally share its object namespace.
+- One revocable Garage key per device.
+- S3 secret and device token are DPAPI encrypted.
+- Config schema is v2. Legacy WebDAV and experimental MinIO configurations require fresh pairing.
+- Small files stream through PutObject; large files use persistent resumable multipart state under `%LOCALAPPDATA%\BackupSyncTool`.
+- The upload manifest also lives under `%LOCALAPPDATA%\BackupSyncTool`, outside the watched folder.
 
-## Features
+## Build
 
-- System tray — close hides; double-click restores
-- Recursive folder watch + debounced uploads
-- Parallel uploads (`parallel_uploads`, default 2, capped at 2)
-- First-run baseline upload when no local manifest
-- Optional download-from-server (`sync_remote_changes`)
-- Admin pairing (QR/code) — server owns destination / S3 credentials
-- DPAPI-encrypted secrets (S3 secret, device token)
-- S3 PutObject + persistent multipart
-- Recent Activity + sync footer progress
-- GitHub auto-update, enabled by default
-
-## Requirements
-
-- Windows 7 SP1 x64 or newer
-- Pairing API default `https://backup.rui.cam` + S3 endpoint from approve (`https://s3.rui.cam`)
-
-## Install
-
-Download `backupsynctool.exe` from [Releases](https://github.com/ruibeard/backup-sync-tool/releases/latest). Place `backupsynctool.json` next to the exe.
-
-## Use
-
-1. Set **backup folder** (or use detected `C:\XDSoftware\backups` when present).
-2. **Pair** — QR / code; admin approves on `backup.rui.cam`.
-3. Sync starts after pairing (no Save button). Re-pair if credentials are missing or auth fails.
-4. **Reconnect** if storage returns an auth/credential failure.
-
-## Build (developers)
-
-Edit/commit on any machine. **Compile on Windows** (Proxmox Win10 VM 102 recommended):
+Run on the Windows build VM from the repository root:
 
 ```powershell
-git fetch
-git checkout s3-multipart-implementation
 .\build-local.ps1
 ```
 
-`build-local.ps1` always builds the **Windows 7-compatible** target `x86_64-win7-windows-msvc` (not a modern-only target). Details: [SPEC.md](SPEC.md) · VM notes: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md).
+The only supported target is `x86_64-win7-windows-msvc`. Never launch from `target/debug` or `target/release`; the script copies and launches the root `backupsynctool.exe`.
 
-## Repo layout
-
-| Path | Role |
-| --- | --- |
-| `src/` | Rust app (Win32 UI, sync, S3 transport, pairing) |
-| `proxmox/` | Build-VM notes (compile host; not MinIO) |
-| `docs/plans/` | Cutover / ops notes |
-| `build-local.ps1` / `release.ps1` | Win7-compatible build & release |
-
-## Security note
-
-Desktop folder lock prevents accidental wrong-customer uploads. Hard isolation = one S3 bucket/key per device ([SPEC.md](SPEC.md#security)).
+Technical contract: [SPEC.md](SPEC.md).

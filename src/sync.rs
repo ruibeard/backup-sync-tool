@@ -7,19 +7,16 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const REMOTE_FULL_SYNC_INTERVAL: Duration = Duration::from_secs(60);
-const REMOTE_MARKER_FAST_INTERVAL: Duration = Duration::from_secs(10);
-const REMOTE_MARKER_IDLE_INTERVAL: Duration = Duration::from_secs(30);
-const REMOTE_MARKER_FAST_WINDOW: Duration = Duration::from_secs(5 * 60);
 const REMOTE_HEAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MANIFEST_NAME: &str = ".backupsynctool-manifest.json";
+const MANIFEST_VERSION: u32 = 2;
 const REMOTE_MANIFEST_NAME_S3: &str = ".backupsynctool-remote-manifest.json";
 
 fn remote_manifest_name(_cfg: &Config) -> &'static str {
@@ -105,10 +102,8 @@ impl SyncEngine {
         auth_failed: AuthFailedFn,
     ) -> Result<Self, String> {
         let pending: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
-        let suppressed: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let pending_clone = pending.clone();
-        let suppressed_clone = suppressed.clone();
         let stop_clone = stop.clone();
         let cfg_arc = Arc::new(cfg);
         let transport_clone = transport.clone();
@@ -130,19 +125,11 @@ impl SyncEngine {
                 failed_paths: Vec::new(),
             });
 
-            let remote_manifest = fetch_remote_state(
-                &cfg_watcher,
-                &transport_watcher,
-                &log_clone,
-                &auth_failed_clone,
-            );
             let startup_batch = sync_startup(
                 &cfg_watcher,
                 &transport_watcher,
                 &manifest,
                 had_local_manifest,
-                remote_manifest.as_ref(),
-                &suppressed_clone,
                 &log_clone,
                 &activity_clone,
                 &auth_failed_clone,
@@ -156,14 +143,6 @@ impl SyncEngine {
                 failed_paths: startup_batch.failed_paths,
             });
 
-            let mut last_remote_full_sync = Instant::now();
-            let mut last_remote_marker_check = Instant::now();
-            let mut last_remote_marker = if cfg_watcher.sync_remote_changes {
-                fetch_remote_manifest_marker(&cfg_watcher, &transport_watcher, &auth_failed_clone)
-            } else {
-                None
-            };
-            let mut fast_remote_marker_until = Instant::now() + REMOTE_MARKER_FAST_WINDOW;
             let mut last_remote_heal = Instant::now();
             while !stop_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(500));
@@ -203,14 +182,6 @@ impl SyncEngine {
                         Some(&activity_clone),
                         &auth_failed_clone,
                     );
-                    if cfg_watcher.sync_remote_changes && batch.succeeded > 0 {
-                        fast_remote_marker_until = Instant::now() + REMOTE_MARKER_FAST_WINDOW;
-                        last_remote_marker = fetch_remote_manifest_marker(
-                            &cfg_watcher,
-                            &transport_clone,
-                            &auth_failed_clone,
-                        );
-                    }
                     activity_clone(ActivityInfo {
                         state: ActivityState::Idle,
                         completed: batch.succeeded,
@@ -240,65 +211,6 @@ impl SyncEngine {
                     }
                     last_remote_heal = Instant::now();
                 }
-
-                if cfg_watcher.sync_remote_changes {
-                    let now = Instant::now();
-                    let marker_interval = if now <= fast_remote_marker_until {
-                        REMOTE_MARKER_FAST_INTERVAL
-                    } else {
-                        REMOTE_MARKER_IDLE_INTERVAL
-                    };
-
-                    if last_remote_marker_check.elapsed() >= marker_interval {
-                        if let Some(remote_manifest) = fetch_remote_manifest_marker(
-                            &cfg_watcher,
-                            &transport_clone,
-                            &auth_failed_clone,
-                        ) {
-                            if last_remote_marker.as_ref() != Some(&remote_manifest) {
-                                log_clone(
-                                    "Remote manifest changed, downloading server updates"
-                                        .to_string(),
-                                );
-                                apply_remote_manifest(
-                                    &cfg_watcher,
-                                    &transport_clone,
-                                    &manifest,
-                                    &remote_manifest,
-                                    &suppressed_clone,
-                                    &log_clone,
-                                    &auth_failed_clone,
-                                );
-                                last_remote_marker = Some(remote_manifest);
-                                fast_remote_marker_until =
-                                    Instant::now() + REMOTE_MARKER_FAST_WINDOW;
-                            }
-                        }
-                        last_remote_marker_check = Instant::now();
-                    }
-
-                    if last_remote_full_sync.elapsed() >= REMOTE_FULL_SYNC_INTERVAL {
-                        if let Some(remote_manifest) = fetch_remote_state(
-                            &cfg_watcher,
-                            &transport_clone,
-                            &log_clone,
-                            &auth_failed_clone,
-                        ) {
-                            apply_remote_manifest(
-                                &cfg_watcher,
-                                &transport_clone,
-                                &manifest,
-                                &remote_manifest,
-                                &suppressed_clone,
-                                &log_clone,
-                                &auth_failed_clone,
-                            );
-                            last_remote_marker = Some(remote_manifest);
-                        }
-                        last_remote_full_sync = Instant::now();
-                        last_remote_marker_check = Instant::now();
-                    }
-                }
             }
         });
 
@@ -310,9 +222,7 @@ impl SyncEngine {
                     EventKind::Create(_) | EventKind::Modify(_) => {
                         let mut guard = pending.lock().unwrap();
                         for path in event.paths {
-                            if should_ignore_path(&watch_path_for_events, &path)
-                                || should_suppress(&suppressed, &path)
-                            {
+                            if should_ignore_path(&watch_path_for_events, &path) {
                                 continue;
                             }
                             if let Some(entry) = guard.iter_mut().find(|(p, _)| p == &path) {
@@ -350,8 +260,6 @@ fn sync_startup(
     transport: &Arc<dyn BackupTransport>,
     manifest: &Arc<Mutex<SyncManifest>>,
     had_local_manifest: bool,
-    remote_manifest: Option<&SyncManifest>,
-    suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>,
     log: &LogFn,
     activity: &ActivityFn,
     auth_failed: &AuthFailedFn,
@@ -363,7 +271,8 @@ fn sync_startup(
         cfg.watch_folder,
         local_state.files.len()
     ));
-    let remote_manifest = remote_manifest.cloned().unwrap_or_default();
+    let remote_manifest = SyncManifest::default();
+    let suppressed: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
 
     if !had_local_manifest {
         if cfg.sync_remote_changes && !remote_manifest.files.is_empty() {
@@ -391,13 +300,12 @@ fn sync_startup(
                     manifest,
                     &remote_manifest,
                     &downloads,
-                    suppressed,
+                    &suppressed,
                     log,
                     auth_failed,
                 );
             }
 
-            save_remote_manifest_from_server(cfg, transport, log, auth_failed);
             return total;
         }
 
@@ -433,7 +341,6 @@ fn sync_startup(
             return total;
         }
 
-        save_remote_manifest_from_server(cfg, transport, log, auth_failed);
         return total;
     }
 
@@ -489,7 +396,7 @@ fn sync_startup(
             manifest,
             &remote_manifest,
             &downloads,
-            suppressed,
+            &suppressed,
             log,
             auth_failed,
         );
@@ -517,7 +424,6 @@ fn sync_startup(
         total.absorb(&batch);
     }
 
-    save_remote_manifest_from_server(cfg, transport, log, auth_failed);
     total
 }
 
@@ -556,7 +462,6 @@ fn apply_remote_manifest(
         auth_failed,
     );
 
-    save_remote_manifest_from_server(cfg, transport, log, auth_failed);
     download_count
 }
 
@@ -734,7 +639,6 @@ fn upload_paths_parallel(
             });
         }
     });
-    save_remote_manifest_from_server(cfg, transport, log, auth_failed);
     let ok = succeeded.load(std::sync::atomic::Ordering::SeqCst);
     let paths_failed = failed_paths.lock().unwrap().clone();
     UploadBatchResult {
@@ -776,17 +680,27 @@ pub fn retry_uploads(
     )
 }
 
-pub fn refresh_remote_changes(
+pub fn restore_customer_backup(
     cfg: &Config,
     transport: Arc<dyn BackupTransport>,
+    destination_parent: &Path,
+    cancel: &Arc<AtomicBool>,
     log: &LogFn,
     activity: &ActivityFn,
     auth_failed: &AuthFailedFn,
-) -> usize {
-    let mut pull_cfg = cfg.clone();
-    pull_cfg.sync_remote_changes = true;
-    let manifest = Arc::new(Mutex::new(load_local_manifest(&pull_cfg)));
-    let suppressed: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+) -> Result<PathBuf, String> {
+    if !destination_parent.is_dir() {
+        return Err("Restore destination does not exist.".into());
+    }
+
+    let customer = safe_restore_directory_name(&cfg.remote_folder);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let restore_root = destination_parent.join(format!("{customer}-restore-{timestamp}"));
+    fs::create_dir(&restore_root)
+        .map_err(|err| format!("Could not create restore folder: {err}"))?;
 
     activity(ActivityInfo {
         state: ActivityState::Checking,
@@ -795,39 +709,109 @@ pub fn refresh_remote_changes(
         failed: 0,
         failed_paths: Vec::new(),
     });
-    log("Manual server refresh started".to_string());
+    log(format!("Restore started: {}", restore_root.display()));
 
-    let downloaded = fetch_remote_state(&pull_cfg, &transport, log, auth_failed)
-        .map(|remote_manifest| {
-            apply_remote_manifest(
-                &pull_cfg,
-                &transport,
-                &manifest,
-                &remote_manifest,
-                &suppressed,
-                log,
-                auth_failed,
-            )
-        })
-        .unwrap_or(0);
+    let files = transport.list_files().map_err(|err| {
+        if err.is_auth_failed() {
+            auth_failed();
+        }
+        format!("Could not list customer backup: {err}")
+    })?;
+    let total = files.len();
+    let mut completed = 0usize;
+    let mut failed_paths = Vec::new();
 
-    if downloaded == 0 {
-        log("Manual server refresh complete: no server changes found".to_string());
-    } else {
-        log(format!(
-            "Manual server refresh complete: {} file(s) pulled from server",
-            downloaded
-        ));
+    for remote in files {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(format!(
+                "Restore cancelled. Partial files remain in {}",
+                restore_root.display()
+            ));
+        }
+        let relative = safe_restore_relative_path(&remote.relative_path)
+            .ok_or_else(|| format!("Unsafe server path: {}", remote.relative_path))?;
+        let destination = restore_root.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        match transport.download_file(&remote.relative_path, &destination) {
+            Ok(_) => completed += 1,
+            Err(err) => {
+                if err.is_auth_failed() {
+                    auth_failed();
+                }
+                failed_paths.push(remote.relative_path);
+            }
+        }
+        activity(ActivityInfo {
+            state: ActivityState::Syncing,
+            completed,
+            total,
+            failed: failed_paths.len(),
+            failed_paths: failed_paths.clone(),
+        });
     }
 
     activity(ActivityInfo {
         state: ActivityState::Idle,
-        completed: downloaded,
-        total: downloaded,
-        failed: 0,
-        failed_paths: Vec::new(),
+        completed,
+        total,
+        failed: failed_paths.len(),
+        failed_paths: failed_paths.clone(),
     });
-    downloaded
+
+    if failed_paths.is_empty() {
+        log(format!("Restore complete: {} file(s)", completed));
+        Ok(restore_root)
+    } else {
+        Err(format!(
+            "Restore completed with {} failed file(s) in {}",
+            failed_paths.len(),
+            restore_root.display()
+        ))
+    }
+}
+
+fn safe_restore_directory_name(value: &str) -> String {
+    let name = value
+        .chars()
+        .map(|character| match character {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            _ if character.is_control() => '-',
+            _ => character,
+        })
+        .collect::<String>();
+    let trimmed = name.trim().trim_matches('.');
+    if trimmed.is_empty() {
+        "customer".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn safe_restore_relative_path(value: &str) -> Option<PathBuf> {
+    let normalized = value.replace('\\', "/");
+    if normalized.starts_with('/') || normalized.contains('\0') {
+        return None;
+    }
+    let path = Path::new(&normalized);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
+    let result = path
+        .components()
+        .fold(PathBuf::new(), |mut result, component| {
+            if let Component::Normal(value) = component {
+                result.push(value);
+            }
+            result
+        });
+    (!result.as_os_str().is_empty()).then_some(result)
 }
 
 fn fetch_remote_manifest(
@@ -1159,12 +1143,32 @@ fn load_local_manifest(cfg: &Config) -> SyncManifest {
 
 fn save_local_manifest(cfg: &Config, manifest: &SyncManifest) {
     if let Ok(data) = serde_json::to_string_pretty(manifest) {
-        let _ = fs::write(local_manifest_path(cfg), data);
+        let path = local_manifest_path(cfg);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let temporary = path.with_extension("tmp");
+        if fs::write(&temporary, data).is_ok() {
+            let _ = fs::rename(temporary, path);
+        }
     }
 }
 
 fn local_manifest_path(cfg: &Config) -> PathBuf {
-    PathBuf::from(&cfg.watch_folder).join(MANIFEST_NAME)
+    use sha2::{Digest, Sha256};
+
+    let root = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("BackupSyncTool")
+        .join(format!("state-v{MANIFEST_VERSION}"));
+    let identity = if cfg.device_uuid.trim().is_empty() {
+        format!("{}|{}", cfg.s3_endpoint, cfg.s3_bucket)
+    } else {
+        cfg.device_uuid.clone()
+    };
+    let digest = hex::encode(Sha256::digest(identity.as_bytes()));
+    root.join(format!("{}.json", &digest[..32]))
 }
 
 fn has_local_manifest(cfg: &Config) -> bool {
@@ -1246,18 +1250,9 @@ fn mark_suppressed(suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>, path: &Path
     }
 }
 
-fn should_suppress(suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>, path: &PathBuf) -> bool {
-    let Ok(mut guard) = suppressed.lock() else {
-        return false;
-    };
-    let now = Instant::now();
-    guard.retain(|(_, until)| *until > now);
-    guard.iter().any(|(pending_path, _)| pending_path == path)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::is_safe_remote_relative;
+    use super::{is_safe_remote_relative, safe_restore_relative_path};
 
     #[test]
     fn remote_paths_cannot_escape_watch_folder() {
@@ -1267,5 +1262,19 @@ mod tests {
         assert!(!is_safe_remote_relative("/absolute.zip"));
         assert!(!is_safe_remote_relative("C:/outside.zip"));
         assert!(!is_safe_remote_relative("folder\\outside.zip"));
+    }
+
+    #[test]
+    fn restore_paths_cannot_escape_destination() {
+        assert_eq!(
+            safe_restore_relative_path("folder/file.zip")
+                .unwrap()
+                .to_string_lossy(),
+            std::path::Path::new("folder/file.zip").to_string_lossy()
+        );
+        assert!(safe_restore_relative_path("../outside.zip").is_none());
+        assert!(safe_restore_relative_path("folder/../../outside.zip").is_none());
+        assert!(safe_restore_relative_path("/absolute.zip").is_none());
+        assert!(safe_restore_relative_path("").is_none());
     }
 }

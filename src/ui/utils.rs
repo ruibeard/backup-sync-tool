@@ -495,12 +495,17 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
     read_ctrls(hwnd, stmut(hwnd));
     {
         let st = stmut(hwnd);
+        if let Some(cancel) = &st.restore_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            notify_user(hwnd, "Cancelling restore...");
+            return;
+        }
         if st.auth_failure_notified {
             notify_user_status(
                 hwnd,
                 "Reconnect required",
                 C_RED,
-                "Cannot refresh from server until credentials are reconnected.",
+                "Cannot restore until credentials are reconnected.",
             );
             return;
         }
@@ -513,16 +518,26 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
     let cfg = stmut(hwnd).config.clone();
     let s3_secret = stmut(hwnd).s3_secret_plain.clone();
     if !is_sync_configured(&cfg, &s3_secret) {
-        notify_user(hwnd, "Cannot refresh: sync is not configured.");
+        notify_user(hwnd, "Cannot restore: sync is not configured.");
         return;
     }
     let Ok(transport) = transport::build(&cfg, &s3_secret) else {
-        notify_user(hwnd, "Cannot refresh: storage transport is not configured.");
+        notify_user(hwnd, "Cannot restore: storage transport is not configured.");
         return;
     };
 
-    notify_user(hwnd, "Refreshing from server...");
-    set_status_strip_text(hwnd, "Checking server");
+    let Some(destination_parent) = browse_restore_parent(hwnd) else {
+        return;
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    stmut(hwnd).restore_cancel = Some(cancel.clone());
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32),
+        &hstring("Cancel restore"),
+    );
+
+    notify_user(hwnd, "Restoring customer backup...");
+    set_status_strip_text(hwnd, "Preparing restore");
 
     let raw = hwnd.0 as isize;
     let log: crate::sync::LogFn = Arc::new(move |m: String| {
@@ -563,7 +578,28 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
     });
 
     std::thread::spawn(move || {
-        crate::sync::refresh_remote_changes(&cfg, transport, &log, &activity, &auth_failed);
+        let result = crate::sync::restore_customer_backup(
+            &cfg,
+            transport,
+            Path::new(&destination_parent),
+            &cancel,
+            &log,
+            &activity,
+            &auth_failed,
+        );
+        match result {
+            Ok(path) => log(format!("Restore saved to {}", path.display())),
+            Err(error) => log(format!("Restore failed: {error}")),
+        }
+        unsafe {
+            PostMessageW(
+                HWND(raw as *mut _),
+                WM_APP_RESTORE_DONE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+            .ok();
+        }
     });
 }
 
@@ -646,7 +682,7 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
 unsafe fn read_ctrls(hwnd: HWND, st: &mut WndState) {
     st.config.watch_folder = gettext(hwnd, IDC_WATCH_FOLDER);
     st.config.start_with_windows = checked(hwnd, IDC_START_WINDOWS);
-    st.config.sync_remote_changes = checked(hwnd, IDC_SYNC_REMOTE);
+    st.config.sync_remote_changes = false;
     st.config.auto_update = checked(hwnd, IDC_AUTO_UPDATE);
 }
 

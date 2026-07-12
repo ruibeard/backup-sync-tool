@@ -155,6 +155,37 @@ unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
     selected
 }
 
+unsafe fn browse_restore_parent(hwnd: HWND) -> Option<String> {
+    let title: Vec<u16> = "Select where to create the restore folder\0"
+        .encode_utf16()
+        .collect();
+    let mut display = [0u16; 260];
+    let bi = BROWSEINFOW {
+        hwndOwner: hwnd,
+        lpszTitle: PCWSTR(title.as_ptr()),
+        pszDisplayName: PWSTR(display.as_mut_ptr()),
+        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        ..Default::default()
+    };
+    let pidl = SHBrowseForFolderW(&bi);
+    if pidl.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 260];
+    let selected = if SHGetPathFromIDListW(pidl, &mut buffer).as_bool() {
+        let end = buffer
+            .iter()
+            .position(|&character| character == 0)
+            .unwrap_or(buffer.len());
+        let path = String::from_utf16_lossy(&buffer[..end]);
+        (!path.trim().is_empty()).then_some(path)
+    } else {
+        None
+    };
+    ILFree(Some(pidl));
+    selected
+}
+
 unsafe fn do_open_local_folder(hwnd: HWND) {
     let folder = gettext(hwnd, IDC_WATCH_FOLDER);
     let folder = folder.trim();
@@ -254,6 +285,10 @@ unsafe fn do_pair_device(hwnd: HWND) {
             &machine,
             &windows_user,
             version,
+            xd.as_ref().and_then(|_| crate::xd::install_path()),
+            Some(watch_folder.clone()),
+            xd.as_ref().map(|detected| detected.number.clone()),
+            xd.as_ref().map(|detected| detected.customer.clone()),
             detected_folder,
         ) {
             Some(start) => {
@@ -340,6 +375,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                 let s3_prefix = status.s3_prefix.unwrap_or_default();
                                 break Ok(PairResult {
                                     pair_id,
+                                    device_uuid: status.device_uuid.unwrap_or_default(),
                                     device_token,
                                     transport: "s3".to_string(),
                                     remote_folder,
@@ -348,7 +384,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     s3_endpoint,
                                     s3_region: status
                                         .s3_region
-                                        .unwrap_or_else(|| "us-east-1".to_string()),
+                                        .unwrap_or_else(|| "garage".to_string()),
                                     s3_bucket,
                                     s3_access_key,
                                     s3_secret_key,

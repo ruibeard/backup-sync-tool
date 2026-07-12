@@ -318,6 +318,7 @@ const WM_APP_SYNC_ACTIVITY: u32 = WM_APP + 16;
 const WM_APP_PAIR_RESULT: u32 = WM_APP + 17;
 const WM_APP_PAIR_STARTED: u32 = WM_APP + 18;
 const WM_APP_AUTH_FAILED: u32 = WM_APP + 19;
+const WM_APP_RESTORE_DONE: u32 = WM_APP + 20;
 const IDT_SYNC_ANIM: usize = 1;
 const SYNC_ANIM_MS: u32 = 120;
 
@@ -612,6 +613,7 @@ struct WndState {
     footer_panel_rect: RECT,
     pair_qr_hwnd: HWND,
     pair_cancel: Option<Arc<AtomicBool>>,
+    restore_cancel: Option<Arc<AtomicBool>>,
     pair_id: u64,
     auth_failure_notified: bool,
     activity_rows: Vec<ActivityRow>,
@@ -648,6 +650,7 @@ fn activity_subhdr_text() -> String {
 
 struct PairResult {
     pair_id: u64,
+    device_uuid: String,
     device_token: String,
     transport: String,
     remote_folder: String,

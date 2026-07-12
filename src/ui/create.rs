@@ -100,6 +100,7 @@ unsafe fn on_create(hwnd: HWND) {
         footer_panel_rect: RECT::default(),
         pair_qr_hwnd: HWND(std::ptr::null_mut()),
         pair_cancel: None,
+        restore_cancel: None,
         pair_id: 0,
         auth_failure_notified: false,
         activity_rows: Vec::new(),
@@ -432,9 +433,7 @@ unsafe fn build_ui(
         let check_y = y + (row_h - check_h) / 2;
         let startup_x = M;
         let startup_w = 154i32;
-        let two_way_x = startup_x + startup_w + 12;
-        let two_way_w = 140i32;
-        let auto_update_x = two_way_x + two_way_w + 12;
+        let auto_update_x = startup_x + startup_w + 12;
         let auto_update_w = M + INNER_W - auto_update_x;
 
         mkcheck(
@@ -448,18 +447,6 @@ unsafe fn build_ui(
             check_h,
             hf,
             cfg.start_with_windows,
-        );
-        mkcheck(
-            hwnd,
-            hi,
-            IDC_SYNC_REMOTE,
-            "Sync from server",
-            two_way_x,
-            check_y,
-            two_way_w,
-            check_h,
-            hf,
-            cfg.sync_remote_changes,
         );
         mkcheck(
             hwnd,
@@ -1037,7 +1024,7 @@ unsafe fn layout_bridge_section(
                 hwnd,
                 hi,
                 IDC_REFRESH_REMOTE,
-                "Refresh",
+                "Restore",
                 M + layout.refresh_btn_x,
                 layout.btn_y,
                 layout.refresh_btn_w,

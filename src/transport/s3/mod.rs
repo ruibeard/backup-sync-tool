@@ -5,7 +5,6 @@ mod multipart;
 use crate::config::Config;
 use crate::transport::download::{apply_mtime, stream_to_atomic_file};
 use crate::transport::{BackupTransport, FileMetadata, ObjectHead, RemoteFile, TransportError};
-use hmac::{Hmac, Mac};
 use multipart::{
     build_complete_xml, choose_part_size, complete_response_error, decide_after_lost_complete,
     decide_verified_receipt, delete_state, ensure_state_dir, expected_part_size, is_no_such_upload,
@@ -18,25 +17,21 @@ use multipart::{
 };
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-type HmacSha256 = Hmac<Sha256>;
+use std::time::Duration;
 
 const EMPTY_PAYLOAD_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const META_MTIME: &str = "x-amz-meta-backup-mtime";
 
 pub struct S3Transport {
     endpoint: String,
-    region: String,
     bucket: String,
-    access_key: String,
-    secret_key: String,
-    path_style: bool,
+    request_bucket: Bucket,
+    credentials: Credentials,
     prefix: String,
     /// PutObject threshold (= configured part size, 16–64 MiB).
     small_file_limit: u64,
@@ -57,13 +52,24 @@ impl S3Transport {
             cfg.s3_region.trim().to_string()
         };
         let part_mib = cfg.s3_part_size_mib.clamp(16, 64);
+        let request_bucket = Bucket::new(
+            endpoint
+                .parse()
+                .map_err(|error| format!("Invalid S3 endpoint: {error}"))?,
+            if cfg.s3_path_style {
+                UrlStyle::Path
+            } else {
+                UrlStyle::VirtualHost
+            },
+            cfg.s3_bucket.trim().to_string(),
+            region.clone(),
+        )
+        .map_err(|error| format!("Invalid S3 bucket configuration: {error}"))?;
         Ok(Self {
             endpoint,
-            region,
             bucket: cfg.s3_bucket.trim().to_string(),
-            access_key: cfg.s3_access_key.trim().to_string(),
-            secret_key: secret_key.to_string(),
-            path_style: cfg.s3_path_style,
+            request_bucket,
+            credentials: Credentials::new(cfg.s3_access_key.trim(), secret_key),
             prefix: cfg.s3_prefix.trim().trim_matches('/').to_string(),
             small_file_limit: part_mib * 1024 * 1024,
             configured_part_mib: part_mib,
@@ -87,109 +93,126 @@ impl S3Transport {
         }
     }
 
-    fn host_and_url(&self, key: &str, query: &str) -> Result<(String, String), TransportError> {
-        let (scheme, rest) = self
-            .endpoint
-            .split_once("://")
-            .ok_or_else(|| TransportError::Other("Invalid S3 endpoint".into()))?;
-        let host_port = rest
-            .split('/')
-            .next()
-            .ok_or_else(|| TransportError::Other("Invalid S3 endpoint host".into()))?;
-
-        let encoded_key = encode_path(key);
-        let (host, url) = if self.path_style {
-            let host = host_port.to_string();
-            let path = if key.is_empty() {
-                format!("/{}", self.bucket)
-            } else {
-                format!("/{}/{}", self.bucket, encoded_key)
-            };
-            let url = if query.is_empty() {
-                format!("{scheme}://{host_port}{path}")
-            } else {
-                format!("{scheme}://{host_port}{path}?{query}")
-            };
-            (host, url)
-        } else {
-            let host = format!("{}.{}", self.bucket, host_port);
-            let path = if key.is_empty() {
-                "/".to_string()
-            } else {
-                format!("/{encoded_key}")
-            };
-            let url = if query.is_empty() {
-                format!("{scheme}://{host}{path}")
-            } else {
-                format!("{scheme}://{host}{path}?{query}")
-            };
-            (host, url)
-        };
-        Ok((host, url))
-    }
-
-    fn canonical_uri_for_key(&self, key: &str) -> String {
-        let encoded_key = encode_path(key);
-        if self.path_style {
-            if key.is_empty() {
-                format!("/{}", self.bucket)
-            } else {
-                format!("/{}/{}", self.bucket, encoded_key)
+    fn sign_action<'a, A: S3Action<'a>>(
+        &self,
+        mut action: A,
+        query: &[(String, String)],
+        headers: &[(&str, String)],
+    ) -> String {
+        for (name, value) in query {
+            if matches!(
+                name.as_str(),
+                "partNumber" | "uploadId" | "uploads" | "list-type"
+            ) {
+                continue;
             }
-        } else if key.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{encoded_key}")
+            action.query_mut().insert(name.clone(), value.clone());
         }
+        for (name, value) in headers {
+            action
+                .headers_mut()
+                .insert(name.to_ascii_lowercase(), value.clone());
+        }
+        action.sign(Duration::from_secs(15 * 60)).to_string()
     }
 
-    fn sign_headers(
+    fn signed_url(
         &self,
         method: &str,
         key: &str,
         query: &[(String, String)],
-        extra_headers: &[(&str, String)],
-        payload_hash: &str,
-        now: SystemTime,
-    ) -> Result<(String, String, BTreeMap<String, String>), TransportError> {
-        let amz_date = amz_date(now);
-        let date_stamp = &amz_date[..8];
-        let (host, _) = self.host_and_url(key, "")?;
-
-        let mut headers: BTreeMap<String, String> = BTreeMap::new();
-        headers.insert("host".into(), host);
-        headers.insert("x-amz-content-sha256".into(), payload_hash.to_string());
-        headers.insert("x-amz-date".into(), amz_date.clone());
-        for (name, value) in extra_headers {
-            headers.insert(name.to_ascii_lowercase(), value.clone());
-        }
-
-        let canonical_headers = headers
-            .iter()
-            .map(|(k, v)| format!("{}:{}\n", k, trim_all(v)))
-            .collect::<String>();
-        let signed_headers = headers.keys().cloned().collect::<Vec<_>>().join(";");
-
-        let canonical_query = canonical_query_string(query);
-        let canonical_request = format!(
-            "{method}\n{uri}\n{query}\n{headers}\n{signed}\n{payload}",
-            uri = self.canonical_uri_for_key(key),
-            query = canonical_query,
-            headers = canonical_headers,
-            signed = signed_headers,
-            payload = payload_hash
-        );
-        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
-        let credential_scope = format!("{date_stamp}/{}/s3/aws4_request", self.region);
-        let string_to_sign =
-            format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}");
-        let signing_key = signing_key(&self.secret_key, date_stamp, &self.region, "s3");
-        let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
-        let authorization = format!(
-            "AWS4-HMAC-SHA256 Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
-            self.access_key
-        );
-        Ok((authorization, amz_date, headers))
+        headers: &[(&str, String)],
+    ) -> Result<String, TransportError> {
+        let value = |name: &str| {
+            query
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let credentials = Some(&self.credentials);
+        let url = match method {
+            "PUT" if value("partNumber").is_some() => {
+                let part_number = value("partNumber")
+                    .and_then(|number| number.parse::<u16>().ok())
+                    .ok_or_else(|| TransportError::Other("Invalid multipart part number".into()))?;
+                let upload_id = value("uploadId")
+                    .ok_or_else(|| TransportError::Other("Missing multipart upload ID".into()))?;
+                self.sign_action(
+                    self.request_bucket
+                        .upload_part(credentials, key, part_number, upload_id),
+                    query,
+                    headers,
+                )
+            }
+            "PUT" => self.sign_action(
+                self.request_bucket.put_object(credentials, key),
+                query,
+                headers,
+            ),
+            "GET" if key.is_empty() => self.sign_action(
+                self.request_bucket.list_objects_v2(credentials),
+                query,
+                headers,
+            ),
+            "GET" if value("uploadId").is_some() => self.sign_action(
+                self.request_bucket.list_parts(
+                    credentials,
+                    key,
+                    value("uploadId").unwrap_or_default(),
+                ),
+                query,
+                headers,
+            ),
+            "GET" => self.sign_action(
+                self.request_bucket.get_object(credentials, key),
+                query,
+                headers,
+            ),
+            "HEAD" if key.is_empty() => {
+                self.sign_action(self.request_bucket.head_bucket(credentials), query, headers)
+            }
+            "HEAD" => self.sign_action(
+                self.request_bucket.head_object(credentials, key),
+                query,
+                headers,
+            ),
+            "DELETE" if value("uploadId").is_some() => self.sign_action(
+                self.request_bucket.abort_multipart_upload(
+                    credentials,
+                    key,
+                    value("uploadId").unwrap_or_default(),
+                ),
+                query,
+                headers,
+            ),
+            "DELETE" => self.sign_action(
+                self.request_bucket.delete_object(credentials, key),
+                query,
+                headers,
+            ),
+            "POST" if value("uploads").is_some() => self.sign_action(
+                self.request_bucket
+                    .create_multipart_upload(credentials, key),
+                query,
+                headers,
+            ),
+            "POST" if value("uploadId").is_some() => self.sign_action(
+                self.request_bucket.complete_multipart_upload(
+                    credentials,
+                    key,
+                    value("uploadId").unwrap_or_default(),
+                    std::iter::empty::<&str>(),
+                ),
+                query,
+                headers,
+            ),
+            _ => {
+                return Err(TransportError::Other(format!(
+                    "Unsupported S3 request: {method}"
+                )))
+            }
+        };
+        Ok(url)
     }
 
     fn request(
@@ -200,27 +223,14 @@ impl S3Transport {
         query: &[(String, String)],
         extra_headers: &[(&str, String)],
         body: Option<&[u8]>,
-        payload_hash: &str,
+        _payload_hash: &str,
     ) -> Result<ureq::Response, TransportError> {
-        let query_encoded = canonical_query_string(query);
-        let (_, url) = self.host_and_url(key, &query_encoded)?;
-        let (authorization, _amz_date, headers) = self.sign_headers(
-            method,
-            key,
-            query,
-            extra_headers,
-            payload_hash,
-            SystemTime::now(),
-        )?;
+        let url = self.signed_url(method, key, query, extra_headers)?;
 
         let mut req = agent.request(method, &url);
-        for (name, value) in &headers {
-            if name == "host" {
-                continue;
-            }
+        for (name, value) in extra_headers {
             req = req.set(name, value);
         }
-        req = req.set("Authorization", &authorization);
 
         let response = match body {
             Some(bytes) => req.send_bytes(bytes),
@@ -244,33 +254,26 @@ impl S3Transport {
         metadata: &FileMetadata,
         size: u64,
     ) -> Result<(), TransportError> {
-        let mut file =
-            fs::File::open(local_path).map_err(|e| TransportError::Other(e.to_string()))?;
-        let mut buf = Vec::with_capacity(size as usize);
-        file.read_to_end(&mut buf)
-            .map_err(|e| TransportError::Other(e.to_string()))?;
-        if buf.len() as u64 != size {
-            return Err(TransportError::Other(
-                "File size changed while reading for PutObject".into(),
-            ));
-        }
-
-        let payload_hash = hex::encode(Sha256::digest(&buf));
+        let file = fs::File::open(local_path).map_err(|e| TransportError::Other(e.to_string()))?;
         let key = self.object_key(relative_path);
         let mut extra_headers: Vec<(&str, String)> = vec![("content-length", size.to_string())];
         if metadata.mtime > 0 {
             extra_headers.push((META_MTIME, metadata.mtime.to_string()));
         }
 
-        let resp = self.request(
-            &self.transfer_agent,
-            "PUT",
-            &key,
-            &[],
-            &extra_headers,
-            Some(&buf),
-            &payload_hash,
-        )?;
+        let url = self.signed_url("PUT", &key, &[], &extra_headers)?;
+        let mut request = self.transfer_agent.put(&url);
+        for (name, value) in &extra_headers {
+            request = request.set(name, value);
+        }
+        let resp = match request.send(file) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                return Err(classify_s3_error(status, &body));
+            }
+            Err(error) => return Err(TransportError::Other(error.to_string())),
+        };
         if resp.status() >= 400 {
             return Err(TransportError::Http(resp.status(), "PutObject".into()));
         }
@@ -1287,178 +1290,9 @@ fn local_name(name: &[u8]) -> String {
         .to_string()
 }
 
-pub(crate) fn encode_path(path: &str) -> String {
-    path.split('/')
-        .map(uri_encode)
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-pub(crate) fn uri_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push_str(&hex::encode_upper([b]));
-            }
-        }
-    }
-    out
-}
-
-fn canonical_query_string(params: &[(String, String)]) -> String {
-    let mut encoded: Vec<(String, String)> = params
-        .iter()
-        .map(|(k, v)| (uri_encode(k), uri_encode(v)))
-        .collect();
-    encoded.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    encoded
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn trim_all(value: &str) -> String {
-    let collapsed: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed
-}
-
-fn amz_date(now: SystemTime) -> String {
-    let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-    let days = secs.div_euclid(86_400);
-    let sod = secs.rem_euclid(86_400);
-    let hour = sod / 3_600;
-    let minute = (sod % 3_600) / 60;
-    let second = sod % 60;
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
-}
-
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += if month <= 2 { 1 } else { 0 };
-    (year as i32, month as u32, day as u32)
-}
-
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key");
-    mac.update(data);
-    mac.finalize().into_bytes().to_vec()
-}
-
-fn signing_key(secret: &str, date_stamp: &str, region: &str, service: &str) -> Vec<u8> {
-    let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date_stamp.as_bytes());
-    let k_region = hmac_sha256(&k_date, region.as_bytes());
-    let k_service = hmac_sha256(&k_region, service.as_bytes());
-    hmac_sha256(&k_service, b"aws4_request")
-}
-
-/// Build the SigV4 canonical request string (exported for tests).
-pub fn canonical_request(
-    method: &str,
-    canonical_uri: &str,
-    canonical_query: &str,
-    canonical_headers: &str,
-    signed_headers: &str,
-    payload_hash: &str,
-) -> String {
-    format!(
-        "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    )
-}
-
-pub fn string_to_sign(amz_date: &str, credential_scope: &str, canonical_hash: &str) -> String {
-    format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_hash}")
-}
-
-pub fn signature_hex(
-    secret: &str,
-    date_stamp: &str,
-    region: &str,
-    service: &str,
-    sts: &str,
-) -> String {
-    let key = signing_key(secret, date_stamp, region, service);
-    hex::encode(hmac_sha256(&key, sts.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn uri_encode_spaces_and_unicode() {
-        assert_eq!(uri_encode("a b"), "a%20b");
-        assert_eq!(uri_encode("100%"), "100%25");
-        assert_eq!(uri_encode("a+b"), "a%2Bb");
-        assert_eq!(encode_path("dir/nested file.txt"), "dir/nested%20file.txt");
-        assert_eq!(encode_path("café/x"), "caf%C3%A9/x");
-    }
-
-    #[test]
-    fn path_encoding_preserves_slashes() {
-        assert_eq!(
-            encode_path("customer/device/a/b.zip"),
-            "customer/device/a/b.zip"
-        );
-    }
-
-    #[test]
-    fn aws_get_vanilla_signature_vector() {
-        // AWS SigV4 get-vanilla style canonical request (empty query string).
-        let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
-        let canonical = canonical_request(
-            "GET",
-            "/",
-            "",
-            "host:example.amazonaws.com\nx-amz-date:20150830T123600Z\n",
-            "host;x-amz-date",
-            EMPTY_PAYLOAD_HASH,
-        );
-        let hash = hex::encode(Sha256::digest(canonical.as_bytes()));
-        assert_eq!(
-            hash,
-            "bb579772317eb040ac9ed261061d46c1f17a8133879d6129b6e1c25292927e63"
-        );
-        let scope = "20150830/us-east-1/service/aws4_request";
-        let sts = string_to_sign("20150830T123600Z", scope, &hash);
-        let sig = signature_hex(secret, "20150830", "us-east-1", "service", &sts);
-        assert_eq!(
-            sig,
-            "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
-        );
-    }
-
-    #[test]
-    fn aws_iam_docs_query_canonical_hash() {
-        // Canonical request from AWS IAM SigV4 docs (GET with query params).
-        let canonical = canonical_request(
-            "GET",
-            "/",
-            "Param1=value1&Param2=value2",
-            "host:example.amazonaws.com\nx-amz-date:20150830T123600Z\n",
-            "host;x-amz-date",
-            EMPTY_PAYLOAD_HASH,
-        );
-        let hash = hex::encode(Sha256::digest(canonical.as_bytes()));
-        assert_eq!(
-            hash,
-            "816cd5b414d056048ba4f7c5386d6e0533120fb1fcfa93762cf0fc39e2cf19e0"
-        );
-    }
 
     #[test]
     fn parse_list_objects_xml() {
@@ -1531,16 +1365,6 @@ mod tests {
             transport.object_key(".backupsynctool-remote-manifest.json"),
             ".backupsynctool-remote-manifest.json"
         );
-    }
-
-    #[test]
-    fn canonical_query_omits_nothing_and_sorts() {
-        let q = canonical_query_string(&[
-            ("prefix".into(), "a/".into()),
-            ("list-type".into(), "2".into()),
-            ("max-keys".into(), "1".into()),
-        ]);
-        assert_eq!(q, "list-type=2&max-keys=1&prefix=a%2F");
     }
 
     #[test]

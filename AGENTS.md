@@ -8,11 +8,11 @@
 | --- | --- |
 | Control plane | Laravel `box-rui-cam` → `https://backup.rui.cam` |
 | Sync app | this repo |
-| Object storage | MinIO → `https://s3.rui.cam` |
+| Object storage | Garage → `https://s3.rui.cam` |
 
 Do not conflate pairing (`backup.rui.cam`) with object storage (`s3.rui.cam`).
 
-**Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy. Cutover status: `docs/plans/2026-07-11-HANDOFF.md` / `SPEC.md` checklist.
+**Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy.
 
 ## Build & Launch Rules
 
@@ -30,19 +30,21 @@ Confirm: release build 0 errors · root `backupsynctool.exe` copied · app runni
 
 - Rust app lives in the repo root.
 - UI is raw Win32 through `windows-rs`; do not add egui, nwg, webview, Electron, or an async runtime.
-- HTTP uses blocking `ureq` (S3 SigV4 + pairing API). No async runtime / AWS SDK.
+- HTTP uses blocking `ureq`; `rusty_s3` constructs and signs S3 requests. No async runtime / AWS SDK.
 - Config is `backupsynctool.json` next to the exe.
-- S3 secret and device token are encrypted with Windows DPAPI in `src/secret.rs` (entropy remains `webdavsync-v1`).
+- Garage S3 secret and device token are encrypted with Windows DPAPI in `src/secret.rs` (entropy remains `webdavsync-v1`).
 - Sync storage goes through `Arc<dyn BackupTransport>` in `src/transport/` — `sync.rs` must not call S3 APIs directly. Transport is S3-only.
 - Tray: closing hides; double-click reopens.
 - Auto-update replaces exe in place from GitHub releases.
+- Config schema must be v2; any legacy configuration requires new pairing.
+- Upload is one-way. Restore is an explicit whole-customer download into a new folder.
 - `target/` is ignored; do not commit.
 
 ## Sync And Pairing (must match SPEC.md)
 
 - **Start sync** via `restart_sync_engine()` — launch (if configured), after pair approval, and Save paths. Pairing must start the engine.
-- **First backup:** no local manifest + `sync_remote_changes` false → upload all local files.
-- Local manifest updated only after successful upload; remote manifest from server listing only.
+- **First backup:** no v2 local manifest → upload all local files.
+- Local manifest lives under `%LOCALAPPDATA%\BackupSyncTool` and updates only after successful upload verification.
 - S3: PutObject ≤ `s3_part_size_mib`; larger = persistent multipart. File concurrency capped at 2.
 - Pair start sends `supported_transports: ["s3"]`. Non-`s3` `transport` → re-pair.
 - Default `pair_api_base` = `https://backup.rui.cam`.
@@ -50,7 +52,7 @@ Confirm: release build 0 errors · root `backupsynctool.exe` copied · app runni
 
 ## Storage Errors
 
-- S3 auth/policy failures → pause sync + pair-again UI.
+- Garage S3 auth/policy failures → pause sync + pair-again UI.
 - Missing object is not auth failure.
 
 ## UI Notices
