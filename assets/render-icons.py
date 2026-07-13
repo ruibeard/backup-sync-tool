@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-"""Generate tray / menubar / AppIcon from SVG + brand PNG masters.
+"""Generate all icons from shield SVG masters (one metaphor).
 
-Masters (edit these):
-  assets/syncing1.svg … syncing6.svg   blue cloud + white arrows (animation)
-  assets/syncing.svg                   = syncing1 (canonical)
-  assets/complete.svg                  green cloud + check
-  assets/brand.png                     shield (Frame-1) → app-idle / AppIcon / menubar idle
+Masters:
+  assets/idle.svg          green outline shield + check
+  assets/syncing1..6.svg   blue filled shield + white spin arrows
+  assets/syncing.svg       = syncing1
+  assets/complete.svg      green filled shield + white check
 
-Derived:
-  syncing.ico, syncing2..7.ico, complete.ico
-  menubar-icon.png, menubar-syncing.png, menubar-complete.png
-  app-idle.ico, AppIcon.icns
-  bridge-*.png from bridge-*.svg
-
-Requires: cairosvg, Pillow, magick, iconutil
+Derived: app-idle.ico, AppIcon.icns, syncing*.ico, complete.ico, menubar-*.png
 """
 from __future__ import annotations
 
@@ -44,11 +38,6 @@ def magick_ico(png: Path, ico: Path, sizes: str) -> None:
 
 
 def to_menubar_template(im: Image.Image, *, white_is_hole: bool) -> Image.Image:
-    """Black template for macOS.
-
-    white_is_hole=True  → syncing/complete (white arrows stay cutouts)
-    white_is_hole=False → brand (white fill stays solid in silhouette)
-    """
     out = Image.new("RGBA", im.size, (0, 0, 0, 0))
     sp, dp = im.load(), out.load()
     for y in range(im.size[1]):
@@ -92,42 +81,32 @@ def build_appicon(brand: Image.Image) -> None:
 def main() -> None:
     tmp = Path(tempfile.mkdtemp())
     try:
-        # --- Syncing frames from SVG ---
+        idle = svg_png(ASSETS / "idle.svg", 512)
+        idle.save(tmp / "idle.png")
+        # Also refresh brand.png from idle SVG for consistency
+        idle.save(ASSETS / "brand.png")
+        magick_ico(tmp / "idle.png", ASSETS / "app-idle.ico", "256,128,64,48,32,16")
+        build_appicon(idle)
+        print("wrote idle → app-idle.ico, AppIcon.icns, brand.png")
+
         frames = []
         for i in range(1, 7):
-            svg = ASSETS / f"syncing{i}.svg"
-            if not svg.is_file():
-                raise SystemExit(f"missing {svg}")
-            im = svg_png(svg, 256)
+            im = svg_png(ASSETS / f"syncing{i}.svg", 256)
             frames.append(im)
-            png = tmp / f"sync{i}.png"
+            png = tmp / f"s{i}.png"
             im.save(png)
             if i == 1:
                 magick_ico(png, ASSETS / "syncing.ico", "256,128,64,48,32,16")
-            # syncing2..7 ← syncing1..6
             magick_ico(png, ASSETS / f"syncing{i + 1}.ico", "64,48,32,16")
-        print("wrote syncing.ico + syncing2..7.ico from syncing1..6.svg")
+        print("wrote syncing.ico + syncing2..7.ico (shield + spin)")
 
-        # --- Complete from SVG ---
         done = svg_png(ASSETS / "complete.svg", 256)
-        done_png = tmp / "done.png"
-        done.save(done_png)
-        magick_ico(done_png, ASSETS / "complete.ico", "256,128,64,48,32,16")
-        print("wrote complete.ico from complete.svg")
+        done.save(tmp / "done.png")
+        magick_ico(tmp / "done.png", ASSETS / "complete.ico", "256,128,64,48,32,16")
+        print("wrote complete.ico")
 
-        # --- Brand from Frame-1 PNG ---
-        brand_path = ASSETS / "brand.png"
-        if not brand_path.is_file():
-            raise SystemExit("missing assets/brand.png (Frame-1)")
-        brand = Image.open(brand_path).convert("RGBA")
-        brand_png = tmp / "brand.png"
-        brand.save(brand_png)
-        magick_ico(brand_png, ASSETS / "app-idle.ico", "256,128,64,48,32,16")
-        build_appicon(brand)
-        print("wrote app-idle.ico + AppIcon.icns from brand.png")
-
-        # --- Menubar templates @22 ---
-        to_menubar_template(brand, white_is_hole=False).resize(
+        # Menubar: idle keeps white fill solid; syncing/complete punch white holes
+        to_menubar_template(idle, white_is_hole=False).resize(
             (22, 22), Image.Resampling.LANCZOS
         ).save(ASSETS / "menubar-icon.png")
         to_menubar_template(frames[0], white_is_hole=True).resize(
@@ -138,22 +117,35 @@ def main() -> None:
         ).save(ASSETS / "menubar-complete.png")
         print("wrote menubar-*.png")
 
-        # --- Bridge from SVG ---
-        for name, size in [("bridge-pc", 40), ("bridge-server", 32)]:
-            svg = ASSETS / f"{name}.svg"
-            if svg.is_file():
-                svg_png(svg, size).save(ASSETS / f"{name}.png")
-        # Prefer brand-plate (Frame.png) for bridge-server if present — white glyph on green
-        plate = ASSETS / "brand-plate.png"
-        if plate.is_file():
-            Image.open(plate).convert("RGBA").resize(
-                (32, 32), Image.Resampling.LANCZOS
-            ).save(ASSETS / "bridge-server.png")
+        # Bridge: plate = filled green shield style
+        plate = svg_png(ASSETS / "complete.svg", 32)
+        # solid green square + white shield like old brand-plate — use idle on green
+        bg = Image.new("RGBA", (32, 32), (0x01, 0x66, 0x30, 255))
+        # white stroke shield from idle silhouette
+        mark = to_menubar_template(
+            svg_png(ASSETS / "idle.svg", 24), white_is_hole=False
+        )
+        # invert to white
+        wmark = Image.new("RGBA", mark.size, (0, 0, 0, 0))
+        sp, dp = mark.load(), wmark.load()
+        for y in range(mark.size[1]):
+            for x in range(mark.size[0]):
+                _r, _g, _b, a = sp[x, y]
+                if a >= 12:
+                    dp[x, y] = (255, 255, 255, a)
+        ox = (32 - wmark.size[0]) // 2
+        oy = (32 - wmark.size[1]) // 2
+        bg.alpha_composite(wmark, (ox, oy))
+        bg.save(ASSETS / "bridge-server.png")
+        bg.save(ASSETS / "brand-plate.png")
+
+        if (ASSETS / "bridge-pc.svg").is_file():
+            svg_png(ASSETS / "bridge-pc.svg", 40).save(ASSETS / "bridge-pc.png")
         print("wrote bridge-*.png")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print("done — icons from SVG/brand masters")
+    print("done — all icons are shields")
 
 
 if __name__ == "__main__":
