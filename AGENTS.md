@@ -20,18 +20,27 @@ After **every** code change that affects the running app, build and relaunch. Do
 
 ### Windows (Proxmox VM 102)
 
+From Mac (preferred):
+
+```bash
+./build-windows.sh
+```
+
+On the VM:
+
 ```powershell
 .\build-local.ps1
 ```
 
 Always from repo root. Target is **`x86_64-win7-windows-msvc`** (Win7-compatible). Never launch from `target/debug` or `target/release`.
 
-Confirm: release build 0 errors · root `backupsynctool.exe` copied · app running from repo root.
+Confirm: release build 0 errors · root/`dist/windows` `backupsynctool.exe` · app running when launched from repo root on the VM.
 
 ### macOS (this machine / Darwin host)
 
 ```bash
-./build-macos.sh
+./build-macos.sh              # build + launch .app
+./build-macos.sh --package    # also → dist/macos/backupsynctool-macos-*.tar.gz
 ```
 
 Script builds, codesigns, kills old process, launches `.app`, checks pid. Confirm: 0 errors · process running. Details in `SPEC.md`.
@@ -71,7 +80,7 @@ Script builds, codesigns, kills old process, launches `.app`, checks pid. Confir
 
 ## Release
 
-`.\build-local.ps1` for local cycles. `.\release.ps1` for public `vX.Y.Z` (same Win7 target). Do not force-move tags unless repairing.
+`./build-macos.sh` / `./build-windows.sh` for local cycles. `./release.sh` (Mac) for public `vX.Y.Z` with both platform assets. Do not force-move tags unless repairing. Legacy `.\release.ps1` is Windows-only — prefer `./release.sh`.
 
 ## Win32 Gotchas
 

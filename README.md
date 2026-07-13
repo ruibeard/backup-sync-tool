@@ -28,20 +28,29 @@ Uploads are one-way and local deletions are not propagated. **Restore** download
 
 ## Build
 
-**Windows** (VM 102):
-
-```powershell
-.\build-local.ps1
-```
-
-Target: `x86_64-win7-windows-msvc`. Launch root `backupsynctool.exe` only.
-
-**macOS** (this machine / worktree):
+**Windows** (from Mac → Proxmox VM 102):
 
 ```bash
-./build-macos.sh            # build + launch .app
-./build-macos.sh --install  # also → /Applications, then launch that
-./build-macos.sh --no-launch
+./build-windows.sh            # push branch, build on VM, pull exe → dist/windows/
 ```
 
-Details + checklist: [SPEC.md](SPEC.md).
+On the VM itself: `.\build-local.ps1` (Win7 target `x86_64-win7-windows-msvc`).
+
+**macOS** (this machine):
+
+```bash
+./build-macos.sh              # build + launch .app
+./build-macos.sh --install    # also → /Applications, then launch that
+./build-macos.sh --no-launch  # build only
+./build-macos.sh --package    # build + updater tarball (no launch)
+```
+
+## Release
+
+From a clean Mac checkout (ships both assets):
+
+```bash
+./release.sh
+```
+
+Bumps patch in `Cargo.toml`, builds macOS tarball + Windows exe, tags `vX.Y.Z`, pushes, uploads to GitHub Releases. Details: [SPEC.md](SPEC.md).

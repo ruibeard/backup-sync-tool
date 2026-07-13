@@ -11,16 +11,22 @@ BIN="$OUT/backupsynctool"
 APP="$OUT/Backup Sync Tool.app"
 INSTALL=0
 LAUNCH=1
+PACKAGE=0
 
 for arg in "$@"; do
   case "$arg" in
     --install|-i) INSTALL=1 ;;
     --no-launch) LAUNCH=0 ;;
+    --package|-p)
+      PACKAGE=1
+      LAUNCH=0
+      ;;
     -h|--help)
-      echo "Usage: ./build-macos.sh [--install] [--no-launch]"
+      echo "Usage: ./build-macos.sh [--install] [--no-launch] [--package]"
       echo "  Build release .app under dist/macos/ and launch it"
       echo "  --install    also copy to /Applications (launch that copy)"
       echo "  --no-launch  build only"
+      echo "  --package    build + write updater tarball (implies --no-launch)"
       exit 0
       ;;
   esac
@@ -68,6 +74,16 @@ APP_ABS="$(cd "$OUT" && pwd)/Backup Sync Tool.app"
 LAUNCH_APP="$APP_ABS"
 echo "Built: $APP_ABS"
 
+if [[ "$PACKAGE" -eq 1 ]]; then
+  ARCH="$(uname -m)"
+  if [[ "$ARCH" == "arm64" ]]; then
+    ARCH="aarch64"
+  fi
+  TGZ="$OUT/backupsynctool-macos-${ARCH}.tar.gz"
+  tar -C "$OUT" -czf "$TGZ" backupsynctool
+  echo "Packaged: $(cd "$OUT" && pwd)/backupsynctool-macos-${ARCH}.tar.gz"
+fi
+
 if [[ "$INSTALL" -eq 1 ]]; then
   DEST="/Applications/Backup Sync Tool.app"
   rm -rf "$DEST"
@@ -90,6 +106,6 @@ if [[ "$LAUNCH" -eq 1 ]]; then
     exit 1
   fi
 else
-  echo "Skipped launch (--no-launch)"
+  echo "Skipped launch (--no-launch/--package)"
   echo "Launch: open \"$LAUNCH_APP\""
 fi

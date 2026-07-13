@@ -9,7 +9,8 @@ POLL_SECS="${POLL_SECS:-15}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-2400}"
 BRANCH="${1:-}"
 
-cd "$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
 
 if [[ -z "$BRANCH" ]]; then
   BRANCH="$(git rev-parse --abbrev-ref HEAD)"

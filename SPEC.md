@@ -102,9 +102,11 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 ## Build and verification
 
-**Windows:** Use `build-local.ps1` on Windows VM 102. It builds `x86_64-win7-windows-msvc`, checks forbidden Windows 8+ imports, copies the executable to the repository root, and launches that copy. Validate release builds on both the Win7 test VM and a modern Windows VM.
+**Windows (from Mac):** `./build-windows.sh` pushes the branch, builds on Proxmox VM 102 via `build-local.ps1 -NoLaunch`, and copies `backupsynctool.exe` to `dist/windows/`. Target remains `x86_64-win7-windows-msvc`. On the VM: `build-local.ps1`. Validate on Win7 test VM 100 and a modern Windows VM.
 
-**macOS:** `./build-macos.sh` builds, signs, and launches `dist/macos/Backup Sync Tool.app`. Optional `--install` copies to `/Applications` then launches that copy. `--no-launch` builds only. Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
+**macOS:** `./build-macos.sh` builds, signs, and launches `dist/macos/Backup Sync Tool.app`. `--install` copies to `/Applications`. `--no-launch` builds only. `--package` also writes `dist/macos/backupsynctool-macos-{aarch64|x86_64}.tar.gz` (updater asset; implies `--no-launch`). Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
+
+**Release (Mac):** `./release.sh` on a clean tree — bump patch → commit → macOS package + Windows build → tag `vX.Y.Z` → push → upload both assets with `gh`. GitHub Actions may create notes-only release shell; assets come from `release.sh`. Prefer this over legacy `release.ps1` (Windows-only).
 
 | Action | How |
 | --- | --- |
@@ -120,4 +122,4 @@ Config/state: `~/Library/Application Support/BackupSyncTool/` · Secrets: Keycha
 
 Checklist: menubar icon · watch folder · pair QR window → sync · drop file uploads · quit/relaunch keeps Keychain · restore · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
 
-Limits: not notarized; update asset `backupsynctool-macos-*.tar.gz` on GitHub Releases.
+Limits: not notarized; release assets `backupsynctool.exe` + `backupsynctool-macos-*.tar.gz` on GitHub Releases.

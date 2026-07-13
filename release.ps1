@@ -1,3 +1,5 @@
+# DEPRECATED for dual-platform releases: use ./release.sh from macOS instead.
+# This script remains for Windows-only emergency bumps on VM 102.
 $ErrorActionPreference = "Stop"
 $env:PATH += ";$env:USERPROFILE\.cargo\bin"
 
