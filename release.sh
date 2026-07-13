@@ -48,8 +48,20 @@ if [[ -n "$(git status --porcelain Cargo.lock)" ]]; then
 fi
 git commit -m "release: $TAG"
 
+# cargo build may rewrite Cargo.lock after the version bump
+if [[ -n "$(git status --porcelain Cargo.lock)" ]]; then
+  git add Cargo.lock
+  git commit -m "chore: sync Cargo.lock for $TAG"
+fi
+
 echo "==> macOS package"
 ./build-macos.sh --package
+
+# lockfile can also change during the package build
+if [[ -n "$(git status --porcelain Cargo.lock)" ]]; then
+  git add Cargo.lock
+  git commit -m "chore: sync Cargo.lock for $TAG"
+fi
 
 MAC_TGZ="$(ls -1 dist/macos/backupsynctool-macos-*.tar.gz | head -1)"
 if [[ -z "$MAC_TGZ" || ! -f "$MAC_TGZ" ]]; then
