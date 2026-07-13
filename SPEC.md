@@ -13,7 +13,7 @@
 | Object storage | Garage at `https://s3.rui.cam` | same |
 
 Windows client: Windows 7 SP1 x64 through Windows 11.  
-macOS client: Apple Silicon / Intel Darwin; local builds sign with stable self-signed identity `Backup Sync Tool Dev` (auto-created in login keychain by `scripts/ensure-macos-sign-identity.sh`) so Keychain “Always Allow” sticks across rebuilds. Not notarized in v1; override identity with `MACOS_SIGN_IDENTITY`.
+macOS client: Apple Silicon / Intel Darwin; local `./build-macos.sh` uses **ad-hoc** codesign by default (no Keychain password prompts). Pass `--identity=…` or `MACOS_SIGN_IDENTITY=…` only when you want a real cert (e.g. package/release). Not notarized in v1.
 
 Neither client uses WebDAV, async runtime, AWS SDK, Electron/webview, or data-migration logic. **XD licence detection is Windows-only.**
 
@@ -21,7 +21,22 @@ Neither client uses WebDAV, async runtime, AWS SDK, Electron/webview, or data-mi
 
 `backupsynctool.json` sits next to the executable. Only `schema_version: 2` with `transport: "s3"` is accepted as paired configuration. Everything else starts unpaired.
 
-On macOS, `s3_secret_enc` / `device_token_enc` store Keychain handles (`kc1:…`), not DPAPI blobs. `start_with_windows` means **start at login** (LaunchAgent → `backupsynctool --daemon`).
+On macOS, `s3_secret_enc` / `device_token_enc` store Keychain handles (`kc1:<account>`), not DPAPI blobs. `start_with_windows` means **start at login** (LaunchAgent → `backupsynctool --daemon`).
+
+### macOS Keychain (secrets)
+
+Service: `cam.rui.backupsynctool`. Accounts: `s3_secret`, `device_token`.
+
+| Rule | Detail |
+| --- | --- |
+| Store | `security add-generic-password … -A` after deleting any existing row for that account (`src/secret.rs`). `-A` = any app may read without a Keychain UI prompt — required because ad-hoc codesign changes CDHash every local rebuild. |
+| Load | CLI `find-generic-password -w` with a **2 s timeout**. On timeout or auth failure, delete the stale item and fail closed (no hang, no password dialog). |
+| Startup | `purge_stale_keychain_handles()` runs before decrypt in `SyncHost::load`. |
+| Local build | `./build-macos.sh` defaults to ad-hoc (`--sign -`). Combined with `-A` storage, rebuild + relaunch must not ask for the login Keychain password. |
+| Real signing | `--identity=…` / `MACOS_SIGN_IDENTITY` only for package/release — never the default dev loop. |
+| Migration | Items created before `-A` (or via old ACL-bound APIs) may be removed on first launch after upgrade; **re-pair once** if sync stops — that is pairing UI, not a Keychain password prompt. |
+
+Do **not** add signing-identity helper scripts or `security add-trusted-cert` to the dev workflow.
 
 ```json
 {
@@ -104,18 +119,41 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 **Windows (from Mac):** `./build-windows.sh` pushes the branch, builds on Proxmox VM 102 via `build-local.ps1 -NoLaunch`, and copies `backupsynctool.exe` to `dist/windows/`. Target remains `x86_64-win7-windows-msvc`. On the VM: `build-local.ps1`. Validate on Win7 test VM 100 and a modern Windows VM.
 
-**macOS:** `./build-macos.sh` builds, signs with stable identity (not ad-hoc `-`), and launches `dist/macos/Backup Sync Tool.app`. First Keychain access after switching to this identity: click **Always Allow** once. `--install` copies to `/Applications`. `--no-launch` builds only. `--package` also writes `dist/macos/backupsynctool-macos-{aarch64|x86_64}.tar.gz` (updater asset; implies `--no-launch`). Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
+**macOS:** `./build-macos.sh` builds, ad-hoc-signs the `.app` once (no Keychain password), and launches `dist/macos/Backup Sync Tool.app`. Real signing only with `--identity=…` / `MACOS_SIGN_IDENTITY`. `--install` copies to `/Applications` via `ditto` (preserves signature). `--no-launch` builds only. `--package` also writes `dist/macos/backupsynctool-macos-{aarch64|x86_64}.tar.gz` (updater asset; implies `--no-launch`). Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
+
+### Icon assets
+
+**Source (commit these):** `assets/originals/*.svg` (9 shield masters) + `assets/bridge-pc.svg` + `assets/github.ico` + `assets/render-icons.py`.
+
+**Generated (run script after SVG edits — do not hand-edit):**
+
+| File(s) | Platform | Why |
+| --- | --- | --- |
+| `menubar-icon.png`, `menubar-syncing.png`, `menubar-complete.png` | macOS | Menu bar tray (3 states; one syncing frame) |
+| `AppIcon.icns` | macOS | Dock / Finder icon |
+| `app-idle.ico`, `complete.ico` | Windows | Tray idle + done |
+| `syncing.ico`, `syncing2.ico` … `syncing7.ico` | Windows | 7-frame tray animation (`syncing1`–`syncing6` SVGs + frame 0) |
+| `bridge-pc.png`, `bridge-server.png` | Windows | Status window bridge tiles |
+
+macOS does **not** load the `.ico` files. Windows does **not** load the menubar PNGs. Most of `assets/` bulk is Windows ICO sizes embedded by `build.rs`.
+
+```bash
+python3 assets/render-icons.py   # cairosvg, Pillow, ImageMagick, iconutil
+```
 
 **Release (Mac):** `./release.sh` on a clean tree — bump patch → commit → macOS package + Windows build → tag `vX.Y.Z` → push → upload both assets with `gh`. GitHub Actions may create notes-only release shell; assets come from `release.sh`. Prefer this over legacy `release.ps1` (Windows-only).
 
 | Action | How |
 | --- | --- |
-| Main window | Menu → Open Backup Sync Tool… (watch / pair / restore / login / update) |
-| Logs | Open Logs |
+| Main window | Menu → **Open Backup Sync Tool…** → `status_window.rs` (Windows-parity controls: watch folder, pair, restore, login toggle, auto-update, update, links) |
+| Logs | **Open Logs** |
+| Quit | **Quit Backup Sync** |
 | Daemon only | `backupsynctool --daemon` |
 
-Config/state: `~/Library/Application Support/BackupSyncTool/` · Secrets: Keychain `cam.rui.backupsynctool`.
+Menubar holds status icon + the three items above only. Pairing QR remains a separate `NSPanel` (`notify.rs`). Routine notices use `notify_user()` / tray tips — not `NSAlert` action sheets for primary workflow.
 
-Checklist: menubar icon · watch folder · pair QR window → sync · drop file uploads · quit/relaunch keeps Keychain · restore · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
+Config/state: `~/Library/Application Support/BackupSyncTool/` · Secrets: Keychain `cam.rui.backupsynctool` (see Keychain table above).
+
+Checklist: menubar icon · **Open Backup Sync Tool…** status window · watch folder · pair QR window → sync · drop file uploads · quit/relaunch **no Keychain password prompt** (ad-hoc + `-A`) · restore · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
 
 Limits: not notarized; release assets `backupsynctool.exe` + `backupsynctool-macos-*.tar.gz` on GitHub Releases.

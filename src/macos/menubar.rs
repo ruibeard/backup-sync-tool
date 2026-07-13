@@ -5,6 +5,7 @@ use crate::host::SyncHost;
 use crate::logs;
 use crate::macos::launchd;
 use crate::macos::notify;
+use crate::macos::status_window::{self, StatusAction, StatusSnapshot};
 use crate::updater::{self, CheckResult};
 use dispatch::Queue;
 use objc2::MainThreadMarker;
@@ -164,33 +165,98 @@ pub fn run() {
     app.run();
 }
 
-fn status_line(host: &SyncHost) -> String {
-    if host.auth_failed() {
-        "Status: re-pair required.".into()
-    } else if host.is_configured() {
-        format!("Status: paired · watching {}", host.config.watch_folder)
-    } else if host.is_paired() {
-        "Status: paired · set a watch folder.".into()
-    } else if !host.config.watch_folder.trim().is_empty() {
-        format!("Status: not paired · folder {}", host.config.watch_folder)
+fn snapshot_from(host: &SyncHost) -> StatusSnapshot {
+    let paired = host.is_paired();
+    let connected = paired && !host.auth_failed();
+    let server_status = if host.auth_failed() {
+        "Re-pair required".into()
+    } else if connected {
+        "Connected".into()
     } else {
-        "Status: not set up yet.".into()
+        "Not connected".into()
+    };
+    let syncing = host.engine_running() && connected;
+    let sync_status = if syncing {
+        "Uploading…".into()
+    } else if connected {
+        "Idle".into()
+    } else {
+        String::new()
+    };
+    StatusSnapshot {
+        watch_folder: host.config.watch_folder.clone(),
+        connected,
+        server_status,
+        start_at_login: host.config.start_with_windows,
+        auto_update: host.config.auto_update,
+        activity_lines: crate::logs::recent_lines(200),
+        syncing,
+        sync_status,
+        version: env!("CARGO_PKG_VERSION").into(),
     }
 }
 
 fn open_main_window(shared: &Shared) {
-    let line = shared
+    let snap = shared
         .host
         .lock()
-        .map(|h| status_line(&h))
-        .unwrap_or_else(|_| "Status: unknown".into());
-    match notify::prompt_home(&line) {
-        notify::HomeChoice::SetWatch => start_set_watch(shared),
-        notify::HomeChoice::Pair => start_pair(shared),
-        notify::HomeChoice::Restore => start_restore(shared),
-        notify::HomeChoice::ToggleLogin => do_toggle_login(shared),
-        notify::HomeChoice::Update => start_update(shared),
-        notify::HomeChoice::Close => tip(&shared.tray, "Running in menu bar"),
+        .map(|h| snapshot_from(&h))
+        .unwrap_or_default();
+    let shared_cb = shared.clone();
+    status_window::show(
+        snap,
+        Arc::new(move |action| match action {
+            StatusAction::OpenWatch => {
+                if let Ok(h) = shared_cb.host.lock() {
+                    let path = h.config.watch_folder.clone();
+                    if !path.trim().is_empty() {
+                        let _ = std::process::Command::new("open").arg(&path).status();
+                    } else {
+                        tip(&shared_cb.tray, "No watch folder set");
+                    }
+                }
+            }
+            StatusAction::ChooseWatch => start_set_watch(&shared_cb),
+            StatusAction::Pair => start_pair(&shared_cb),
+            StatusAction::Restore => start_restore(&shared_cb),
+            StatusAction::ToggleLogin => {
+                do_toggle_login(&shared_cb);
+                refresh_status_window(&shared_cb);
+            }
+            StatusAction::ToggleAutoUpdate => {
+                if let Ok(mut h) = shared_cb.host.lock() {
+                    h.config.auto_update = !h.config.auto_update;
+                    let on = h.config.auto_update;
+                    if let Err(err) = config::save(&h.config) {
+                        tip(&shared_cb.tray, &format!("Save failed: {err}"));
+                    } else {
+                        tip(
+                            &shared_cb.tray,
+                            if on {
+                                "Auto-update ON"
+                            } else {
+                                "Auto-update OFF"
+                            },
+                        );
+                    }
+                }
+                refresh_status_window(&shared_cb);
+            }
+            StatusAction::Update => start_update(&shared_cb),
+            StatusAction::OpenGithub => {
+                status_window::open_url("https://github.com/ruibeard/backup-sync-tool")
+            }
+            StatusAction::OpenAuthor => status_window::open_url("https://rui.cam"),
+        }),
+    );
+}
+
+fn refresh_status_window(shared: &Shared) {
+    if !status_window::is_open() {
+        return;
+    }
+    if let Ok(h) = shared.host.lock() {
+        status_window::refresh(snapshot_from(&h));
     }
 }
 
@@ -229,6 +295,7 @@ fn start_set_watch(shared: &Shared) {
                 Ok(()) => {
                     tip(&shared.tray, &format!("Watching {}", path.display()));
                     apply_status(&shared);
+                    refresh_status_window(&shared);
                 }
                 Err(err) => tip(&shared.tray, &format!("Watch folder: {err}")),
             }

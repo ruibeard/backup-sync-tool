@@ -106,6 +106,11 @@ pub fn protect(_account: &str, plaintext: &str) -> Result<String, String> {
 }
 
 // --- macOS Keychain -------------------------------------------------------------
+//
+// Ad-hoc rebuilds change the app CDHash every time. Default Keychain ACLs bind to
+// that hash → macOS re-asks for the login password on every launch.
+// Store with `security … -A` (allow any app) so local rebuilds stop prompting.
+// Tradeoff: any local process that knows service+account can read the secret.
 
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "cam.rui.backupsynctool";
@@ -114,28 +119,149 @@ const KEYCHAIN_SERVICE: &str = "cam.rui.backupsynctool";
 const KC_PREFIX: &str = "kc1:";
 
 #[cfg(target_os = "macos")]
+fn kc_item_exists(account: &str) -> bool {
+    use std::process::Command;
+    Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn kc_delete(account: &str) {
+    use std::process::Command;
+    let _ = Command::new("security")
+        .args([
+            "delete-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+        ])
+        .status();
+}
+
+#[cfg(target_os = "macos")]
 fn kc_store(account: &str, plaintext: &str) -> Result<String, String> {
-    use security_framework::passwords::set_generic_password;
-    set_generic_password(KEYCHAIN_SERVICE, account, plaintext.as_bytes())
+    use std::process::Command;
+    // Delete first: `-U` can leave old CDHash-bound ACL on existing items.
+    kc_delete(account);
+    // -A: any app may read without Keychain prompt (needed for ad-hoc rebuilds).
+    let status = Command::new("security")
+        .args([
+            "add-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+            "-w",
+            plaintext,
+            "-A",
+        ])
+        .status()
         .map_err(|e| format!("Keychain set failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("Keychain set failed (exit {status})"));
+    }
     Ok(format!("{KC_PREFIX}{account}"))
 }
 
 #[cfg(target_os = "macos")]
-fn kc_load(encoded: &str) -> Result<String, String> {
-    use security_framework::passwords::{generic_password, PasswordOptions};
-    let account = encoded
-        .strip_prefix(KC_PREFIX)
-        .ok_or_else(|| "invalid Keychain secret handle (expected kc1:…)".to_string())?;
+fn kc_load_account(account: &str) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
     if account.is_empty() {
         return Err("empty Keychain account in secret handle".into());
     }
-    let bytes = generic_password(PasswordOptions::new_generic_password(
-        KEYCHAIN_SERVICE,
-        account,
-    ))
-    .map_err(|e| format!("Keychain get failed: {e}"))?;
-    String::from_utf8(bytes).map_err(|e| format!("Keychain secret not UTF-8: {e}"))
+
+    let mut child = Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+            "-w",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Keychain get failed: {e}"))?;
+    let pid = child.id();
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let out = child.wait_with_output();
+        let _ = tx.send(out);
+    });
+
+    let out = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(format!("Keychain get failed: {e}")),
+        Err(_) => {
+            let _ = Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+            if kc_item_exists(account) {
+                kc_delete(account);
+            }
+            return Err(
+                "Keychain get timed out (stale ACL item removed — pair again if sync stops)"
+                    .into(),
+            );
+        }
+    };
+
+    if !out.status.success() {
+        if kc_item_exists(account) {
+            kc_delete(account);
+        }
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("Keychain get failed: {err}"));
+    }
+
+    let plain = String::from_utf8(out.stdout)
+        .map_err(|e| format!("Keychain secret not UTF-8: {e}"))?
+        .trim_end_matches('\n')
+        .to_string();
+
+    // Rewrite with -A every successful read so ad-hoc rebuilds stay prompt-free.
+    let _ = kc_store(account, &plain);
+    Ok(plain)
+}
+
+#[cfg(target_os = "macos")]
+fn kc_load(encoded: &str) -> Result<String, String> {
+    let account = encoded
+        .strip_prefix(KC_PREFIX)
+        .ok_or_else(|| "invalid Keychain secret handle (expected kc1:…)".to_string())?;
+    kc_load_account(account)
+}
+
+/// Drop ACL-bound Keychain items that would otherwise prompt on every ad-hoc rebuild.
+#[cfg(target_os = "macos")]
+pub fn purge_stale_keychain_handles(handles: &[&str]) {
+    for encoded in handles {
+        let Some(account) = encoded.strip_prefix(KC_PREFIX) else {
+            continue;
+        };
+        if account.is_empty() || !kc_item_exists(account) {
+            continue;
+        }
+        if kc_load_account(account).is_err() {
+            kc_delete(account);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -21,7 +21,7 @@ Uploads are one-way and local deletions are not propagated. **Restore** download
 
 - One Garage bucket per customer; multiple approved devices intentionally share its object namespace.
 - One revocable Garage key per device.
-- Secrets: DPAPI (Windows) or Keychain (macOS).
+- Secrets: DPAPI (Windows) or Keychain with open ACL on macOS (`-A`; see [SPEC.md](SPEC.md)).
 - Config schema is v2. Legacy WebDAV configurations require fresh pairing.
 - Small files stream through PutObject; large files use persistent resumable multipart state under the platform app-support directory.
 - The upload manifest lives outside the watched folder (see [SPEC.md](SPEC.md)).
@@ -39,11 +39,13 @@ On the VM itself: `.\build-local.ps1` (Win7 target `x86_64-win7-windows-msvc`).
 **macOS** (this machine):
 
 ```bash
-./build-macos.sh              # build + launch .app
+./build-macos.sh              # ad-hoc sign + launch .app (no Keychain password)
 ./build-macos.sh --install    # also → /Applications, then launch that
 ./build-macos.sh --no-launch  # build only
 ./build-macos.sh --package    # build + updater tarball (no launch)
 ```
+
+Icon masters: `assets/originals/*.svg`. Run `python3 assets/render-icons.py` after SVG edits.
 
 ## Release
 

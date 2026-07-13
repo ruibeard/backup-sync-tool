@@ -16,6 +16,20 @@ pub fn ensure_logs_dir() -> PathBuf {
     dir
 }
 
+/// Newest-first lines from today's log (for status UI activity).
+pub fn recent_lines(limit: usize) -> Vec<String> {
+    let path = log_file_path();
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(limit)
+        .map(|l| l.to_string())
+        .collect()
+}
+
 fn logs_dir() -> PathBuf {
     let mut dir = std::env::current_exe().unwrap_or_default();
     dir.pop();

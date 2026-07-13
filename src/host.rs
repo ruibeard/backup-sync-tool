@@ -21,6 +21,11 @@ pub struct SyncHost {
 impl SyncHost {
     pub fn load() -> Self {
         let config = config::load();
+        #[cfg(target_os = "macos")]
+        secret::purge_stale_keychain_handles(&[
+            &config.s3_secret_enc,
+            &config.device_token_enc,
+        ]);
         let s3_secret_plain = if config.s3_secret_enc.trim().is_empty() {
             String::new()
         } else {

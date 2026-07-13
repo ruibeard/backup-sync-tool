@@ -290,7 +290,7 @@ fn alert_inner(title: &str, message: &str) {
 pub fn pair_watch_folder_required() {
     alert(
         "Backup Sync — Pair Device",
-        "Set a Watch Folder first (Open Backup Sync Tool… → Set Watch Folder…), then pair again.",
+        "Set a Watch Folder first (Open → Choose), then pair again.",
     );
 }
 
@@ -306,69 +306,5 @@ pub fn pair_failed(message: &str) {
             alert_inner("Backup Sync — Pair Failed", &message);
         });
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HomeChoice {
-    SetWatch,
-    Pair,
-    Restore,
-    ToggleLogin,
-    Update,
-    Close,
-}
-
-/// Main window (modal chooser). Safe from any thread; runs on main.
-pub fn prompt_home(status_line: &str) -> HomeChoice {
-    if MainThreadMarker::new().is_some() {
-        prompt_home_inner(status_line)
-    } else {
-        let status_line = status_line.to_string();
-        Queue::main().exec_sync(move || prompt_home_inner(&status_line))
-    }
-}
-
-fn prompt_home_inner(status_line: &str) -> HomeChoice {
-    use objc2_app_kit::NSAlertFirstButtonReturn;
-
-    let mtm = MainThreadMarker::new().expect("home window on main");
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
-
-    let alert = objc2_app_kit::NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str("Backup Sync Tool"));
-    alert.setInformativeText(&NSString::from_str(&format!(
-        "{status_line}\n\nChoose an action:"
-    )));
-    alert.addButtonWithTitle(&NSString::from_str("Set Watch Folder…"));
-    alert.addButtonWithTitle(&NSString::from_str("Pair Device…"));
-    alert.addButtonWithTitle(&NSString::from_str("Restore Backup…"));
-    alert.addButtonWithTitle(&NSString::from_str("Toggle Start at Login"));
-    alert.addButtonWithTitle(&NSString::from_str("Install Update…"));
-    alert.addButtonWithTitle(&NSString::from_str("Close"));
-
-    let window = alert.window();
-    window.center();
-    window.makeKeyAndOrderFront(None);
-    window.orderFrontRegardless();
-
-    let response = alert.runModal();
-    let idx = response - NSAlertFirstButtonReturn;
-    let choice = match idx {
-        0 => HomeChoice::SetWatch,
-        1 => HomeChoice::Pair,
-        2 => HomeChoice::Restore,
-        3 => HomeChoice::ToggleLogin,
-        4 => HomeChoice::Update,
-        _ => HomeChoice::Close,
-    };
-
-    if choice == HomeChoice::Close {
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    }
-    crate::logs::append(&format!("home choice: {choice:?}"));
-    choice
 }
 

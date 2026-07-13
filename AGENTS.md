@@ -51,7 +51,7 @@ Script builds, codesigns, kills old process, launches `.app`, checks pid. Confir
 - UI is raw Win32 through `windows-rs`; do not add egui, nwg, webview, Electron, or an async runtime.
 - HTTP uses blocking `ureq`; `rusty_s3` constructs and signs S3 requests. No async runtime / AWS SDK.
 - Config is `backupsynctool.json` next to the exe.
-- Garage S3 secret and device token are encrypted with Windows DPAPI in `src/secret.rs` (entropy remains `webdavsync-v1`).
+- Garage S3 secret and device token: Windows DPAPI in `src/secret.rs` (entropy `webdavsync-v1`); macOS Keychain via `security … -A` (no Keychain password prompts on ad-hoc rebuilds).
 - Sync storage goes through `Arc<dyn BackupTransport>` in `src/transport/` — `sync.rs` must not call S3 APIs directly. Transport is S3-only.
 - Tray: closing hides; double-click reopens.
 - Auto-update replaces exe in place from GitHub releases.

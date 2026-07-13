@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """Generate tray / menubar / AppIcon from shield SVG masters.
 
-Masters (edit these):
-  assets/idle.svg
-  assets/complete.svg
-  assets/syncing1.svg … syncing6.svg   (syncing.svg = syncing1)
+Masters (edit these only):
+  assets/originals/idle.svg
+  assets/originals/complete.svg
+  assets/originals/syncing1.svg … syncing6.svg   (syncing.svg = syncing1)
 
-Backups: assets/originals/ — never written by this script.
-
-Derived: app-idle.ico, AppIcon.icns, syncing*.ico, complete.ico, menubar-*.png
+Derived (generated, do not hand-edit): app-idle.ico, AppIcon.icns, syncing*.ico, complete.ico, menubar-*.png
 """
 from __future__ import annotations
 
@@ -23,6 +21,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
+ORIGINALS = ASSETS / "originals"
 
 
 def svg_png(svg: Path, size: int) -> Image.Image:
@@ -83,16 +82,15 @@ def build_appicon(brand: Image.Image) -> None:
 def main() -> None:
     tmp = Path(tempfile.mkdtemp())
     try:
-        idle = svg_png(ASSETS / "idle.svg", 512)
+        idle = svg_png(ORIGINALS / "idle.svg", 512)
         idle.save(tmp / "idle.png")
-        idle.save(ASSETS / "brand.png")
         magick_ico(tmp / "idle.png", ASSETS / "app-idle.ico", "256,128,64,48,32,16")
         build_appicon(idle)
-        print("wrote app-idle.ico, AppIcon.icns, brand.png")
+        print("wrote app-idle.ico, AppIcon.icns")
 
         frames = []
         for i in range(1, 7):
-            im = svg_png(ASSETS / f"syncing{i}.svg", 256)
+            im = svg_png(ORIGINALS / f"syncing{i}.svg", 256)
             frames.append(im)
             png = tmp / f"s{i}.png"
             im.save(png)
@@ -101,7 +99,7 @@ def main() -> None:
             magick_ico(png, ASSETS / f"syncing{i + 1}.ico", "64,48,32,16")
         print("wrote syncing.ico + syncing2..7.ico")
 
-        done = svg_png(ASSETS / "complete.svg", 256)
+        done = svg_png(ORIGINALS / "complete.svg", 256)
         done.save(tmp / "done.png")
         magick_ico(tmp / "done.png", ASSETS / "complete.ico", "256,128,64,48,32,16")
         print("wrote complete.ico")
@@ -118,9 +116,8 @@ def main() -> None:
         save_menubar(done, "menubar-complete.png", True)
         print("wrote menubar-*.png (44×44)")
 
-        # Bridge server = complete-style shield on green (from SVG)
-        svg_png(ASSETS / "complete.svg", 32).save(ASSETS / "bridge-server.png")
-        svg_png(ASSETS / "complete.svg", 32).save(ASSETS / "brand-plate.png")
+        # Bridge server tile = complete shield on green (from complete.svg)
+        svg_png(ORIGINALS / "complete.svg", 32).save(ASSETS / "bridge-server.png")
         if (ASSETS / "bridge-pc.svg").is_file():
             svg_png(ASSETS / "bridge-pc.svg", 40).save(ASSETS / "bridge-pc.png")
         print("wrote bridge-*.png")

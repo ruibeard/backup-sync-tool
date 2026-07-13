@@ -34,7 +34,7 @@ unicode-normalization = "0.1"
 # Local QR code generation for device pairing
 qrcodegen = "1"
 
-# Bridge icons rendered from mockups.html emoji tiles
+# PNG decode for bridge/status icons (assets/bridge-*.png)
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Win32 API bindings — Windows targets only
@@ -68,6 +68,7 @@ objc2-foundation = { version = "0.3", features = [
     "NSURL",
     "NSGeometry",
     "NSValue",
+    "NSArray",
 ] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
@@ -80,12 +81,24 @@ objc2-app-kit = { version = "0.3", features = [
     "NSWindow",
     "NSPanel",
     "NSButton",
+    "NSButtonCell",
     "NSTextField",
     "NSControl",
+    "NSCell",
     "NSColor",
     "NSFont",
     "NSWorkspace",
     "NSGraphics",
+    "NSBox",
+    "NSScrollView",
+    "NSClipView",
+    "NSScroller",
+    "NSStackView",
+    "NSLayoutConstraint",
+    "NSLayoutAnchor",
+    "NSUserInterfaceLayout",
+    "NSProgressIndicator",
+    "NSParagraphStyle",
 ] }
 dispatch = "0.2"
 

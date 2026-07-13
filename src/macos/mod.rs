@@ -4,6 +4,7 @@ mod instance;
 mod launchd;
 mod menubar;
 pub(crate) mod notify;
+mod status_window;
 
 use crate::host::SyncHost;
 use crate::logs;
