@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build signed .app, then relaunch (like build-local.ps1).
+# Signs with a stable local identity so Keychain stops re-prompting after each rebuild.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -9,6 +10,7 @@ VERSION="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
 OUT="dist/macos"
 BIN="$OUT/backupsynctool"
 APP="$OUT/Backup Sync Tool.app"
+BUNDLE_ID="cam.rui.backupsynctool"
 INSTALL=0
 LAUNCH=1
 PACKAGE=0
@@ -27,10 +29,21 @@ for arg in "$@"; do
       echo "  --install    also copy to /Applications (launch that copy)"
       echo "  --no-launch  build only"
       echo "  --package    build + write updater tarball (implies --no-launch)"
+      echo ""
+      echo "Signing: uses identity \"Backup Sync Tool Dev\" (auto-created once in login keychain)."
+      echo "Override with MACOS_SIGN_IDENTITY=..."
       exit 0
       ;;
   esac
 done
+
+SIGN_IDENTITY="$(./scripts/ensure-macos-sign-identity.sh)"
+echo "Signing as: $SIGN_IDENTITY"
+
+sign_path() {
+  local path="$1"
+  codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "$path"
+}
 
 echo "Building backupsynctool --release (v${VERSION})..."
 cargo build --release
@@ -38,7 +51,7 @@ cargo build --release
 mkdir -p "$OUT"
 cp -f "target/release/backupsynctool" "$BIN"
 chmod +x "$BIN"
-codesign --force --sign - "$BIN"
+sign_path "$BIN"
 xattr -cr "$BIN" 2>/dev/null || true
 
 rm -rf "$APP"
@@ -54,7 +67,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>Backup Sync Tool</string>
   <key>CFBundleDisplayName</key><string>Backup Sync Tool</string>
-  <key>CFBundleIdentifier</key><string>cam.rui.backupsynctool</string>
+  <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleExecutable</key><string>backupsynctool</string>
@@ -67,18 +80,22 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP"
+# Sign nested binary first, then the .app bundle (stable identity → stable Keychain ACL).
+sign_path "$APP/Contents/MacOS/backupsynctool"
+codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "$APP"
 xattr -cr "$APP" 2>/dev/null || true
 
 APP_ABS="$(cd "$OUT" && pwd)/Backup Sync Tool.app"
 LAUNCH_APP="$APP_ABS"
 echo "Built: $APP_ABS"
+codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority|Identifier|Signature' || true
 
 if [[ "$PACKAGE" -eq 1 ]]; then
   ARCH="$(uname -m)"
   if [[ "$ARCH" == "arm64" ]]; then
     ARCH="aarch64"
   fi
+  # Updater asset is the bare binary (signed).
   TGZ="$OUT/backupsynctool-macos-${ARCH}.tar.gz"
   tar -C "$OUT" -czf "$TGZ" backupsynctool
   echo "Packaged: $(cd "$OUT" && pwd)/backupsynctool-macos-${ARCH}.tar.gz"
@@ -88,7 +105,7 @@ if [[ "$INSTALL" -eq 1 ]]; then
   DEST="/Applications/Backup Sync Tool.app"
   rm -rf "$DEST"
   cp -R "$APP" "$DEST"
-  codesign --force --deep --sign - "$DEST"
+  codesign --force --deep --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none "$DEST"
   xattr -cr "$DEST" 2>/dev/null || true
   LAUNCH_APP="$DEST"
   echo "Installed: $DEST"

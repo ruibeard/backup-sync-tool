@@ -13,7 +13,7 @@
 | Object storage | Garage at `https://s3.rui.cam` | same |
 
 Windows client: Windows 7 SP1 x64 through Windows 11.  
-macOS client: Apple Silicon / Intel Darwin; unsigned sideload OK for now (no notarization required in v1).
+macOS client: Apple Silicon / Intel Darwin; local builds sign with stable self-signed identity `Backup Sync Tool Dev` (auto-created in login keychain by `scripts/ensure-macos-sign-identity.sh`) so Keychain “Always Allow” sticks across rebuilds. Not notarized in v1; override identity with `MACOS_SIGN_IDENTITY`.
 
 Neither client uses WebDAV, async runtime, AWS SDK, Electron/webview, or data-migration logic. **XD licence detection is Windows-only.**
 
@@ -104,7 +104,7 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 **Windows (from Mac):** `./build-windows.sh` pushes the branch, builds on Proxmox VM 102 via `build-local.ps1 -NoLaunch`, and copies `backupsynctool.exe` to `dist/windows/`. Target remains `x86_64-win7-windows-msvc`. On the VM: `build-local.ps1`. Validate on Win7 test VM 100 and a modern Windows VM.
 
-**macOS:** `./build-macos.sh` builds, signs, and launches `dist/macos/Backup Sync Tool.app`. `--install` copies to `/Applications`. `--no-launch` builds only. `--package` also writes `dist/macos/backupsynctool-macos-{aarch64|x86_64}.tar.gz` (updater asset; implies `--no-launch`). Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
+**macOS:** `./build-macos.sh` builds, signs with stable identity (not ad-hoc `-`), and launches `dist/macos/Backup Sync Tool.app`. First Keychain access after switching to this identity: click **Always Allow** once. `--install` copies to `/Applications`. `--no-launch` builds only. `--package` also writes `dist/macos/backupsynctool-macos-{aarch64|x86_64}.tar.gz` (updater asset; implies `--no-launch`). Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
 
 **Release (Mac):** `./release.sh` on a clean tree — bump patch → commit → macOS package + Windows build → tag `vX.Y.Z` → push → upload both assets with `gh`. GitHub Actions may create notes-only release shell; assets come from `release.sh`. Prefer this over legacy `release.ps1` (Windows-only).
 
