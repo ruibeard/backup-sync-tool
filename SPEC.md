@@ -110,11 +110,8 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 | Action | How |
 | --- | --- |
-| Watch folder | Set Watch Folder… |
-| Pair | Pair Device… → QR/code window → approve on backup.rui.cam |
-| Restore | Restore Backup… |
+| Main window | Menu → Open Backup Sync Tool… (watch / pair / restore / login / update) |
 | Logs | Open Logs |
-| Start at login | Toggle Start at Login (LaunchAgent → `--daemon`) |
 | Daemon only | `backupsynctool --daemon` |
 
 Config/state: `~/Library/Application Support/BackupSyncTool/` · Secrets: Keychain `cam.rui.backupsynctool`.

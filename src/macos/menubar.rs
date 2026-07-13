@@ -36,12 +36,8 @@ unsafe impl Send for MainTray {}
 unsafe impl Sync for MainTray {}
 
 struct Ids {
-    set_watch: String,
-    pair: String,
-    restore: String,
+    open_window: String,
     open_logs: String,
-    toggle_login: String,
-    update: String,
     quit: String,
 }
 
@@ -89,32 +85,19 @@ pub fn run() {
     let icon_syncing = png_to_icon(ICON_SYNCING).expect("menubar syncing icon");
     let icon_complete = png_to_icon(ICON_COMPLETE).expect("menubar complete icon");
 
-    let set_watch = MenuItem::new("Set Watch Folder…", true, None);
-    let pair = MenuItem::new("Pair Device…", true, None);
-    let restore = MenuItem::new("Restore Backup…", true, None);
+    let open_window = MenuItem::new("Open Backup Sync Tool…", true, None);
     let open_logs = MenuItem::new("Open Logs", true, None);
-    let toggle_login = MenuItem::new("Toggle Start at Login", true, None);
-    let update = MenuItem::new("Install Update…", true, None);
     let quit = MenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
-        set_watch: set_watch.id().as_ref().to_string(),
-        pair: pair.id().as_ref().to_string(),
-        restore: restore.id().as_ref().to_string(),
+        open_window: open_window.id().as_ref().to_string(),
         open_logs: open_logs.id().as_ref().to_string(),
-        toggle_login: toggle_login.id().as_ref().to_string(),
-        update: update.id().as_ref().to_string(),
         quit: quit.id().as_ref().to_string(),
     };
 
     let menu = Menu::new();
-    let _ = menu.append(&set_watch);
-    let _ = menu.append(&pair);
-    let _ = menu.append(&restore);
-    let _ = menu.append(&PredefinedMenuItem::separator());
+    let _ = menu.append(&open_window);
     let _ = menu.append(&open_logs);
-    let _ = menu.append(&toggle_login);
-    let _ = menu.append(&update);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
@@ -155,28 +138,12 @@ pub fn run() {
             }
             return;
         }
+        if id == ids.open_window {
+            open_main_window(&shared_ev);
+            return;
+        }
         if id == ids.open_logs {
             do_open_logs();
-            return;
-        }
-        if id == ids.toggle_login {
-            do_toggle_login(&shared_ev);
-            return;
-        }
-        if id == ids.set_watch {
-            start_set_watch(&shared_ev);
-            return;
-        }
-        if id == ids.pair {
-            start_pair(&shared_ev);
-            return;
-        }
-        if id == ids.restore {
-            start_restore(&shared_ev);
-            return;
-        }
-        if id == ids.update {
-            start_update(&shared_ev);
         }
     }));
 
@@ -195,6 +162,36 @@ pub fn run() {
     logs::append("macOS menubar started (status icon)");
     eprintln!("Menu bar icon is live — look at the top-right of the screen.");
     app.run();
+}
+
+fn status_line(host: &SyncHost) -> String {
+    if host.auth_failed() {
+        "Status: re-pair required.".into()
+    } else if host.is_configured() {
+        format!("Status: paired · watching {}", host.config.watch_folder)
+    } else if host.is_paired() {
+        "Status: paired · set a watch folder.".into()
+    } else if !host.config.watch_folder.trim().is_empty() {
+        format!("Status: not paired · folder {}", host.config.watch_folder)
+    } else {
+        "Status: not set up yet.".into()
+    }
+}
+
+fn open_main_window(shared: &Shared) {
+    let line = shared
+        .host
+        .lock()
+        .map(|h| status_line(&h))
+        .unwrap_or_else(|_| "Status: unknown".into());
+    match notify::prompt_home(&line) {
+        notify::HomeChoice::SetWatch => start_set_watch(shared),
+        notify::HomeChoice::Pair => start_pair(shared),
+        notify::HomeChoice::Restore => start_restore(shared),
+        notify::HomeChoice::ToggleLogin => do_toggle_login(shared),
+        notify::HomeChoice::Update => start_update(shared),
+        notify::HomeChoice::Close => tip(&shared.tray, "Running in menu bar"),
+    }
 }
 
 fn do_open_logs() {

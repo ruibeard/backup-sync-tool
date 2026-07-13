@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Generate all icons from shield SVG masters (one metaphor).
+"""Generate tray / menubar / AppIcon from shield SVG masters.
 
-Masters:
-  assets/idle.svg          green outline shield + check
-  assets/syncing1..6.svg   blue filled shield + white spin arrows
-  assets/syncing.svg       = syncing1
-  assets/complete.svg      green filled shield + white check
+Masters (edit these):
+  assets/idle.svg
+  assets/complete.svg
+  assets/syncing1.svg … syncing6.svg   (syncing.svg = syncing1)
+
+Backups: assets/originals/ — never written by this script.
 
 Derived: app-idle.ico, AppIcon.icns, syncing*.ico, complete.ico, menubar-*.png
 """
@@ -38,6 +39,7 @@ def magick_ico(png: Path, ico: Path, sizes: str) -> None:
 
 
 def to_menubar_template(im: Image.Image, *, white_is_hole: bool) -> Image.Image:
+    """Black template. white_is_hole=True → white arrows become cutouts (syncing)."""
     out = Image.new("RGBA", im.size, (0, 0, 0, 0))
     sp, dp = im.load(), out.load()
     for y in range(im.size[1]):
@@ -83,11 +85,10 @@ def main() -> None:
     try:
         idle = svg_png(ASSETS / "idle.svg", 512)
         idle.save(tmp / "idle.png")
-        # Also refresh brand.png from idle SVG for consistency
         idle.save(ASSETS / "brand.png")
         magick_ico(tmp / "idle.png", ASSETS / "app-idle.ico", "256,128,64,48,32,16")
         build_appicon(idle)
-        print("wrote idle → app-idle.ico, AppIcon.icns, brand.png")
+        print("wrote app-idle.ico, AppIcon.icns, brand.png")
 
         frames = []
         for i in range(1, 7):
@@ -98,54 +99,35 @@ def main() -> None:
             if i == 1:
                 magick_ico(png, ASSETS / "syncing.ico", "256,128,64,48,32,16")
             magick_ico(png, ASSETS / f"syncing{i + 1}.ico", "64,48,32,16")
-        print("wrote syncing.ico + syncing2..7.ico (shield + spin)")
+        print("wrote syncing.ico + syncing2..7.ico")
 
         done = svg_png(ASSETS / "complete.svg", 256)
         done.save(tmp / "done.png")
         magick_ico(tmp / "done.png", ASSETS / "complete.ico", "256,128,64,48,32,16")
         print("wrote complete.ico")
 
-        # Menubar: idle keeps white fill solid; syncing/complete punch white holes
-        to_menubar_template(idle, white_is_hole=False).resize(
-            (22, 22), Image.Resampling.LANCZOS
-        ).save(ASSETS / "menubar-icon.png")
-        to_menubar_template(frames[0], white_is_hole=True).resize(
-            (22, 22), Image.Resampling.LANCZOS
-        ).save(ASSETS / "menubar-syncing.png")
-        to_menubar_template(done, white_is_hole=True).resize(
-            (22, 22), Image.Resampling.LANCZOS
-        ).save(ASSETS / "menubar-complete.png")
-        print("wrote menubar-*.png")
+        # Menubar templates: 44px fills Retina status item better than 22.
+        def save_menubar(src: Image.Image, name: str, white_hole: bool) -> None:
+            t = to_menubar_template(src, white_is_hole=white_hole)
+            t.resize((44, 44), Image.Resampling.LANCZOS).save(ASSETS / name)
 
-        # Bridge: plate = filled green shield style
-        plate = svg_png(ASSETS / "complete.svg", 32)
-        # solid green square + white shield like old brand-plate — use idle on green
-        bg = Image.new("RGBA", (32, 32), (0x01, 0x66, 0x30, 255))
-        # white stroke shield from idle silhouette
-        mark = to_menubar_template(
-            svg_png(ASSETS / "idle.svg", 24), white_is_hole=False
-        )
-        # invert to white
-        wmark = Image.new("RGBA", mark.size, (0, 0, 0, 0))
-        sp, dp = mark.load(), wmark.load()
-        for y in range(mark.size[1]):
-            for x in range(mark.size[0]):
-                _r, _g, _b, a = sp[x, y]
-                if a >= 12:
-                    dp[x, y] = (255, 255, 255, a)
-        ox = (32 - wmark.size[0]) // 2
-        oy = (32 - wmark.size[1]) // 2
-        bg.alpha_composite(wmark, (ox, oy))
-        bg.save(ASSETS / "bridge-server.png")
-        bg.save(ASSETS / "brand-plate.png")
+        # white_is_hole=True so shield fill stays transparent; outline+check remain.
+        # False filled the whole shield solid and hid the checkmark in the menu bar.
+        save_menubar(idle, "menubar-icon.png", True)
+        save_menubar(frames[0], "menubar-syncing.png", True)
+        save_menubar(done, "menubar-complete.png", True)
+        print("wrote menubar-*.png (44×44)")
 
+        # Bridge server = complete-style shield on green (from SVG)
+        svg_png(ASSETS / "complete.svg", 32).save(ASSETS / "bridge-server.png")
+        svg_png(ASSETS / "complete.svg", 32).save(ASSETS / "brand-plate.png")
         if (ASSETS / "bridge-pc.svg").is_file():
             svg_png(ASSETS / "bridge-pc.svg", 40).save(ASSETS / "bridge-pc.png")
         print("wrote bridge-*.png")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print("done — all icons are shields")
+    print("done")
 
 
 if __name__ == "__main__":
