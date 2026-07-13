@@ -110,7 +110,6 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 | Action | How |
 | --- | --- |
-| Home | launch popup, or menu → Show Home… |
 | Watch folder | Set Watch Folder… |
 | Pair | Pair Device… → QR/code window → approve on backup.rui.cam |
 | Restore | Restore Backup… |

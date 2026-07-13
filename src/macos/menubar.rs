@@ -4,7 +4,7 @@ use crate::config;
 use crate::host::SyncHost;
 use crate::logs;
 use crate::macos::launchd;
-use crate::macos::notify::{self, HomeChoice};
+use crate::macos::notify;
 use crate::updater::{self, CheckResult};
 use dispatch::Queue;
 use objc2::MainThreadMarker;
@@ -36,7 +36,6 @@ unsafe impl Send for MainTray {}
 unsafe impl Sync for MainTray {}
 
 struct Ids {
-    show_home: String,
     set_watch: String,
     pair: String,
     restore: String,
@@ -90,7 +89,6 @@ pub fn run() {
     let icon_syncing = png_to_icon(ICON_SYNCING).expect("menubar syncing icon");
     let icon_complete = png_to_icon(ICON_COMPLETE).expect("menubar complete icon");
 
-    let show_home = MenuItem::new("Show Home…", true, None);
     let set_watch = MenuItem::new("Set Watch Folder…", true, None);
     let pair = MenuItem::new("Pair Device…", true, None);
     let restore = MenuItem::new("Restore Backup…", true, None);
@@ -100,7 +98,6 @@ pub fn run() {
     let quit = MenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
-        show_home: show_home.id().as_ref().to_string(),
         set_watch: set_watch.id().as_ref().to_string(),
         pair: pair.id().as_ref().to_string(),
         restore: restore.id().as_ref().to_string(),
@@ -111,8 +108,6 @@ pub fn run() {
     };
 
     let menu = Menu::new();
-    let _ = menu.append(&show_home);
-    let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&set_watch);
     let _ = menu.append(&pair);
     let _ = menu.append(&restore);
@@ -160,10 +155,6 @@ pub fn run() {
             }
             return;
         }
-        if id == ids.show_home {
-            open_home(&shared_ev);
-            return;
-        }
         if id == ids.open_logs {
             do_open_logs();
             return;
@@ -201,49 +192,9 @@ pub fn run() {
         }
     });
 
-    // Popup chooser once the run loop is alive.
-    let shared_home = shared.clone();
-    Queue::main().exec_async(move || {
-        open_home(&shared_home);
-    });
-
     logs::append("macOS menubar started (status icon)");
     eprintln!("Menu bar icon is live — look at the top-right of the screen.");
     app.run();
-}
-
-fn status_line(host: &SyncHost) -> String {
-    if host.auth_failed() {
-        "Status: re-pair required.".into()
-    } else if host.is_configured() {
-        format!(
-            "Status: paired · watching {}",
-            host.config.watch_folder
-        )
-    } else if host.is_paired() {
-        "Status: paired · set a watch folder.".into()
-    } else if !host.config.watch_folder.trim().is_empty() {
-        format!(
-            "Status: not paired · folder {}",
-            host.config.watch_folder
-        )
-    } else {
-        "Status: not set up yet.".into()
-    }
-}
-
-fn open_home(shared: &Shared) {
-    let line = shared
-        .host
-        .lock()
-        .map(|h| status_line(&h))
-        .unwrap_or_else(|_| "Status: unknown".into());
-    match notify::prompt_home(&line) {
-        HomeChoice::SetWatch => start_set_watch(shared),
-        HomeChoice::Pair => start_pair(shared),
-        HomeChoice::Restore => start_restore(shared),
-        HomeChoice::Continue => tip(&shared.tray, "Running in menu bar"),
-    }
 }
 
 fn do_open_logs() {
