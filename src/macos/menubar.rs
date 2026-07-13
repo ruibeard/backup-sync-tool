@@ -53,6 +53,7 @@ enum IconKind {
     Complete,
 }
 
+#[derive(Clone)]
 struct Shared {
     host: Arc<Mutex<SyncHost>>,
     tray: Arc<Mutex<MainTray>>,
@@ -147,12 +148,7 @@ pub fn run() {
     apply_status(&shared);
 
     let running = Arc::new(AtomicBool::new(true));
-    let shared_ev = Shared {
-        host: host.clone(),
-        tray: tray.clone(),
-        icons: icons.clone(),
-        busy: busy.clone(),
-    };
+    let shared_ev = shared.clone();
     let running_ev = running.clone();
 
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -193,12 +189,7 @@ pub fn run() {
         }
     }));
 
-    let shared_tick = Shared {
-        host: host.clone(),
-        tray: tray.clone(),
-        icons: icons.clone(),
-        busy: busy.clone(),
-    };
+    let shared_tick = shared.clone();
     let running_tick = running.clone();
     thread::spawn(move || {
         while running_tick.load(Ordering::SeqCst) {
@@ -211,12 +202,7 @@ pub fn run() {
     });
 
     // Popup chooser once the run loop is alive.
-    let shared_home = Shared {
-        host: host.clone(),
-        tray: tray.clone(),
-        icons: icons.clone(),
-        busy: busy.clone(),
-    };
+    let shared_home = shared.clone();
     Queue::main().exec_async(move || {
         open_home(&shared_home);
     });
@@ -288,12 +274,7 @@ fn do_toggle_login(shared: &Shared) {
 }
 
 fn start_set_watch(shared: &Shared) {
-    let shared = Shared {
-        host: shared.host.clone(),
-        tray: shared.tray.clone(),
-        icons: shared.icons.clone(),
-        busy: shared.busy.clone(),
-    };
+    let shared = shared.clone();
     thread::spawn(move || {
         if let Some(path) = pick_folder("Choose watch folder") {
             match shared.host.lock().expect("host").set_watch_folder(path.clone()) {
@@ -308,53 +289,123 @@ fn start_set_watch(shared: &Shared) {
 }
 
 fn start_pair(shared: &Shared) {
-    let shared = Shared {
-        host: shared.host.clone(),
-        tray: shared.tray.clone(),
-        icons: shared.icons.clone(),
-        busy: shared.busy.clone(),
-    };
-    shared.busy.store(true, Ordering::SeqCst);
+    if shared.busy.swap(true, Ordering::SeqCst) {
+        tip(&shared.tray, "Already busy…");
+        return;
+    }
+    let shared = shared.clone();
     set_icon(&shared.tray, &shared.icons, IconKind::Syncing);
     tip(&shared.tray, "Pairing…");
     logs::append("menubar: Pair Device clicked");
     thread::spawn(move || {
-        // NOTE: host lock held across poll — known phase-1 bug (fix next).
-        let result = {
-            let mut h = shared.host.lock().expect("host");
-            h.pair_blocking(|status| tip(&shared.tray, status))
+        let finish_busy = |shared: &Shared| {
+            shared.busy.store(false, Ordering::SeqCst);
         };
+
+        let (start, api_base) = {
+            let h = match shared.host.lock() {
+                Ok(h) => h,
+                Err(_) => {
+                    tip(&shared.tray, "Pair failed: host lock");
+                    set_icon(&shared.tray, &shared.icons, IconKind::Idle);
+                    finish_busy(&shared);
+                    return;
+                }
+            };
+            let api_base = h.config.pair_api_base.clone();
+            (h.pair_start_request(), api_base)
+        }; // host lock dropped before network/UI
+
+        let start = match start {
+            Ok(s) => s,
+            Err(err) => {
+                if err.contains("watch folder") {
+                    notify::pair_watch_folder_required();
+                } else {
+                    notify::pair_failed(&err);
+                }
+                tip(&shared.tray, &format!("Pair failed: {err}"));
+                set_icon(&shared.tray, &shared.icons, IconKind::Idle);
+                finish_busy(&shared);
+                return;
+            }
+        };
+
+        eprintln!("Pairing code: {}", start.code);
+        eprintln!("Approve URL:  {}", start.approve_url);
+        let waiting = format!("Pairing… code {} — waiting for approval", start.code);
+        tip(&shared.tray, &waiting);
+        notify::pair_started(&start.code, &start.approve_url);
+
+        let sleep_ms = start.poll_interval_ms.clamp(1000, 10_000);
+        let deadline = std::time::Instant::now() + Duration::from_secs(300);
+        let result = loop {
+            if std::time::Instant::now() > deadline {
+                let msg = format!(
+                    "Pairing timed out.\nCode: {}\nApprove URL: {}",
+                    start.code, start.approve_url
+                );
+                break Err(msg);
+            }
+            thread::sleep(Duration::from_millis(sleep_ms));
+            let Some(status) = crate::pairing::poll_pairing(&api_base, &start.poll_token) else {
+                tip(&shared.tray, &waiting);
+                continue;
+            };
+            match status.status.as_str() {
+                "approved" => {
+                    let apply = shared
+                        .host
+                        .lock()
+                        .map_err(|_| "host lock poisoned".to_string())
+                        .and_then(|mut h| h.pair_apply_and_sync(status));
+                    break apply;
+                }
+                "rejected" => break Err("Pairing rejected by server.".into()),
+                "expired" => break Err("Pairing code expired. Try again.".into()),
+                "pending" | "waiting" => {
+                    tip(&shared.tray, &waiting);
+                    eprint!(".");
+                }
+                other => {
+                    logs::append(&format!("Pair poll status: {other}"));
+                    tip(&shared.tray, &waiting);
+                }
+            }
+        };
+
         match result {
             Ok(()) => {
+                notify::pair_finished();
                 tip(&shared.tray, "Paired — sync started");
                 set_icon(&shared.tray, &shared.icons, IconKind::Complete);
                 thread::sleep(Duration::from_secs(2));
-                shared.busy.store(false, Ordering::SeqCst);
+                finish_busy(&shared);
                 apply_status(&shared);
             }
             Err(err) => {
+                notify::pair_failed(&err);
                 tip(&shared.tray, &format!("Pair failed: {err}"));
                 set_icon(&shared.tray, &shared.icons, IconKind::Idle);
-                shared.busy.store(false, Ordering::SeqCst);
+                finish_busy(&shared);
             }
         }
     });
 }
 
 fn start_restore(shared: &Shared) {
-    let shared = Shared {
-        host: shared.host.clone(),
-        tray: shared.tray.clone(),
-        icons: shared.icons.clone(),
-        busy: shared.busy.clone(),
-    };
+    let shared = shared.clone();
     thread::spawn(move || {
         let Some(parent) = pick_folder("Choose parent folder for restore") else {
             return;
         };
-        shared.busy.store(true, Ordering::SeqCst);
+        if shared.busy.swap(true, Ordering::SeqCst) {
+            tip(&shared.tray, "Already busy…");
+            return;
+        }
         set_icon(&shared.tray, &shared.icons, IconKind::Syncing);
         tip(&shared.tray, "Restoring…");
+        // Restore holds host lock across I/O; apply_status uses try_lock so menubar stays live.
         match shared.host.lock().expect("host").restore_blocking(&parent) {
             Ok(path) => {
                 tip(&shared.tray, &format!("Restored to {}", path.display()));
@@ -429,7 +480,8 @@ fn set_icon(tray: &Arc<Mutex<MainTray>>, icons: &Arc<TrayIcons>, kind: IconKind)
 
 fn apply_status(shared: &Shared) {
     let (kind, tip_text) = {
-        let Ok(h) = shared.host.lock() else {
+        // try_lock: never freeze menubar if pair/restore briefly holds host
+        let Ok(h) = shared.host.try_lock() else {
             return;
         };
         if h.auth_failed() {

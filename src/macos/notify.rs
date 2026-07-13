@@ -6,9 +6,8 @@ use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont, NSImage,
     NSImageView, NSImageScaling, NSPanel, NSTextAlignment, NSTextField, NSWindowStyleMask,
-    NSWorkspace,
 };
-use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
 use qrcodegen::{QrCode, QrCodeEcc};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -218,8 +217,6 @@ fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
     link.setTextColor(Some(&NSColor::linkColor()));
     content.addSubview(&link);
 
-    open_url(approve_url);
-
     panel.center();
     panel.makeKeyAndOrderFront(None);
     panel.orderFrontRegardless();
@@ -233,12 +230,7 @@ fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
 pub fn pair_finished() {
     Queue::main().exec_async(|| {
         close_pair_panel_inner();
-        let mtm = match MainThreadMarker::new() {
-            Some(m) => m,
-            None => return,
-        };
-        let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        restore_accessory_policy();
     });
 }
 
@@ -251,40 +243,48 @@ fn close_pair_panel_inner() {
     }
 }
 
-fn open_url(url: &str) {
-    let Some(nsurl) = NSURL::URLWithString(&NSString::from_str(url)) else {
+fn restore_accessory_policy() {
+    let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let _ = NSWorkspace::sharedWorkspace().openURL(&nsurl);
+    NSApplication::sharedApplication(mtm)
+        .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 }
 
 pub fn alert(title: &str, message: &str) {
     let title = title.to_string();
     let message = message.to_string();
-    Queue::main().exec_sync(move || {
-        let mtm = MainThreadMarker::new().expect("alert on main");
-        let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
-        let alert = objc2_app_kit::NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str(&title));
-        alert.setInformativeText(&NSString::from_str(&message));
-        alert.addButtonWithTitle(&NSString::from_str("OK"));
-        let window = alert.window();
-        window.center();
-        window.makeKeyAndOrderFront(None);
-        window.orderFrontRegardless();
-        let _ = alert.runModal();
-        let keep = PAIR_PANEL
-            .lock()
-            .ok()
-            .map(|g| g.is_some())
-            .unwrap_or(false);
-        if !keep {
-            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        }
-    });
+    // Never exec_sync from a background thread — deadlocks if main is blocked.
+    if MainThreadMarker::new().is_some() {
+        alert_inner(&title, &message);
+    } else {
+        Queue::main().exec_async(move || alert_inner(&title, &message));
+    }
+}
+
+fn alert_inner(title: &str, message: &str) {
+    let mtm = MainThreadMarker::new().expect("alert on main");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(message));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    let window = alert.window();
+    window.center();
+    window.makeKeyAndOrderFront(None);
+    window.orderFrontRegardless();
+    let _ = alert.runModal();
+    let keep = PAIR_PANEL
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    if !keep {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
 }
 
 pub fn pair_watch_folder_required() {
@@ -295,8 +295,17 @@ pub fn pair_watch_folder_required() {
 }
 
 pub fn pair_failed(message: &str) {
-    pair_finished();
-    alert("Backup Sync — Pair Failed", message);
+    let message = message.to_string();
+    // Close panel + alert on one main turn (avoids finish/alert race).
+    if MainThreadMarker::new().is_some() {
+        close_pair_panel_inner();
+        alert_inner("Backup Sync — Pair Failed", &message);
+    } else {
+        Queue::main().exec_async(move || {
+            close_pair_panel_inner();
+            alert_inner("Backup Sync — Pair Failed", &message);
+        });
+    }
 }
 
 /// Launch / home chooser — what user can do next.

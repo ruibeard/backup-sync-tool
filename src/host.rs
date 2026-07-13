@@ -9,7 +9,7 @@ use crate::transport;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct SyncHost {
     pub config: Config,
@@ -105,108 +105,37 @@ impl SyncHost {
         Ok(())
     }
 
-    /// Blocking pair flow (no XD). Calls `on_status` for UI/tooltip updates.
-    pub fn pair_blocking<F>(&mut self, mut on_status: F) -> Result<(), String>
-    where
-        F: FnMut(&str),
-    {
+    /// POST /pair/start (no XD). Caller owns UI; keep host mutex unlocked during poll.
+    pub fn pair_start_request(&self) -> Result<pairing::PairStartResponse, String> {
         if !watch_folder_is_valid(&self.config.watch_folder) {
-            let msg = "Set a valid watch folder before pairing.";
-            crate::macos::notify::pair_watch_folder_required();
-            on_status(msg);
-            return Err(msg.into());
+            return Err("Set a valid watch folder before pairing.".into());
         }
-
         let api_base = self.config.pair_api_base.clone();
-        let machine = host_machine_name();
-        let user = host_user_name();
-        let version = env!("CARGO_PKG_VERSION");
-
-        let start = pairing::start_pairing(
+        pairing::start_pairing(
             &api_base,
-            &machine,
-            &user,
-            version,
+            &host_machine_name(),
+            &host_user_name(),
+            env!("CARGO_PKG_VERSION"),
             None,
             None,
             None,
             None,
             None,
         )
-        .ok_or_else(|| {
-            let msg = "Pair start failed (network or server error).";
-            crate::macos::notify::pair_failed(msg);
-            msg.to_string()
-        })?;
-
-        eprintln!("Pairing code: {}", start.code);
-        eprintln!("Approve URL:  {}", start.approve_url);
-        eprintln!("Waiting for server approval...");
-        let waiting = format!(
-            "Pairing… code {} — waiting for approval",
-            start.code
-        );
-        on_status(&waiting);
-        crate::macos::notify::pair_started(&start.code, &start.approve_url);
-
-        let sleep_ms = start.poll_interval_ms.clamp(1000, 10_000);
-        let deadline = Instant::now() + Duration::from_secs(300);
-        loop {
-            if Instant::now() > deadline {
-                let msg = format!(
-                    "Pairing timed out.\nCode: {}\nApprove URL: {}",
-                    start.code, start.approve_url
-                );
-                crate::macos::notify::pair_failed(&msg);
-                on_status(&msg);
-                return Err(msg);
-            }
-            std::thread::sleep(Duration::from_millis(sleep_ms));
-            let Some(status) = pairing::poll_pairing(&api_base, &start.poll_token) else {
-                on_status(&waiting);
-                continue;
-            };
-            match status.status.as_str() {
-                "approved" => {
-                    if let Err(err) = self.apply_pair_approval(status) {
-                        crate::macos::notify::pair_failed(&err);
-                        return Err(err);
-                    }
-                    self.auth_failed.store(false, Ordering::Relaxed);
-                    if let Err(err) = self.restart_sync() {
-                        crate::macos::notify::pair_failed(&err);
-                        return Err(err);
-                    }
-                    logs::append("Pairing complete; initial sync started.");
-                    eprintln!("Paired. Sync started.");
-                    on_status("Paired — sync started");
-                    crate::macos::notify::pair_finished();
-                    return Ok(());
-                }
-                "rejected" => {
-                    let msg = "Pairing rejected by server.";
-                    crate::macos::notify::pair_failed(msg);
-                    return Err(msg.into());
-                }
-                "expired" => {
-                    let msg = "Pairing code expired. Try again.";
-                    crate::macos::notify::pair_failed(msg);
-                    return Err(msg.into());
-                }
-                "pending" | "waiting" => {
-                    on_status(&waiting);
-                    eprint!(".");
-                    continue;
-                }
-                other => {
-                    logs::append(&format!("Pair poll status: {other}"));
-                    on_status(&waiting);
-                    continue;
-                }
-            }
-        }
+        .ok_or_else(|| "Pair start failed (network or server error).".into())
     }
 
+    /// Persist approval + start sync. Hold host mutex only for this short step.
+    pub fn pair_apply_and_sync(&mut self, status: PairStatusResponse) -> Result<(), String> {
+        self.apply_pair_approval(status)?;
+        self.auth_failed.store(false, Ordering::Relaxed);
+        self.restart_sync()?;
+        logs::append("Pairing complete; initial sync started.");
+        eprintln!("Paired. Sync started.");
+        Ok(())
+    }
+
+    /// Holds `&mut self` for the whole restore — callers should not block the UI thread on the same mutex.
     pub fn restore_blocking(&mut self, destination_parent: &Path) -> Result<PathBuf, String> {
         if self.auth_failed.load(Ordering::Relaxed) {
             return Err("Cannot restore until credentials are reconnected (pair again).".into());
