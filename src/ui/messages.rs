@@ -5,179 +5,44 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
-unsafe fn on_app_transfer_event(hwnd: HWND, lp: LPARAM) -> LRESULT {
-    let event = Box::from_raw(lp.0 as *mut crate::sync::TransferEvent);
-    let _ = stmut(hwnd)
-        .app
-        .send(crate::app::AppCommand::Transfer((*event).clone()));
-    let direction = match event.kind {
-        crate::sync::TransferKind::Upload => "upload",
-        crate::sync::TransferKind::Download | crate::sync::TransferKind::Restore => "download",
+unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
+    let snapshot = Box::from_raw(lp.0 as *mut crate::app::AppSnapshot);
+    let state = match snapshot.work {
+        crate::app::WorkState::Scanning => UiSyncState::Checking,
+        crate::app::WorkState::Syncing => UiSyncState::Syncing,
+        crate::app::WorkState::Idle | crate::app::WorkState::PausedForReconnect => UiSyncState::Idle,
     };
-    let key = format!("{direction}:{}", event.relative_path);
-    {
+    let new_activity = {
         let st = stmut(hwnd);
-        let row = st.transfer_bytes.iter_mut().find(|row| row.key == key);
-        if let Some(row) = row {
-            row.transferred = if event.state == crate::sync::TransferState::Started {
-                event.transferred.min(event.total)
-            } else {
-                row.transferred.max(event.transferred).min(event.total)
-            };
-            row.total = event.total;
+        st.connected = snapshot.hub_connected;
+        st.sync_status_state = state as usize;
+        st.sync_progress_total = snapshot.global_files as usize;
+        st.sync_progress_done = snapshot.global_files.saturating_sub(snapshot.need_files) as usize;
+        st.sync_status_text = match state {
+            UiSyncState::Checking => "Checking...".into(),
+            UiSyncState::Syncing => format!("Syncing {} file(s)...", snapshot.need_files),
+            UiSyncState::Idle if snapshot.hub_connected => "All synced".into(),
+            UiSyncState::Idle => "Hub offline".into(),
+        };
+        let activity = if snapshot.last_event_id > st.last_event_id {
+            snapshot.activity.back().cloned()
         } else {
-            st.transfer_bytes.push(TransferByteState {
-                key,
-                transferred: event.transferred.min(event.total),
-                total: event.total,
-            });
-            if st.transfer_bytes.len() > crate::app::MAX_CURRENT_RUN_ACTIVITY {
-                st.transfer_bytes.remove(0);
-            }
-        }
+            None
+        };
+        st.last_event_id = st.last_event_id.max(snapshot.last_event_id);
+        (activity, (st.sync_progress_done, st.sync_progress_total, 0))
+    };
+    if let Some(line) = new_activity.0 {
+        apply_activity_log(hwnd, &line);
     }
-
-    let percent = if event.total > 0 {
-        ((event.transferred.min(event.total) * 100) / event.total).min(100) as u8
+    if state == UiSyncState::Checking || state == UiSyncState::Syncing {
+        SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
     } else {
-        0
-    };
-    let message = match event.state {
-        crate::sync::TransferState::Started => {
-            if direction == "upload" {
-                format!("Uploading: {}", event.relative_path)
-            } else {
-                format!("Downloading: {}", event.relative_path)
-            }
-        }
-        crate::sync::TransferState::Progress => {
-            if direction == "upload" {
-                format!("Upload progress: {}|{percent}", event.relative_path)
-            } else {
-                format!("Download progress: {}|{percent}", event.relative_path)
-            }
-        }
-        crate::sync::TransferState::Completed => {
-            if direction == "upload" {
-                format!("Uploaded: {}", event.relative_path)
-            } else {
-                format!("Downloaded: {}", event.relative_path)
-            }
-        }
-        crate::sync::TransferState::Failed => {
-            let detail = event.error.as_deref().unwrap_or("Transfer failed");
-            if direction == "upload" {
-                format!("Upload failed {}: {detail}", event.relative_path)
-            } else {
-                format!("! Restore failed {}: {detail}", event.relative_path)
-            }
-        }
-        crate::sync::TransferState::Cancelled => {
-            format!("! Transfer cancelled: {}", event.relative_path)
-        }
-    };
-    apply_activity_log(hwnd, &message);
-    invalidate_bridge(hwnd);
-    LRESULT(0)
-}
-
-unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    let progress = if lp.0 != 0 {
-        *Box::from_raw(lp.0 as *mut (usize, usize, usize, Vec<String>))
-    } else {
-        (0, 0, 0, Vec::new())
-    };
-    let failed_paths = progress.3.clone();
-    let (icon_name, mut status_text) = match wp.0 {
-        x if x == crate::sync::ActivityState::Checking as usize => {
-            (w!("APP_ICON_SYNCING"), "Checking...")
-        }
-        x if x == crate::sync::ActivityState::Syncing as usize => {
-            (w!("APP_ICON_SYNCING"), "Syncing...")
-        }
-        _ if progress.2 > 0 => (w!("APP_ICON_SYNCING"), "Upload errors"),
-        _ => (w!("APP_ICON_COMPLETE"), "All synced"),
-    };
-
-    let st = stmut(hwnd);
-    let was_busy = st.sync_status_state == crate::sync::ActivityState::Checking as usize
-        || st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
-    let was_syncing = st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
-    let is_syncing = wp.0 == crate::sync::ActivityState::Syncing as usize;
-    let is_busy = wp.0 == crate::sync::ActivityState::Checking as usize || is_syncing;
-    if is_busy && !was_busy {
-        st.transfer_bytes.clear();
-    }
-    let _ = st.app.send(if is_busy {
-        crate::app::AppCommand::ScanStarted
-    } else {
-        crate::app::AppCommand::ScanFinished
-    });
-    st.sync_status_state = wp.0;
-    st.sync_progress_done = progress.0;
-    st.sync_progress_total = progress.1;
-    st.sync_last_failed = progress.2;
-    if is_busy {
-        if is_syncing && !was_syncing {
-            st.sync_started_at = Some(std::time::Instant::now());
-        }
-        if is_syncing && progress.1 > 0 {
-            let done = progress.0.min(progress.1);
-            let pct = (done * 100) / progress.1;
-            let eta = if done > 0 {
-                st.sync_started_at.and_then(|started| {
-                    let elapsed = started.elapsed().as_secs_f64();
-                    if elapsed > 0.0 {
-                        let per_item = elapsed / done as f64;
-                        let remaining = ((progress.1 - done) as f64 * per_item).ceil() as u64;
-                        Some(format_eta(remaining))
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            };
-            st.sync_status_text = if let Some(eta) = eta {
-                format!("{done}/{} \u{00B7} ETA {} \u{00B7} {pct}%", progress.1, eta)
-            } else {
-                format!("{done}/{} \u{00B7} {pct}%", progress.1)
-            };
-            status_text = &st.sync_status_text;
-        }
-        if !was_busy {
-            st.sync_anim_frame = 0;
-            let _ = SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
-        }
-        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _);
-        let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
-        if !hicon.0.is_null() {
-            tray::set_tray_icon_and_tip(
-                hwnd,
-                hicon,
-                &format!("Backup Sync Tool - {}", status_text),
-            );
-        }
-    } else {
-        st.sync_started_at = None;
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
-        let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _);
-        let hicon = LoadIconW(hi, icon_name).unwrap_or_default();
-        if !hicon.0.is_null() {
-            tray::set_tray_icon_and_tip(hwnd, hicon, "Backup Sync Tool");
-        }
     }
-    if !is_syncing {
-        st.sync_status_text = status_text.to_string();
-    }
-    let is_idle = wp.0 == crate::sync::ActivityState::Idle as usize;
-    if is_idle && progress.2 > 0 {
-        apply_sync_batch_failures(hwnd, &failed_paths);
-    } else if is_idle && progress.2 == 0 && was_syncing {
-        finalize_stuck_upload_rows(hwnd);
-        update_retry_failed_button(hwnd);
-    }
-    update_status_strip_after_sync(hwnd, wp.0, (progress.0, progress.1, progress.2));
+    set_status_strip_connection(hwnd);
+    update_sync_footer(hwnd, state as usize, new_activity.1);
+    InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_progress_rect), TRUE);
     LRESULT(0)
 }
 
@@ -187,8 +52,8 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
     }
 
     let st = stmut(hwnd);
-    if st.sync_status_state != crate::sync::ActivityState::Checking as usize
-        && st.sync_status_state != crate::sync::ActivityState::Syncing as usize
+    if st.sync_status_state != UiSyncState::Checking as usize
+        && st.sync_status_state != UiSyncState::Syncing as usize
     {
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
         return LRESULT(0);
@@ -218,9 +83,9 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
     InvalidateRect(hwnd, Some(&st.bridge_rect), TRUE);
     InvalidateRect(hwnd, Some(&st.bridge_progress_rect), TRUE);
     InvalidateRect(hwnd, Some(&st.activity_list_rect), TRUE);
-    let hlb = activity_list_hwnd(hwnd);
-    if !hlb.0.is_null() {
-        InvalidateRect(hlb, None, TRUE);
+    let list = activity_list_hwnd(hwnd);
+    if !list.0.is_null() {
+        InvalidateRect(list, None, TRUE);
     }
     LRESULT(0)
 }
@@ -243,8 +108,8 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
 
 unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
     let st = stmut(hwnd);
-    let _ = st.app.send(crate::app::AppCommand::AuthFailed(
-        "S3 credentials or policy were rejected.".into(),
+    let _ = st.app.send(crate::app::AppCommand::EngineFailed(
+        "Syncthing assignment was rejected.".into(),
     ));
     if st.auth_failure_notified {
         return LRESULT(0);
@@ -259,7 +124,7 @@ unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
         hwnd,
         "Reconnect required",
         C_RED,
-        "Credentials invalid. Automatic sync paused; use Reconnect to continue.",
+        "The Syncthing assignment is invalid. Use Reconnect to continue.",
     );
     let _ = SetForegroundWindow(hwnd);
     LRESULT(0)
@@ -279,7 +144,10 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         }
         restore_pair_idle_controls(hwnd);
         if err.message.is_empty() {
-            stmut(hwnd).app.send(crate::app::AppCommand::CancelPairing).ok();
+            stmut(hwnd)
+                .app
+                .send(crate::app::AppCommand::CancelPairing)
+                .ok();
             restore_server_status_after_pair_cancel(hwnd);
             return LRESULT(0);
         }
@@ -307,7 +175,10 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if pair.pair_id != stmut(hwnd).pair_id {
         return LRESULT(0);
     }
-    stmut(hwnd).app.send(crate::app::AppCommand::PairApproved).ok();
+    stmut(hwnd)
+        .app
+        .send(crate::app::AppCommand::PairApproved)
+        .ok();
     let prior_config = stmut(hwnd).config.clone();
     let prior_was_paired = is_paired(&prior_config);
     {
@@ -334,32 +205,16 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let mut candidate_config = stmut(hwnd).config.clone();
     stmut(hwnd).config = prior_config;
 
-    candidate_config.schema_version = 2;
+    candidate_config.schema_version = crate::config::CONFIG_SCHEMA_VERSION;
     candidate_config.device_uuid = pair.device_uuid.clone();
-    candidate_config.transport = "s3".to_string();
-    candidate_config.s3_endpoint = pair.s3_endpoint.clone();
-    candidate_config.s3_region = if pair.s3_region.trim().is_empty() {
-        "garage".to_string()
-    } else {
-        pair.s3_region.clone()
-    };
-    candidate_config.s3_bucket = pair.s3_bucket.clone();
-    candidate_config.s3_access_key = pair.s3_access_key.clone();
-    candidate_config.s3_path_style = pair.s3_path_style;
-    candidate_config.s3_prefix = pair.s3_prefix.clone();
-    candidate_config.parallel_uploads = 2;
-    let candidate_s3_secret_plain = pair.s3_secret_key.clone();
-
-    candidate_config.remote_folder = pair.remote_folder.clone();
+    candidate_config.syncthing_device_id = pair.syncthing_device_id.clone();
+    candidate_config.syncthing_hub_device_id = pair.syncthing_hub_device_id.clone();
+    candidate_config.syncthing_hub_addresses = pair.syncthing_hub_addresses.clone();
+    candidate_config.syncthing_folder_id = pair.syncthing_folder_id.clone();
+    candidate_config.syncthing_folder_label = pair.syncthing_folder_label.clone();
     candidate_config.server_approved_at = Some(approval_timestamp_now());
-    candidate_config.credential_profile_id = pair.credential_profile_id;
-    candidate_config.credential_version = pair.credential_version;
 
-    let candidate_config = match crate::config::save_pairing_candidate(
-        candidate_config,
-        &pair.device_token,
-        &pair.s3_secret_key,
-    ) {
+    let candidate_config = match crate::config::save_pairing_candidate(candidate_config, &pair.device_token) {
         Ok(config) => config,
         Err(e) => {
             logs::append(&format!("Approved reconnect save failed: {e}"));
@@ -373,15 +228,11 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     {
         let st = stmut(hwnd);
         st.config = candidate_config;
-        st.s3_secret_plain = candidate_s3_secret_plain;
         st.remote_folder_from_xd = false;
         st.auth_failure_notified = false;
-        st.app
-            .send(crate::app::AppCommand::ConnectionValidated)
-            .ok();
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-            &hstring(&pair.remote_folder),
+            &hstring(&pair.syncthing_folder_label),
         );
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
@@ -394,7 +245,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     }
     apply_activity_log(
         hwnd,
-        &format!("Server approved destination: {}", pair.remote_folder),
+        &format!("! Syncthing folder approved: {}", pair.syncthing_folder_label),
     );
     match restart_sync_engine(hwnd) {
         Ok(()) => logs::append("Pairing complete; initial sync started."),
@@ -410,7 +261,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     }
     {
         let st = stmut(hwnd);
-        st.sync_status_state = crate::sync::ActivityState::Checking as usize;
+        st.sync_status_state = UiSyncState::Checking as usize;
         st.sync_status_text = "Checking...".to_string();
     }
     set_status_strip_connection(hwnd);
@@ -419,7 +270,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     apply_server_readonly(hwnd);
     start_connection_check(hwnd);
     let _ = SetForegroundWindow(hwnd);
-    notify_user(hwnd, "Device paired. Uploading backup folder.");
+    notify_user(hwnd, "Device paired. Synchronization started.");
     LRESULT(0)
 }
 
@@ -470,6 +321,26 @@ unsafe fn on_app_update(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
+unsafe fn on_app_repair_failed(hwnd: HWND, lp: LPARAM) -> LRESULT {
+    let error = Box::from_raw(lp.0 as *mut String);
+    logs::append(&format!("Installation repair failed: {error}"));
+    let st = stmut(hwnd);
+    st.repair_required = true;
+    let button = GetDlgItem(hwnd, IDC_UPDATE_LINK as i32);
+    let _ = SetWindowTextW(button, &hstring("Retry repair"));
+    EnableWindow(button, true);
+    ShowWindow(button, SW_SHOW);
+    notify_user_status(
+        hwnd,
+        "Repair failed",
+        C_RED,
+        &format!("{error}\n\nChoose Retry repair to try again."),
+    );
+    ShowWindow(hwnd, SW_SHOW);
+    let _ = SetForegroundWindow(hwnd);
+    LRESULT(0)
+}
+
 unsafe fn on_app_remote_folder(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let detected = Box::from_raw(lp.0 as *mut crate::xd::DetectedCustomer);
     if is_paired(&stmut(hwnd).config) {
@@ -483,14 +354,9 @@ unsafe fn on_app_remote_folder(hwnd: HWND, lp: LPARAM) -> LRESULT {
     }
 
     let st = stmut(hwnd);
-    st.config.remote_folder = detected.folder.clone();
     st.detected_customer = non_empty(detected.customer.clone());
     st.remote_folder_from_xd = true;
-    let display = destination_display_text(
-        &st.config,
-        st.remote_folder_from_xd,
-        st.detected_customer.as_deref(),
-    );
+    let display = st.detected_customer.clone().unwrap_or(detected.folder.clone());
     let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
         &hstring(&display),

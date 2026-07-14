@@ -24,8 +24,8 @@ unsafe fn on_create(hwnd: HWND) {
             cfg.watch_folder = path;
         }
     }
-    let s3_secret = secret::decrypt(&cfg.s3_secret_enc).unwrap_or_default();
-    let sync_configured = is_sync_configured(&cfg, &s3_secret);
+    let sync_configured = is_sync_configured(&cfg);
+    let repair_error = crate::paths::validate_bundled_engine_installation().err();
     let (bridge_icon_pc, bridge_icon_cloud) = load_bridge_icons(hwnd);
     let initial_app = crate::app::AppSnapshot {
         connection: if sync_configured {
@@ -38,17 +38,34 @@ unsafe fn on_create(hwnd: HWND) {
         pair_api_base: cfg.pair_api_base.clone(),
         start_at_login: cfg.start_with_windows,
         auto_update: cfg.auto_update,
+        folder_label: cfg.syncthing_folder_label.clone(),
         ..crate::app::AppSnapshot::default()
     };
     let (app_controller, app_events) = crate::app::AppController::start(initial_app);
-    std::thread::spawn(move || while app_events.recv().is_ok() {});
+    let app_hwnd = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        while let Ok(event) = app_events.recv() {
+            if let crate::app::AppEvent::SnapshotChanged(snapshot) = event {
+                let snapshot = Box::new(snapshot);
+                unsafe {
+                    PostMessageW(
+                        HWND(app_hwnd as *mut _),
+                        WM_APP_APP_SNAPSHOT,
+                        WPARAM(0),
+                        LPARAM(Box::into_raw(snapshot) as isize),
+                    )
+                    .ok();
+                }
+            }
+        }
+    });
 
     let state = Box::new(WndState {
         app: app_controller,
         config: cfg.clone(),
-        s3_secret_plain: s3_secret.clone(),
         sync_engine: None,
         update_url: None,
+        repair_required: repair_error.is_some(),
         connected: false,
         sync_status_text: if sync_configured {
             "Starting...".to_string()
@@ -56,15 +73,12 @@ unsafe fn on_create(hwnd: HWND) {
             "Not configured".to_string()
         },
         sync_status_state: if sync_configured {
-            crate::sync::ActivityState::Checking as usize
+            UiSyncState::Checking as usize
         } else {
-            crate::sync::ActivityState::Idle as usize
+            UiSyncState::Idle as usize
         },
         sync_progress_done: 0,
         sync_progress_total: 0,
-        transfer_bytes: Vec::new(),
-        sync_last_failed: 0,
-        sync_started_at: None,
         sync_anim_frame: 0,
         remote_folder_from_xd,
         detected_customer: None,
@@ -117,12 +131,12 @@ unsafe fn on_create(hwnd: HWND) {
         footer_panel_rect: RECT::default(),
         pair_qr_hwnd: HWND(std::ptr::null_mut()),
         pair_cancel: None,
-        restore_cancel: None,
+        sync_cancel: None,
         pair_id: 0,
         auth_failure_notified: false,
+        last_event_id: 0,
         activity_rows: Vec::new(),
         activity_show_empty: true,
-        failed_upload_paths: Vec::new(),
     });
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
 
@@ -137,6 +151,10 @@ unsafe fn on_create(hwnd: HWND) {
         hfont_btn,
         hfont_bridge,
         hfont_link,
+    );
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_SERVER_DELETION_POLICY as i32),
+        &hstring("Changes and deletions sync across devices"),
     );
     apply_server_readonly(hwnd);
     update_pair_button_enabled(hwnd);
@@ -166,7 +184,7 @@ unsafe fn on_create(hwnd: HWND) {
 
     let raw = hwnd.0 as isize;
 
-    if sync_configured {
+    if repair_error.is_none() && sync_configured {
         if let Err(err) = restart_sync_engine(hwnd) {
             let msg = format!("Sync start failed: {err}");
             logs::append(&msg);
@@ -192,28 +210,19 @@ unsafe fn on_create(hwnd: HWND) {
         });
     }
 
-    if is_sync_configured(&cfg, &s3_secret) {
-        let cfg2 = cfg.clone();
-        let s3_2 = s3_secret.clone();
-        set_status_strip_text(hwnd, "Connecting");
-        std::thread::spawn(move || {
-            let ok = match crate::transport::build(&cfg2, &s3_2) {
-                Ok(t) => t.test_connection().is_ok(),
-                Err(_) => false,
-            };
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_CONNECTED,
-                WPARAM(if ok { 1 } else { 0 }),
-                LPARAM(0),
-            )
-            .ok();
-        });
-    }
-
-    let auto_update = cfg.auto_update;
-    std::thread::spawn(
-        move || match crate::updater::check(env!("CARGO_PKG_VERSION")) {
+    if let Some(error) = repair_error {
+        logs::append(&format!("Bundled engine repair required: {error}"));
+        notify_user_status(
+            hwnd,
+            "Repairing installation",
+            C_AMBER,
+            "The desktop app was updated without its synchronization engine. Repairing now...",
+        );
+        start_bundle_repair(hwnd);
+    } else {
+        let auto_update = cfg.auto_update;
+        std::thread::spawn(
+            move || match crate::updater::check(env!("CARGO_PKG_VERSION")) {
             crate::updater::CheckResult::UpdateAvailable(info) => {
                 crate::logs::append(&format!("Update available: v{}", info.version));
                 let url = Box::new(info.url);
@@ -229,8 +238,9 @@ unsafe fn on_create(hwnd: HWND) {
             crate::updater::CheckResult::Error(e) => {
                 crate::logs::append(&format!("Update check error: {e}"));
             }
-        },
-    );
+            },
+        );
+    }
 }
 
 // ── build_ui ──────────────────────────────────────────────────────────────────
@@ -427,19 +437,7 @@ unsafe fn build_ui(
         };
         let footer_pad_x = 10;
         let footer_pad_y = 8;
-        let retry_btn_x = M + INNER_W - footer_pad_x - ACTION_BTN_W;
-        mkbtn_grey(
-            hwnd,
-            hi,
-            IDC_RETRY_FAILED,
-            "Retry failed",
-            retry_btn_x,
-            y + footer_pad_y,
-            ACTION_BTN_W,
-            ACTION_BTN_H,
-            hf_btn,
-        );
-        ShowWindow(GetDlgItem(hwnd, IDC_RETRY_FAILED as i32), SW_HIDE);
+        let retry_btn_x = M + INNER_W;
         mkstatic(
             hwnd,
             hi,
@@ -480,7 +478,9 @@ unsafe fn build_ui(
         let startup_x = M;
         let startup_w = 154i32;
         let auto_update_x = startup_x + startup_w + 12;
-        let auto_update_w = M + INNER_W - auto_update_x;
+        let auto_update_w = 114i32;
+        let policy_x = auto_update_x + auto_update_w + 12;
+        let policy_w = (M + INNER_W - policy_x).max(1);
 
         mkcheck(
             hwnd,
@@ -505,6 +505,18 @@ unsafe fn build_ui(
             check_h,
             hf,
             cfg.auto_update,
+        );
+        mkstatic_align(
+            hwnd,
+            hi,
+            IDC_SERVER_DELETION_POLICY,
+            "Changes and deletions sync across devices",
+            policy_x,
+            check_y,
+            policy_w,
+            check_h,
+            hf_small,
+            SS_RIGHT,
         );
 
         y += row_h;
@@ -1076,7 +1088,7 @@ unsafe fn layout_bridge_section(
                 layout.pair_btn_w,
                 BRIDGE_BTN_H,
             );
-            // Restore is available from the secondary tray menu.
+            // Folder recovery is managed on the versioned Syncthing hub.
             let _ = ShowWindow(GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32), SW_HIDE);
         } else {
             place_btn(
@@ -1148,45 +1160,28 @@ unsafe fn layout_bridge_section(
 }
 
 fn server_tooltip_text(cfg: &Config) -> String {
-    let url = if cfg.s3_endpoint.trim().is_empty() {
-        "not set"
+    let hub = if cfg.syncthing_hub_addresses.is_empty() {
+        "not assigned".to_string()
     } else {
-        cfg.s3_endpoint.trim()
+        cfg.syncthing_hub_addresses.join(", ")
     };
-    let folder = if cfg.remote_folder.trim().is_empty() {
+    let folder = if cfg.syncthing_folder_label.trim().is_empty() {
         "waiting for Laravel approval"
     } else {
-        cfg.remote_folder.trim()
+        cfg.syncthing_folder_label.trim()
     };
-    let mut lines = vec![format!("Server: {url}"), format!("Destination: {folder}")];
-    if matches!(
-        crate::config::transport_kind(cfg),
-        Some(crate::config::TransportKind::S3)
-    ) && !cfg.s3_prefix.trim().is_empty()
-    {
-        lines.push(format!("Prefix: {}", cfg.s3_prefix.trim()));
-    }
+    let mut lines = vec![format!("Syncthing hub: {hub}"), format!("Folder: {folder}")];
     if let Some(approved_at) = cfg.server_approved_at.as_deref().and_then(non_empty_str) {
         lines.push(format!("Approved: {approved_at}"));
-    }
-    if let Some(profile_id) = cfg.credential_profile_id {
-        lines.push(format!("Credential profile: {profile_id}"));
-    }
-    if let Some(version) = cfg.credential_version {
-        lines.push(format!("Credential version: {version}"));
     }
     lines.join("\n")
 }
 
 fn server_display_text(cfg: &Config) -> String {
-    if cfg.s3_endpoint.trim().is_empty() {
-        "Server not configured".to_string()
+    if cfg.syncthing_hub_addresses.is_empty() {
+        "Syncthing hub not configured".to_string()
     } else {
-        cfg.s3_endpoint
-            .trim()
-            .trim_start_matches("https://")
-            .trim_end_matches('/')
-            .to_string()
+        cfg.syncthing_hub_addresses[0].clone()
     }
 }
 
@@ -1196,16 +1191,16 @@ fn destination_display_text(
     detected_customer: Option<&str>,
 ) -> String {
     if is_paired(cfg) {
-        return cfg.remote_folder.clone();
+        return cfg.syncthing_folder_label.clone();
     }
-    if remote_folder_from_xd && !cfg.remote_folder.trim().is_empty() {
+    if remote_folder_from_xd && !cfg.syncthing_folder_label.trim().is_empty() {
         if let Some(customer) = detected_customer.and_then(non_empty_str) {
-            return format!("{customer} ({})", cfg.remote_folder);
+            return format!("{customer} ({})", cfg.syncthing_folder_label);
         }
-        return cfg.remote_folder.clone();
+        return cfg.syncthing_folder_label.clone();
     }
-    if !cfg.remote_folder.trim().is_empty() {
-        return cfg.remote_folder.clone();
+    if !cfg.syncthing_folder_label.trim().is_empty() {
+        return cfg.syncthing_folder_label.clone();
     }
     "Waiting for pairing approval".to_string()
 }

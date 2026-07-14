@@ -1,4 +1,4 @@
-//! Encrypt/decrypt for S3 secret / device token storage.
+//! Encrypt/decrypt for device-token storage.
 //! Windows: DPAPI. macOS: Keychain (`kc1:<account>` handle in config JSON).
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -6,72 +6,45 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static CANDIDATE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtectedSecrets {
-    pub device_token_enc: String,
-    pub s3_secret_enc: String,
-}
-
-/// Secrets protected under candidate-only handles. Dropping an uncommitted
-/// candidate removes its macOS Keychain items; Windows candidates are inert
-/// DPAPI ciphertext until their config is atomically installed.
-pub struct CandidateSecrets {
-    protected: ProtectedSecrets,
-    old_device_token_enc: String,
-    old_s3_secret_enc: String,
+/// A device token protected under a candidate-only handle. Dropping an
+/// uncommitted candidate removes its macOS Keychain item; a Windows candidate
+/// is inert DPAPI ciphertext until config is atomically installed.
+pub struct CandidateDeviceToken {
+    protected: String,
+    old_protected: String,
     committed: bool,
 }
 
-impl CandidateSecrets {
-    pub fn stage(
-        device_token: &str,
-        s3_secret: &str,
-        old_device_token_enc: &str,
-        old_s3_secret_enc: &str,
-    ) -> Result<Self, String> {
+impl CandidateDeviceToken {
+    pub fn stage(device_token: &str, old_protected: &str) -> Result<Self, String> {
         crate::logs::register_secret(device_token);
-        crate::logs::register_secret(s3_secret);
         let nonce = candidate_nonce();
         let device_account = format!("device_token_candidate_{nonce}");
-        let s3_account = format!("s3_secret_candidate_{nonce}");
-        let device_token_enc = protect(&device_account, device_token)?;
-        let s3_secret_enc = match protect(&s3_account, s3_secret) {
-            Ok(handle) => handle,
-            Err(err) => {
-                remove_handle(&device_token_enc);
-                return Err(err);
-            }
-        };
+        let protected = protect(&device_account, device_token)?;
         Ok(Self {
-            protected: ProtectedSecrets {
-                device_token_enc,
-                s3_secret_enc,
-            },
-            old_device_token_enc: old_device_token_enc.to_string(),
-            old_s3_secret_enc: old_s3_secret_enc.to_string(),
+            protected,
+            old_protected: old_protected.to_string(),
             committed: false,
         })
     }
 
-    pub fn protected(&self) -> &ProtectedSecrets {
+    pub fn protected(&self) -> &str {
         &self.protected
     }
 
     /// Mark the candidate active only after the new config was saved. Old
     /// Keychain handles are removed at that point, never before.
-    pub fn commit(mut self) -> ProtectedSecrets {
+    pub fn commit(mut self) -> String {
         self.committed = true;
-        remove_handle_if_replaced(&self.old_device_token_enc, &self.protected.device_token_enc);
-        remove_handle_if_replaced(&self.old_s3_secret_enc, &self.protected.s3_secret_enc);
+        remove_handle_if_replaced(&self.old_protected, &self.protected);
         self.protected.clone()
     }
 }
 
-impl Drop for CandidateSecrets {
+impl Drop for CandidateDeviceToken {
     fn drop(&mut self) {
         if !self.committed {
-            remove_handle(&self.protected.device_token_enc);
-            remove_handle(&self.protected.s3_secret_enc);
+            remove_handle(&self.protected);
         }
     }
 }

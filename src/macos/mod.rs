@@ -42,6 +42,15 @@ pub fn run() {
 
     if daemon {
         logs::append(&format!("macOS daemon v{version}"));
+        if let Err(error) = crate::paths::validate_bundled_engine_installation() {
+            logs::append(&format!("daemon: installation repair required: {error}"));
+            if let Err(error) = updater::repair_current_bundle(|_| {}) {
+                logs::append(&format!("daemon: installation repair failed: {error}"));
+                eprintln!("daemon: installation repair failed: {error}");
+            }
+            drop(guard);
+            return;
+        }
         run_daemon();
         drop(guard);
         return;
@@ -80,7 +89,9 @@ fn run_daemon() {
         thread::sleep(Duration::from_secs(30));
         if host.auth_failed() {
             host.stop_sync();
-            logs::append("daemon: auth failed — stopped. Re-pair, then relaunch.");
+            logs::append(
+                "daemon: Syncthing assignment rejected — stopped. Re-pair, then relaunch.",
+            );
             break;
         }
     }

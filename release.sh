@@ -7,8 +7,10 @@ cd "$(dirname "$0")"
 command -v gh >/dev/null || { echo "need gh" >&2; exit 1; }
 
 WIN=dist/windows/backupsynctool.exe
-[[ -f "$WIN" ]] || {
-  echo "missing $WIN — on a Windows machine run: .\\build-windows.ps1 -NoLaunch" >&2
+WIN_ENGINE=dist/windows/syncthing.exe
+WIN_BUNDLE=dist/windows/backupsynctool-windows-amd64.zip
+[[ -f "$WIN" && -f "$WIN_ENGINE" && -f "$WIN_BUNDLE" ]] || {
+  echo "missing pinned Windows app/engine bundle — on a Windows machine run: .\\build-windows.ps1 -NoLaunch" >&2
   exit 1
 }
 
@@ -29,18 +31,18 @@ git commit -m "release: $TAG"
 
 MAC="$(ls dist/macos/backupsynctool-macos-*.tar.gz | head -1)"
 [[ -f "$MAC" ]] || { echo "missing mac tarball" >&2; exit 1; }
-[[ -f "$WIN" ]] || { echo "missing $WIN" >&2; exit 1; }
+[[ -f "$WIN" && -f "$WIN_ENGINE" && -f "$WIN_BUNDLE" ]] || { echo "missing Windows app/engine bundle" >&2; exit 1; }
 
 git tag "$TAG"
 git push -u origin "HEAD:$BRANCH"
 git push origin "$TAG"
 
 if gh release view "$TAG" >/dev/null 2>&1; then
-  gh release upload "$TAG" "$WIN" "$MAC" --clobber
+  gh release upload "$TAG" "$WIN" "$WIN_BUNDLE" "$MAC" --clobber
 else
   sleep 3
   gh release view "$TAG" >/dev/null 2>&1 \
-    && gh release upload "$TAG" "$WIN" "$MAC" --clobber \
-    || gh release create "$TAG" "$WIN" "$MAC" --generate-notes --title "$TAG"
+    && gh release upload "$TAG" "$WIN" "$WIN_BUNDLE" "$MAC" --clobber \
+    || gh release create "$TAG" "$WIN" "$WIN_BUNDLE" "$MAC" --generate-notes --title "$TAG"
 fi
 echo "ok $TAG"

@@ -129,7 +129,7 @@ unsafe extern "system" fn wnd_proc(
             let text_clr = match id {
                 IDC_REPO | IDC_AUTHOR => C_BLUE,
                 IDC_SERVER_HDR | IDC_ACTIVITY_HDR | IDC_PAIR_API_LABEL => 0x00888888,
-                IDC_ACTIVITY_SUBHDR => 0x00999999,
+                IDC_ACTIVITY_SUBHDR | IDC_SERVER_DELETION_POLICY => 0x00999999,
                 IDC_SERVER_URL_LABEL => 0x00777777,
                 IDC_ORIGIN_LABEL | IDC_DEST_LABEL => 0x00555555,
                 _ => C_LABEL,
@@ -215,19 +215,10 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_CONNECTED => on_app_connected(hwnd, wparam),
         WM_APP_UPDATE => on_app_update(hwnd, wparam, lparam),
         WM_APP_REMOTE_FOLDER => on_app_remote_folder(hwnd, lparam),
-        WM_APP_SYNC_ACTIVITY => on_app_sync_activity(hwnd, wparam, lparam),
         WM_APP_PAIR_STARTED => on_app_pair_started(hwnd, lparam),
         WM_APP_PAIR_RESULT => on_app_pair_result(hwnd, wparam, lparam),
-        WM_APP_AUTH_FAILED => on_app_auth_failed(hwnd),
-        WM_APP_RESTORE_DONE => {
-            stmut(hwnd).restore_cancel = None;
-            let _ = SetWindowTextW(
-                GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32),
-                &hstring("Restore"),
-            );
-            LRESULT(0)
-        }
-        WM_APP_TRANSFER_EVENT => on_app_transfer_event(hwnd, lparam),
+        WM_APP_APP_SNAPSHOT => on_app_snapshot(hwnd, lparam),
+        WM_APP_REPAIR_FAILED => on_app_repair_failed(hwnd, lparam),
         WM_TIMER => on_timer(hwnd, wparam),
 
         WM_CLOSE => {

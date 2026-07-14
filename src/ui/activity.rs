@@ -40,8 +40,7 @@ fn activity_icon_char(kind: ActivityKind, done: bool) -> &'static str {
         "\u{2713}"
     } else {
         match kind {
-            ActivityKind::Uploading => "\u{2B06}",
-            ActivityKind::Downloading => "\u{2B07}",
+            ActivityKind::Syncing => "\u{21C4}",
             ActivityKind::Error => "!",
             ActivityKind::Info => "i",
             _ => " ",
@@ -49,35 +48,51 @@ fn activity_icon_char(kind: ActivityKind, done: bool) -> &'static str {
     }
 }
 
-fn upload_replace_key(name: &str) -> String {
-    format!("upload:{name}")
-}
-
-fn download_replace_key(name: &str) -> String {
-    format!("download:{name}")
-}
-
 fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> {
-    if let Some(rest) = message.strip_prefix("! ") {
+    if let Some(path) = message.strip_prefix("Synced ") {
+        let name = display_activity_name(path);
+        let key = format!("sync:{path}");
         return Some((
-            None,
+            Some(key.clone()),
             ActivityRow {
-                label: rest.to_string(),
-                kind: ActivityKind::Info,
+                label: format!("Synced {name}"),
+                kind: ActivityKind::Done,
                 pct: None,
                 detail: None,
-                relative_path: None,
-                replace_key: None,
-                time_label: activity_time_for_kind(ActivityKind::Info),
+                replace_key: Some(key),
+                time_label: None,
             },
         ));
     }
-    if message.starts_with("Checking remote files")
-        || message.starts_with("Counting local files")
-        || message.starts_with("Comparing local to remote")
-        || message.starts_with("Checking remote changes")
-        || message.ends_with(" file(s) to upload")
-    {
+    if let Some(path) = message.strip_prefix("Syncing ") {
+        let name = display_activity_name(path);
+        let key = format!("sync:{path}");
+        return Some((
+            Some(key.clone()),
+            ActivityRow {
+                label: format!("Syncing {name}"),
+                kind: ActivityKind::Syncing,
+                pct: None,
+                detail: None,
+                replace_key: Some(key),
+                time_label: None,
+            },
+        ));
+    }
+    if let Some(detail) = message.strip_prefix("Could not sync ") {
+        return Some((
+            None,
+            ActivityRow {
+                label: "Item needs attention".into(),
+                kind: ActivityKind::Error,
+                pct: None,
+                detail: Some(detail.to_string()),
+                replace_key: None,
+                time_label: None,
+            },
+        ));
+    }
+    if let Some(message) = message.strip_prefix("! ") {
         return Some((
             None,
             ActivityRow {
@@ -85,161 +100,6 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 kind: ActivityKind::Info,
                 pct: None,
                 detail: None,
-                relative_path: None,
-                replace_key: None,
-                time_label: activity_time_for_kind(ActivityKind::Info),
-            },
-        ));
-    }
-    if let Some(rest) = message.strip_prefix("Upload progress: ") {
-        let (path, pct) = rest.split_once('|')?;
-        let name = display_activity_name(path);
-        let pct: u8 = pct.parse().ok()?;
-        let key = upload_replace_key(name);
-        let done = pct >= 100;
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: if done {
-                    format!("Uploaded {name}")
-                } else {
-                    format!("Uploading {name}")
-                },
-                kind: if done {
-                    ActivityKind::Done
-                } else {
-                    ActivityKind::Uploading
-                },
-                pct: if done { None } else { Some(pct) },
-                detail: None,
-                relative_path: Some(path.to_string()),
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(rest) = message.strip_prefix("Download progress: ") {
-        let (path, pct) = rest.split_once('|')?;
-        let name = display_activity_name(path);
-        let pct: u8 = pct.parse().ok()?;
-        let key = download_replace_key(name);
-        let done = pct >= 100;
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: if done {
-                    format!("Downloaded {name}")
-                } else {
-                    format!("Downloading {name}")
-                },
-                kind: if done {
-                    ActivityKind::Done
-                } else {
-                    ActivityKind::Downloading
-                },
-                pct: if done { None } else { Some(pct) },
-                detail: None,
-                relative_path: None,
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(path) = message.strip_prefix("Uploading: ") {
-        let name = display_activity_name(path);
-        let key = upload_replace_key(name);
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: format!("Uploading {name}"),
-                kind: ActivityKind::Uploading,
-                pct: None,
-                detail: None,
-                relative_path: Some(path.to_string()),
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(path) = message.strip_prefix("Uploaded: ") {
-        let name = display_activity_name(path);
-        let key = upload_replace_key(name);
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: format!("Uploaded {name}"),
-                kind: ActivityKind::Done,
-                pct: None,
-                detail: None,
-                relative_path: Some(path.to_string()),
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(rest) = message.strip_prefix("Upload failed ") {
-        let (relative, err) = rest.split_once(": ").unwrap_or((rest, ""));
-        let name = display_activity_name(relative);
-        let key = upload_replace_key(name);
-        let detail = err.trim();
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: format!("Failed {name}"),
-                kind: ActivityKind::Error,
-                pct: None,
-                detail: if detail.is_empty() {
-                    None
-                } else {
-                    Some(detail.to_string())
-                },
-                relative_path: Some(relative.to_string()),
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(path) = message.strip_prefix("Downloading: ") {
-        let name = display_activity_name(path);
-        let key = download_replace_key(name);
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: format!("Downloading {name}"),
-                kind: ActivityKind::Downloading,
-                pct: None,
-                detail: None,
-                relative_path: None,
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(path) = message.strip_prefix("Downloaded: ") {
-        let name = display_activity_name(path);
-        let key = download_replace_key(name);
-        return Some((
-            Some(key),
-            ActivityRow {
-                label: format!("Downloaded {name}"),
-                kind: ActivityKind::Done,
-                pct: None,
-                detail: None,
-                relative_path: None,
-                replace_key: None,
-                time_label: activity_time_for_kind(ActivityKind::Info),
-            },
-        ));
-    }
-    if let Some(folder) = message.strip_prefix("Server approved destination: ") {
-        return Some((
-            None,
-            ActivityRow {
-                label: format!("Server approved {folder}"),
-                kind: ActivityKind::Info,
-                pct: None,
-                detail: None,
-                relative_path: None,
                 replace_key: None,
                 time_label: activity_time_for_kind(ActivityKind::Info),
             },
@@ -297,119 +157,13 @@ unsafe fn replace_activity_row(hwnd: HWND, replace_key: &str, row: ActivityRow) 
     refresh_activity_listbox(hwnd);
 }
 
-unsafe fn update_retry_failed_button(hwnd: HWND) {
-    let btn = GetDlgItem(hwnd, IDC_RETRY_FAILED as i32);
-    if btn.0.is_null() {
-        return;
-    }
-    let st = stmut(hwnd);
-    let show = st.sync_status_state == crate::sync::ActivityState::Idle as usize
-        && (!st.failed_upload_paths.is_empty() || st.sync_last_failed > 0);
-    let _ = ShowWindow(btn, if show { SW_SHOW } else { SW_HIDE });
-}
-
-fn failed_activity_row(relative: &str, detail: Option<String>) -> (String, ActivityRow) {
-    let name = display_activity_name(relative);
-    let key = upload_replace_key(name);
-    (
-        key.clone(),
-        ActivityRow {
-            label: format!("Failed {name}"),
-            kind: ActivityKind::Error,
-            pct: None,
-            detail,
-            relative_path: Some(relative.to_string()),
-            replace_key: Some(key),
-            time_label: None,
-        },
-    )
-}
-
-unsafe fn finalize_stuck_upload_rows(hwnd: HWND) {
-    let stuck: Vec<(String, ActivityRow)> = {
-        let st = stmut(hwnd);
-        st.activity_rows
-            .iter()
-            .filter(|r| matches!(r.kind, ActivityKind::Uploading | ActivityKind::Downloading))
-            .filter_map(|r| {
-                let relative = r.relative_path.clone().or_else(|| {
-                    r.label
-                        .strip_prefix("Uploading ")
-                        .or_else(|| r.label.strip_prefix("Downloading "))
-                        .map(str::to_string)
-                })?;
-                let (key, row) =
-                    failed_activity_row(&relative, Some("Upload did not complete".to_string()));
-                Some((key, row))
-            })
-            .collect()
-    };
-    for (key, row) in stuck {
-        if let Some(relative) = row.relative_path.as_deref() {
-            track_failed_upload_path(hwnd, relative);
-        }
-        insert_failed_activity_row(hwnd, &key, row);
-    }
-}
-
-/// Apply server-reported failed paths and reconcile activity/retry UI after a batch ends.
-unsafe fn apply_sync_batch_failures(hwnd: HWND, failed_paths: &[String]) {
-    for relative in failed_paths {
-        track_failed_upload_path(hwnd, relative);
-        let (key, row) = failed_activity_row(relative, None);
-        insert_failed_activity_row(hwnd, &key, row);
-    }
-    finalize_stuck_upload_rows(hwnd);
-    update_retry_failed_button(hwnd);
-    InvalidateRect(hwnd, Some(&stmut(hwnd).activity_list_rect), TRUE);
-}
-
-unsafe fn track_failed_upload_path(hwnd: HWND, relative: &str) {
-    let st = stmut(hwnd);
-    if !st.failed_upload_paths.iter().any(|p| p == relative) {
-        st.failed_upload_paths.push(relative.to_string());
-    }
-    update_retry_failed_button(hwnd);
-}
-
-unsafe fn clear_failed_upload_path(hwnd: HWND, relative: &str) {
-    let st = stmut(hwnd);
-    st.failed_upload_paths.retain(|p| p != relative);
-    update_retry_failed_button(hwnd);
-}
-
-unsafe fn insert_failed_activity_row(hwnd: HWND, replace_key: &str, row: ActivityRow) {
-    let st = stmut(hwnd);
-    if st.activity_show_empty {
-        st.activity_show_empty = false;
-        st.activity_rows.clear();
-    }
-    st.activity_rows
-        .retain(|r| r.replace_key.as_deref() != Some(replace_key));
-    st.activity_rows.insert(0, row);
-    if st.activity_rows.len() > MAX_ACTIVITY_ROWS {
-        st.activity_rows.truncate(MAX_ACTIVITY_ROWS);
-    }
-    refresh_activity_listbox(hwnd);
-    InvalidateRect(hwnd, Some(&st.activity_list_rect), TRUE);
-}
 
 unsafe fn apply_activity_log(hwnd: HWND, message: &str) {
     let Some((replace_key, row)) = row_from_log_message(message) else {
         return;
     };
-    if let Some(path) = message.strip_prefix("Uploaded: ") {
-        clear_failed_upload_path(hwnd, path);
-    }
     if row.kind == ActivityKind::Error {
-        if let Some(relative) = row.relative_path.as_deref() {
-            track_failed_upload_path(hwnd, relative);
-        }
-        if let Some(key) = replace_key.as_deref() {
-            insert_failed_activity_row(hwnd, key, row);
-        } else {
-            push_activity_row(hwnd, row);
-        }
+        push_activity_row(hwnd, row);
         return;
     }
     if stmut(hwnd).activity_show_empty {
@@ -486,7 +240,7 @@ unsafe fn draw_activity_row(
 
     let done = row.kind == ActivityKind::Done;
     let is_error = row.kind == ActivityKind::Error;
-    let show_bar = row.kind == ActivityKind::Uploading || row.kind == ActivityKind::Downloading;
+    let show_bar = row.kind == ActivityKind::Syncing;
     let icon = activity_icon_char(row.kind, done);
     SetBkMode(hdc, TRANSPARENT);
 

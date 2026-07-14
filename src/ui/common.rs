@@ -29,10 +29,8 @@ const FONT_BTN_SM_PX: i32 = 14;
 const FONT_LINK_PX: i32 = 13;
 const FONT_BRIDGE_CHECK_PX: i32 = 16;
 
-use crate::config::{self, Config, TransportKind};
+use crate::config::{self, Config};
 use crate::logs;
-use crate::secret;
-use crate::transport;
 use crate::tray;
 use qrcodegen::{QrCode, QrCodeEcc};
 use std::ffi::c_void;
@@ -292,7 +290,6 @@ const IDC_SERVER_STATUS: u16 = 123;
 const IDC_SYNC_STATUS: u16 = 117;
 const IDC_ACTIVITY_LIST: u16 = 114;
 const IDC_START_WINDOWS: u16 = 115;
-const IDC_SYNC_REMOTE: u16 = 116;
 const IDC_AUTO_UPDATE: u16 = 119;
 const IDC_SYNC_PROGRESS: u16 = 118;
 const IDC_REPO: u16 = 120;
@@ -307,21 +304,19 @@ const IDC_ACTIVITY_SUBHDR: u16 = 216;
 const IDC_PAIR_DEVICE: u16 = 217;
 const IDC_SERVER_URL_LABEL: u16 = 218;
 const IDC_SYNC_ETA: u16 = 219;
-const IDC_RETRY_FAILED: u16 = 220;
 const IDC_REFRESH_REMOTE: u16 = 221;
 const IDC_PAIR_API_BASE: u16 = 222;
 const IDC_PAIR_API_LABEL: u16 = 223;
+const IDC_SERVER_DELETION_POLICY: u16 = 224;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
 const WM_APP_UPDATE: u32 = WM_APP + 12;
 const WM_APP_REMOTE_FOLDER: u32 = WM_APP + 13;
-const WM_APP_SYNC_ACTIVITY: u32 = WM_APP + 16;
 const WM_APP_PAIR_RESULT: u32 = WM_APP + 17;
 const WM_APP_PAIR_STARTED: u32 = WM_APP + 18;
-const WM_APP_AUTH_FAILED: u32 = WM_APP + 19;
-const WM_APP_RESTORE_DONE: u32 = WM_APP + 20;
-const WM_APP_TRANSFER_EVENT: u32 = WM_APP + 21;
+const WM_APP_APP_SNAPSHOT: u32 = WM_APP + 22;
+const WM_APP_REPAIR_FAILED: u32 = WM_APP + 23;
 const IDT_SYNC_ANIM: usize = 1;
 const SYNC_ANIM_MS: u32 = 120;
 
@@ -519,8 +514,7 @@ const C_ACTIVITY_TRACK: u32 = 0x00E8E8E8;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ActivityKind {
     Info,
-    Uploading,
-    Downloading,
+    Syncing,
     Done,
     Error,
 }
@@ -530,38 +524,34 @@ struct ActivityRow {
     label: String,
     kind: ActivityKind,
     pct: Option<u8>,
-    /// Short error detail for failed uploads.
+    /// Short error detail for an item that needs attention.
     detail: Option<String>,
-    /// Relative path under watch_folder (for retry).
-    relative_path: Option<String>,
-    /// Match key for replacing in-flight rows (e.g. "upload:invoice.pdf").
+    /// Match key for replacing an in-flight sync row.
     replace_key: Option<String>,
     /// Local time label for info rows (e.g. "10:42 AM").
     time_label: Option<String>,
 }
 
-#[derive(Clone)]
-struct TransferByteState {
-    key: String,
-    transferred: u64,
-    total: u64,
+#[repr(usize)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiSyncState {
+    Idle = 0,
+    Checking = 1,
+    Syncing = 2,
 }
 
 // ── Window state ──────────────────────────────────────────────────────────────
 struct WndState {
     app: crate::app::AppHandle,
     config: Config,
-    s3_secret_plain: String,
-    sync_engine: Option<crate::sync::SyncEngine>,
+    sync_engine: Option<crate::syncthing::SyncthingSupervisor>,
     update_url: Option<String>,
+    repair_required: bool,
     connected: bool,
     sync_status_text: String,
     sync_status_state: usize,
     sync_progress_done: usize,
     sync_progress_total: usize,
-    transfer_bytes: Vec<TransferByteState>,
-    sync_last_failed: usize,
-    sync_started_at: Option<std::time::Instant>,
     sync_anim_frame: usize,
     remote_folder_from_xd: bool,
     detected_customer: Option<String>,
@@ -622,17 +612,16 @@ struct WndState {
     footer_panel_rect: RECT,
     pair_qr_hwnd: HWND,
     pair_cancel: Option<Arc<AtomicBool>>,
-    restore_cancel: Option<Arc<AtomicBool>>,
+    sync_cancel: Option<Arc<AtomicBool>>,
     pair_id: u64,
     auth_failure_notified: bool,
+    last_event_id: u64,
     activity_rows: Vec<ActivityRow>,
     activity_show_empty: bool,
-    /// Relative paths that failed in the last batch(es); cleared on successful upload.
-    failed_upload_paths: Vec<String>,
 }
 
 fn is_paired(cfg: &Config) -> bool {
-    !cfg.device_token_enc.trim().is_empty()
+    config::is_paired(cfg)
 }
 
 fn bridge_show_sync_band(st: &WndState) -> bool {
@@ -640,7 +629,7 @@ fn bridge_show_sync_band(st: &WndState) -> bool {
 }
 
 fn bridge_syncing_progress(st: &WndState) -> bool {
-    st.sync_status_state == crate::sync::ActivityState::Syncing as usize
+    st.sync_status_state == UiSyncState::Syncing as usize
         && st.sync_progress_total > 0
 }
 
@@ -661,16 +650,11 @@ struct PairResult {
     pair_id: u64,
     device_uuid: String,
     device_token: String,
-    remote_folder: String,
-    credential_profile_id: Option<u64>,
-    credential_version: Option<u64>,
-    s3_endpoint: String,
-    s3_region: String,
-    s3_bucket: String,
-    s3_access_key: String,
-    s3_secret_key: String,
-    s3_path_style: bool,
-    s3_prefix: String,
+    syncthing_device_id: String,
+    syncthing_hub_device_id: String,
+    syncthing_hub_addresses: Vec<String>,
+    syncthing_folder_id: String,
+    syncthing_folder_label: String,
 }
 
 struct PairStarted {

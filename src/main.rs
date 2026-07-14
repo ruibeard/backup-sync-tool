@@ -1,9 +1,8 @@
 // main.rs — entry point
 // #![windows_subsystem = "windows"] suppresses the console window on release builds.
 #![cfg_attr(windows, windows_subsystem = "windows")]
-// Shared sync/transport still expose Windows UI entry points (`retry_uploads`,
-// `test_connection`, remote-manifest helpers). Those call sites live in
-// `src/ui` (Windows-only), so macOS release builds would spam dead_code noise.
+// Platform-specific native shells intentionally leave some shared supervisor
+// and pairing helpers unused on the opposite target.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod app;
@@ -12,8 +11,7 @@ mod logs;
 mod pairing;
 mod paths;
 mod secret;
-mod sync;
-mod transport;
+mod syncthing;
 mod updater;
 
 #[cfg(target_os = "macos")]

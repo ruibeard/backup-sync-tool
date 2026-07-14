@@ -21,6 +21,7 @@ pub struct PairStartRequest {
     pub xd_customer_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_customer: Option<String>,
+    pub syncthing_device_id: String,
     pub supported_transports: Vec<String>,
 }
 
@@ -43,23 +44,14 @@ pub struct PairStatusResponse {
     pub device_uuid: Option<String>,
     #[serde(default)]
     pub transport: Option<String>,
-    pub remote_folder: Option<String>,
-    pub credential_profile_id: Option<u64>,
-    pub credential_version: Option<u64>,
     #[serde(default)]
-    pub s3_endpoint: Option<String>,
+    pub syncthing_hub_device_id: Option<String>,
     #[serde(default)]
-    pub s3_region: Option<String>,
+    pub syncthing_hub_addresses: Vec<String>,
     #[serde(default)]
-    pub s3_bucket: Option<String>,
+    pub syncthing_folder_id: Option<String>,
     #[serde(default)]
-    pub s3_access_key: Option<String>,
-    #[serde(default)]
-    pub s3_secret_key: Option<String>,
-    #[serde(default)]
-    pub s3_path_style: Option<bool>,
-    #[serde(default)]
-    pub s3_prefix: Option<String>,
+    pub syncthing_folder_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +113,7 @@ impl fmt::Display for PairingError {
 
 impl std::error::Error for PairingError {}
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_pairing(
     api_base: &str,
     machine_name: &str,
@@ -131,6 +124,7 @@ pub fn start_pairing(
     xd_license_number: Option<String>,
     xd_customer_name: Option<String>,
     suggested_customer: Option<String>,
+    syncthing_device_id: String,
 ) -> Option<PairStartResponse> {
     start_pairing_result(
         api_base,
@@ -142,12 +136,14 @@ pub fn start_pairing(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
+        syncthing_device_id,
     )
     .ok()
 }
 
 /// Typed compatibility-safe pairing start. Callers that support cancellation
 /// should use [`start_pairing_cancellable`].
+#[allow(clippy::too_many_arguments)]
 pub fn start_pairing_result(
     api_base: &str,
     machine_name: &str,
@@ -158,6 +154,7 @@ pub fn start_pairing_result(
     xd_license_number: Option<String>,
     xd_customer_name: Option<String>,
     suggested_customer: Option<String>,
+    syncthing_device_id: String,
 ) -> Result<PairStartResponse, PairingError> {
     let cancel = AtomicBool::new(false);
     start_pairing_cancellable(
@@ -170,6 +167,7 @@ pub fn start_pairing_result(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
+        syncthing_device_id,
         &cancel,
     )
 }
@@ -185,6 +183,7 @@ pub fn start_pairing_cancellable(
     xd_license_number: Option<String>,
     xd_customer_name: Option<String>,
     suggested_customer: Option<String>,
+    syncthing_device_id: String,
     cancel: &AtomicBool,
 ) -> Result<PairStartResponse, PairingError> {
     if cancel.load(Ordering::Acquire) {
@@ -199,7 +198,8 @@ pub fn start_pairing_cancellable(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
-        supported_transports: vec!["s3".to_string()],
+        syncthing_device_id,
+        supported_transports: vec!["syncthing".to_string()],
     };
     let body = serde_json::to_string(&req).map_err(|err| {
         PairingError::new(
@@ -366,14 +366,7 @@ fn pairing_agent() -> ureq::Agent {
 }
 
 fn register_approval_secrets(status: &PairStatusResponse) {
-    for value in [
-        status.device_token.as_deref(),
-        status.s3_access_key.as_deref(),
-        status.s3_secret_key.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for value in [status.device_token.as_deref()].into_iter().flatten() {
         crate::logs::register_secret(value);
     }
 }
@@ -430,14 +423,11 @@ pub fn terminal_status_error(status: &PairStatusResponse) -> Option<PairingError
     }
 }
 
-pub fn is_s3_approval(status: &PairStatusResponse) -> bool {
-    if let Some(transport) = status.transport.as_deref() {
-        return transport.eq_ignore_ascii_case("s3");
-    }
+pub fn is_syncthing_approval(status: &PairStatusResponse) -> bool {
     status
-        .s3_endpoint
-        .as_ref()
-        .is_some_and(|v| !v.trim().is_empty())
+        .transport
+        .as_deref()
+        .is_some_and(|transport| transport.eq_ignore_ascii_case("syncthing"))
 }
 
 /// Validate admin-approved destination / bucket alias.
@@ -474,7 +464,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_start_serializes_supported_transports() {
+    fn pair_start_serializes_syncthing_identity() {
         let req = PairStartRequest {
             machine_name: "PC".into(),
             windows_user: "u".into(),
@@ -484,10 +474,19 @@ mod tests {
             xd_license_number: Some("XDPT.1".into()),
             xd_customer_name: Some("Customer".into()),
             suggested_customer: Some("XDPT.1-Customer".into()),
-            supported_transports: vec!["s3".into()],
+            syncthing_device_id: "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"
+                .into(),
+            supported_transports: vec!["syncthing".into()],
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["supported_transports"], serde_json::json!(["s3"]));
+        assert_eq!(
+            json["supported_transports"],
+            serde_json::json!(["syncthing"])
+        );
+        assert_eq!(
+            json["syncthing_device_id"],
+            "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"
+        );
         assert_eq!(json["xd_license_number"], "XDPT.1");
     }
 
@@ -515,32 +514,26 @@ mod tests {
     }
 
     #[test]
-    fn s3_approval_prefers_transport_field() {
-        let s3 = PairStatusResponse {
+    fn syncthing_approval_requires_transport_field() {
+        let syncthing = PairStatusResponse {
             status: "approved".into(),
             device_token: Some("t".into()),
             device_uuid: Some("device-uuid".into()),
-            transport: Some("s3".into()),
-            remote_folder: Some("XDPT.59655-Palmeira-Minimercado".into()),
-            credential_profile_id: None,
-            credential_version: None,
-            s3_endpoint: Some("https://s3.rui.cam".into()),
-            s3_region: None,
-            s3_bucket: Some("XDPT.59655-Palmeira-Minimercado".into()),
-            s3_access_key: None,
-            s3_secret_key: None,
-            s3_path_style: None,
-            s3_prefix: Some(String::new()),
+            transport: Some("syncthing".into()),
+            syncthing_hub_device_id: Some(
+                "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH".into(),
+            ),
+            syncthing_hub_addresses: vec!["tcp://sync.example:22000".into()],
+            syncthing_folder_id: Some("customer-1".into()),
+            syncthing_folder_label: Some("Customer 1".into()),
         };
-        assert!(is_s3_approval(&s3));
+        assert!(is_syncthing_approval(&syncthing));
 
-        let not_s3 = PairStatusResponse {
+        let not_syncthing = PairStatusResponse {
             transport: None,
-            s3_endpoint: None,
-            s3_bucket: None,
-            ..s3
+            ..syncthing
         };
-        assert!(!is_s3_approval(&not_s3));
+        assert!(!is_syncthing_approval(&not_syncthing));
     }
 
     #[test]

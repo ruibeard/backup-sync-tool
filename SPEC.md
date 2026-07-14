@@ -1,195 +1,192 @@
-# Backup Sync Tool — Technical Spec v2
+# Backup Sync Tool — Technical Spec v3
 
 ## Architecture
 
 | Layer | Windows | macOS |
 | --- | --- | --- |
-| UI | Raw Win32 through `windows-rs` | Menu bar app (default); `--daemon` for LaunchAgent |
-| HTTP | Blocking `ureq` | same |
-| S3 request construction | `rusty_s3` Sans-I/O actions | same |
-| Watcher | `notify` | `notify` (FSEvents) |
-| Secrets | Windows DPAPI | Keychain (`cam.rui.backupsynctool`) |
-| Control plane | `pair_api_base` (default `https://backup.rui.cam`; editable + persisted) | same |
-| Object storage | Garage `s3_*` from pair **approve** only — desktop never picks provider | same |
+| UI | Raw Win32 through `windows-rs` | Native menu bar app; `--daemon` for LaunchAgent |
+| Sync engine | Bundled Syncthing v2.1.1 | Bundled Syncthing v2.1.1 |
+| Engine control | Blocking REST/event API on private loopback | same |
+| Desktop secrets | Device token in DPAPI | Device token in Keychain (`cam.rui.backupsynctool`) |
+| Control plane | Laravel at editable `pair_api_base` | same |
+| Always-online peer | CT 105 Syncthing hub | same |
 
-Windows client: Windows 7 SP1 x64 through Windows 11.  
-macOS client: Apple Silicon / Intel Darwin; local `./build-macos.sh` uses **ad-hoc** codesign by default (no Keychain password prompts). Pass `--identity=…` or `MACOS_SIGN_IDENTITY=…` only when you want a real cert (e.g. package/release). Not notarized in v1.
+Windows 7 SP1 x64 through Windows 11 is mandatory. Windows builds compile the pinned engine with the repository-pinned legacy-compatible Go toolchain. macOS packages the engine for the supported Intel/Apple Silicon target. Engine self-update and restart are disabled; only a tested Backup Sync Tool release may replace it.
 
-Neither client uses WebDAV, async runtime, AWS SDK, Electron/webview, or data-migration logic. **XD licence detection is Windows-only.**
+There is no S3, WebDAV, object-storage transport, custom manifest, multipart uploader, lease, tombstone, or per-device deletion policy. Do not add an async runtime, Electron, webview, AWS SDK, or a second UI framework. XD licence detection remains Windows-only.
+
+## Three systems
+
+| System | Responsibility |
+| --- | --- |
+| Laravel control plane | Pair requests, admin approval, device/customer assignment, CT 105 provisioning |
+| Desktop app | Native UI, private engine lifecycle, loopback API, selected folder |
+| CT 105 | Always-online Syncthing hub and staggered recovery versions |
+
+`pair_api_base` identifies Laravel only. A direct hub address may later use a domain such as `sync.rui.cam:22000`, but it is returned by approval and is never confused with the control-plane URL. The CT 105 GUI/API port is not public.
 
 ## Configuration
 
-`backupsynctool.json` sits next to the executable. Only `schema_version: 2` with `transport: "s3"` is accepted as paired configuration. Everything else starts unpaired.
-
-### Control plane URL (`pair_api_base`)
-
-Must match the Laravel install’s public `APP_URL` (no trailing slash). Default `https://backup.rui.cam`; not locked to that host.
-
-| Platform | How to set | Persist |
-| --- | --- | --- |
-| Windows | Pair window **Change Server** | Before starting the replacement request |
-| macOS | Pair window **Change Server…** or tray **Control plane URL…** | Before starting the replacement request |
-
-During pair, the UI shows which control plane is in use. `POST /api/pair/start` may return optional `control_plane_url`; if present and it differs from configured `pair_api_base`, the client logs `control_plane_url mismatch: configured=… echoed=…`. Garage `s3_*` credentials and endpoint still come **only** from pair approve — desktop does not choose storage.
-
-On macOS, `s3_secret_enc` / `device_token_enc` store Keychain handles (`kc1:<account>`), not DPAPI blobs. `start_with_windows` means **start at login** (LaunchAgent → `backupsynctool --daemon`).
-
-### macOS Keychain (secrets)
-
-Service: `cam.rui.backupsynctool`. Config stores opaque `kc1:<account>` handles. New pairing credentials use unique candidate account names so the active handles remain readable until the candidate config is verified and atomically installed.
-
-| Rule | Detail |
-| --- | --- |
-| Store | `security add-generic-password … -A` into unique candidate accounts (`src/secret.rs`). `-A` = any app may read without a Keychain UI prompt — required because ad-hoc codesign changes CDHash every local rebuild. Old handles are removed only after atomic config replacement. |
-| Load | CLI `find-generic-password -w` with a **2 s timeout**. On timeout or auth failure, delete the stale item and fail closed (no hang, no password dialog). |
-| Startup | `purge_stale_keychain_handles()` runs before decrypt in `SyncHost::load`. |
-| Local build | `./build-macos.sh` defaults to ad-hoc (`--sign -`). Combined with `-A` storage, rebuild + relaunch must not ask for the login Keychain password. |
-| Real signing | `--identity=…` / `MACOS_SIGN_IDENTITY` only for package/release — never the default dev loop. |
-| Migration | Items created before `-A` (or via old ACL-bound APIs) may be removed on first launch after upgrade; **re-pair once** if sync stops — that is pairing UI, not a Keychain password prompt. |
-
-Do **not** add signing-identity helper scripts or `security add-trusted-cert` to the dev workflow.
+Only `schema_version: 3` is accepted as paired. v2 S3 and all older configurations preserve the selected watch folder/control-plane URL where possible but require fresh pairing.
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "pair_api_base": "https://backup.rui.cam",
   "watch_folder": "C:\\XDSoftware\\backups",
-  "remote_folder": "XDPT.59655-Palmeira-Minimercado",
-  "transport": "s3",
-  "s3_endpoint": "https://s3.rui.cam",
-  "s3_region": "garage",
-  "s3_bucket": "XDPT.59655-Palmeira-Minimercado",
-  "s3_access_key": "GK...",
-  "s3_secret_enc": "DPAPI...",
-  "s3_path_style": true,
-  "s3_prefix": "",
-  "device_uuid": "...",
   "device_token_enc": "DPAPI...",
-  "credential_profile_id": 1,
-  "credential_version": 1,
+  "device_uuid": "desktop-uuid",
+  "syncthing_device_id": "LOCAL-DEVICE-ID",
+  "syncthing_hub_device_id": "CT105-DEVICE-ID",
+  "syncthing_hub_addresses": ["tcp://sync.rui.cam:22000", "quic://sync.rui.cam:22000"],
+  "syncthing_folder_id": "customer-folder-id",
+  "syncthing_folder_label": "XDPT.59655-Palmeira-Minimercado",
+  "server_approved_at": "1784050000",
   "start_with_windows": true,
-  "auto_update": true,
-  "parallel_uploads": 2,
-  "s3_part_size_mib": 32
+  "auto_update": true
 }
 ```
 
-`s3_bucket` is the Garage bucket alias (uploads). `remote_folder` is the admin-approved customer label (XD style when detected). Newly provisioned destinations use the same string for both; case is preserved.
+Paths:
 
-Local sync state:
+| State | Windows | macOS |
+| --- | --- | --- |
+| Desktop config | beside `backupsynctool.exe` | `~/Library/Application Support/BackupSyncTool/backupsynctool.json` |
+| Private engine home | `%LOCALAPPDATA%\BackupSyncTool\syncthing` | `~/Library/Application Support/BackupSyncTool/syncthing` |
+| Logs | `logs\` beside executable | `~/Library/Application Support/BackupSyncTool/logs` |
 
-| Platform | Manifest / multipart root |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\BackupSyncTool` |
-| macOS | `~/Library/Application Support/BackupSyncTool` |
+The private engine's API key lives only in `syncthing/config.xml`. It must never enter desktop config, Laravel, logs, or pairing payloads. Desktop startup binds the engine GUI/API to `127.0.0.1:8385`, supplies the API key in `X-API-Key`, and sets a hidden GUI username/password derived from that unexposed key so a local browser cannot administer the engine. The app never opens a browser. A separately installed user Syncthing instance is not modified.
 
-## XD detection and pairing
+On macOS, `device_token_enc` is a Keychain handle. Ad-hoc development signing must not prompt for a Keychain password. On Windows it is DPAPI ciphertext using the established application entropy. Syncthing's private certificate and key are protected by the user's application-support directory permissions and must persist because they define the device ID.
 
-XD detection is optional and checks only:
+## Pairing contract
+
+Before starting a pair request, the desktop starts the private engine, waits for `/rest/system/status`, and obtains its certificate-derived `myID`. The device ID persists even when the temporary pairing-time process stops.
+
+`POST /api/pair/start` includes the existing machine/XD hints plus:
+
+```json
+{
+  "syncthing_device_id": "LOCAL-DEVICE-ID",
+  "supported_transports": ["syncthing"]
+}
+```
+
+Admin approval provisions the local device on the customer's CT 105 folder. Approved polling status must contain:
+
+```json
+{
+  "status": "approved",
+  "transport": "syncthing",
+  "device_uuid": "desktop-uuid",
+  "device_token": "one-time-visible-token",
+  "syncthing_hub_device_id": "CT105-DEVICE-ID",
+  "syncthing_hub_addresses": ["tcp://sync.rui.cam:22000"],
+  "syncthing_folder_id": "customer-folder-id",
+  "syncthing_folder_label": "Customer label"
+}
+```
+
+The client rejects missing/invalid device IDs, folder IDs, labels, addresses, or a transport other than `syncthing`. It verifies that the running local ID matches the ID sent during pairing, installs the hub device and folder through `/rest/config`, triggers `/rest/db/scan`, atomically saves schema v3, and starts synchronization. Cancellation, rejection, expiry, malformed approval, and failed local activation do not replace an active assignment.
+
+The optional `control_plane_url` in pair start response is compared with configured `pair_api_base`; mismatch is logged as `control_plane_url mismatch`. The UI continues to support **Change Server** and persists the normalized site root before creating a replacement request.
+
+## Syncthing folder contract
+
+Every desktop customer folder is configured as:
+
+- `type: sendreceive`;
+- local selected path, one local device, and the approved CT 105 device;
+- filesystem watcher enabled plus periodic full rescan;
+- approved hub addresses only (`tcp://`, `quic://`, `relay://`, or `dynamic`);
+- no introducer or auto-accept behaviour;
+- no desktop engine self-update.
+
+Every customer folder on CT 105 is `sendreceive` and uses staggered file versioning. All devices may originate and receive creates, edits, renames, conflicts, and deletions. Syncthing's conflict naming/retention behaviour is authoritative. There is no `can_delete_files` switch and `ignoreDelete` must not be enabled.
+
+CT 105 must keep a complete synchronized copy. Operators recover deleted/replaced files from CT 105 staggered versions. The old whole-customer S3 restore operation does not exist; desktop restore UI must not claim that it downloads an object-store snapshot.
+
+## Engine lifecycle and status
+
+The desktop launches only the bundled engine using the equivalent of:
+
+```text
+syncthing serve --home=<private-home> --no-browser --no-restart --no-upgrade --gui-address=127.0.0.1:8385
+```
+
+Stdout/stderr are forwarded into application logs. Startup is bounded; an absent binary, early exit, missing API key, REST failure, or identity mismatch is a visible error. Normal app shutdown requests `/rest/system/shutdown`, waits briefly, then kills only the child it owns if necessary.
+
+Before normal pairing/sync startup, both native shells verify that the engine executable and `syncthing-LICENSE.txt` are present (and executable on Unix). Missing bundle files trigger a retryable same-version repair download from the latest GitHub release. This bypasses the usual “latest version equals current version” result so a legacy single-file updater cannot strand a v3 desktop without its engine. Repair does not require pairing: Windows shows a **Retry repair** action, and macOS exposes **Repair Installation…** in the menu bar after a visible failure.
+
+Desktop status is derived from `/rest/db/status`, `/rest/system/connections`, and `/rest/events`. At minimum the UI distinguishes disconnected/reconnect-required, scanning, syncing, idle, and failure, and may show needed files/bytes. The engine owns transfer retries and offline convergence.
+
+## XD detection
+
+Windows optionally checks:
 
 - `C:\XDSoftware`
 - `C:\XDSoftware\backups`
 - `C:\XDSoftware\cfg\xd.lic`
 - `C:\XDSoftware\cfg\xd.pem`
 
-The app decrypts `Number` and `ClientComercialName` and sends them separately with the detected install/backup paths and suggested customer label. A manually chosen folder does not pretend to be an XD installation. Pairing remains available when detection fails.
+It sends detected licence/customer values only as pairing hints. Manual selection and macOS never pretend to be XD detection. Pairing remains available when detection fails.
 
-The QR popup is a dedicated pairing window: title “Scan to pair…”, large QR of the approve URL, status “Waiting for admin approval…”, pairing code, expiry note, approve link, active control-plane base, **Cancel**, and **Change Server**. Change Server cancels local polling, validates and persists the new control-plane URL, then creates a fresh request. Windows uses Win32 (`pair_qr.rs`); macOS uses a modeless `NSPanel` with the same workflow. The client polls typed pending/approved/rejected/expired/failed states; transport and malformed response errors are never silently converted to pending.
+## Build and release
 
-An approved response must contain `device_uuid`, device token, S3 endpoint/region/bucket/access key/secret, and the admin-approved customer name. Before local activation, the client proves List plus temporary Put/Head/Delete access under `.backupsynctool-validation/`. It stages DPAPI/Keychain secrets, atomically replaces the complete config, then starts the initial upload. Cancellation, rejection, and timeout leave the active local config untouched. The current Laravel backend may already have revoked the old key after an approval, so a failed post-approval validation is shown as **Reconnect required**; true server-side rollback requires the separately planned two-phase activation API.
+Only these entry points are supported: `./build-macos.sh`, `.\build-windows.ps1`, and `./release.sh`.
 
-macOS sends its chosen backup path and a `{hostname}-{folder}` suggestion, but never sends XD licence fields.
-
-Wire contract: `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`.
-
-## YOU DO — operator smoke (Control plane URL)
-
-Agent does not run Windows VM / interactive GUI smoke. Operator:
-
-1. Confirm Laravel `APP_URL` is the public control-plane URL you intend to pair with.
-2. **Windows:** `.\build-windows.ps1` → set **CONTROL PLANE URL** to that `APP_URL` → pair → QR/status shows that server → admin approve → upload. Report failures.
-3. **Mac:** `./build-macos.sh` → tray **Control plane URL…** → same `APP_URL` → pair → confirm. Report failures.
-4. Mismatch log `control_plane_url mismatch` → fix desktop URL or Laravel `APP_URL` until they match.
-
-## Upload engine
-
-- Upload-only: startup scan plus recursive watcher for new/changed files.
-- Preserve each relative path at the customer bucket root.
-- Never delete a remote object because a local file disappeared.
-- Local manifest is keyed to `device_uuid` and stored atomically under the platform app-support `state-v2` directory (see table above).
-- Update the manifest only after S3 verifies the successful object size.
-- Periodically rescan and heal missing/size-mismatched objects.
-- Maximum two concurrent file uploads.
-- Transfer workers emit typed per-file events with actual bytes completed and total. The UI retains at most 200 rows from the current process run and never reconstructs activity from log text.
-- Connection state is independent of transfer state: a running watcher is not displayed as an active upload.
-- Ordinary failures remain visible with **Retry Failed**. S3 authentication/policy failures stop the engine and show **Reconnect required**.
-
-Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use persistent multipart:
-
-- State under app-support `multipart-v1` records source identity, upload ID, completed part number/size/ETag/digest, and phase.
-- Reconcile saved state with ListParts and never adopt server-only parts.
-- Retry transient idempotent operations.
-- Abort/restart if the source size or nanosecond mtime changes.
-- Verify completed object size and upload token before updating the manifest.
-- `rusty_s3` owns URL construction and SigV4 query signing; transport code owns blocking I/O and resume policy.
-
-## Restore
-
-**Restore** is explicit; there is no automatic server-to-client synchronization.
-
-1. User chooses an existing parent directory.
-2. App creates a unique `<customer>-restore-<timestamp>` child directory and never reuses it.
-3. List every object in the approved customer bucket.
-4. Reject absolute paths, parent traversal, prefixes, NULs, and empty keys.
-5. Stream each object to a `.part` file and atomically rename it on completion.
-6. Preserve relative directories and available source modification times.
-7. Report real byte progress and failed paths in the main window. Restore can be cancelled; partial `.part` files are removed. Authentication failures require new pairing.
-
-Restore starts from the secondary tray/menu and focuses the main window. It is not a primary main-window action.
-
-## Build and verification
-
-Three scripts only: `./build-macos.sh` · `.\build-windows.ps1` · `./release.sh`.
-
-| Script | What |
+| Script | Contract |
 | --- | --- |
-| `./build-macos.sh` | Release `.app` under `dist/macos/`, ad-hoc codesign by default. Flags: `--install`, `--no-launch`, `--package`, `--identity=…`. Never `open` the raw binary. |
-| `.\build-windows.ps1` | Any Windows machine (Rust nightly + VS Build Tools). Target `x86_64-win7-windows-msvc` → root `backupsynctool.exe` + `dist\windows\`. `-NoLaunch` skips run. |
-| `./release.sh` | Clean tree. Requires `dist/windows/backupsynctool.exe` already built on Windows. Bump → mac package → tag `vX.Y.Z` → `gh` upload. |
+| `./build-macos.sh` | Build release app, copy pinned engine to `Contents/Resources/syncthing`, sign nested executable then app, and package the sealed `.app` as one updater archive; launch unless `--no-launch` |
+| `.\build-windows.ps1` | Build Win7 desktop plus pinned Win7-compatible `syncthing.exe`, stage app/engine/license together, emit the updater ZIP, and launch unless `-NoLaunch` |
+| `./release.sh` | Require staged Windows desktop and engine, package macOS, bump/tag/upload without moving existing tags |
 
-### Icon assets
+Never launch from `target/debug` or `target/release`. A build is successful only with zero errors and a running packaged app, or staged executable pair when no-launch was requested.
 
-**Source (commit these):** `assets/originals/*.svg` (9 shield masters) + `assets/bridge-pc.svg` + `assets/github.ico` + `assets/render-icons.py`.
+Operator smoke after relevant builds:
 
-**Generated (run script after SVG edits — do not hand-edit):**
+1. Confirm Laravel `APP_URL` and desktop Control plane URL match.
+2. Pair Windows 7, current Windows, and macOS with CT 105.
+3. Verify initial convergence, edits, concurrent conflicts, renames, offline changes, and deletions from every device.
+4. Verify CT 105 staggered-version recovery.
+5. Verify quit/relaunch keeps the same local device ID and does not show the engine GUI or a Keychain password prompt.
+6. Verify no public API port, no engine self-update, and useful logs for process/API failures.
 
-| File(s) | Platform | Why |
+Windows 7 is a release blocker, not an optional compatibility target.
+
+## Implementation handoff — 2026-07-15
+
+The S3 transport has been replaced in the desktop and Laravel repositories. The desktop now bundles and supervises Syncthing, pairing schema v3 carries Syncthing assignments, Laravel provisions customer/device shares through a narrow external service, and the old object-storage upload, restore, scan, browser, credential, and lease paths have been removed. The macOS package has been built and signature-verified. Rust and targeted Laravel tests pass. A real Windows 7 build and the live CT 105/Laravel smoke test remain operator work.
+
+No production infrastructure was changed. In particular, no Forge environment, CT 105 configuration, DNS, router/firewall rule, old S3 key, or stored S3 data was touched.
+
+### Tomorrow: operator installation sequence
+
+Use these as three different endpoints; never substitute one for another:
+
+| Purpose | Suggested endpoint | Exposure |
 | --- | --- | --- |
-| `menubar-icon.png`, `menubar-syncing.png`, `menubar-complete.png` | macOS | Menu bar tray (3 states; one syncing frame) |
-| `AppIcon.icns` | macOS | Dock / Finder icon |
-| `app-idle.ico`, `complete.ico` | Windows | Tray idle + done |
-| `syncing.ico`, `syncing2.ico` … `syncing7.ico` | Windows | 7-frame tray animation (`syncing1`–`syncing6` SVGs + frame 0) |
-| `bridge-pc.png`, `bridge-server.png` | Windows | Status window bridge tiles |
+| Laravel pairing/control plane | `https://backup.rui.cam` | Public HTTPS |
+| Syncthing device traffic | `sync.rui.cam:22000` | Public TCP and UDP to CT 105 |
+| Narrow share/unshare provisioner | `https://sync-provision.rui.cam` or a private-tunnel URL | Reachable by Laravel only |
 
-macOS does **not** load the `.ico` files. Windows does **not** load the menubar PNGs. Most of `assets/` bulk is Windows ICO sizes embedded by `build.rs`.
+Do **not** publish Syncthing GUI/API port `8384`, its REST API key, or the desktop-private port `8385`. Laravel must call the narrow provisioner rather than CT 105's Syncthing API directly.
 
-```bash
-python3 assets/render-icons.py   # cairosvg, Pillow, ImageMagick, iconutil
-```
+1. Take a CT 105 configuration/data snapshot and record the existing hub device ID. The expected ID from the previous setup is `XLTL234-AJRMJV6-W3LNSHR-2YXZD7D-AOWWFDQ-NQ3X6HK-AJ6IS5K-B6MWKAH`; confirm it instead of changing it blindly.
+2. Create DNS for `sync.rui.cam` pointing to the public address that reaches CT 105. Forward TCP `22000` and UDP `22000` to CT 105. Do not forward `8384` or `8385`.
+3. Install the narrow provisioner beside CT 105 or behind a private tunnel. It must implement the authenticated, idempotent `POST /v1/folders/share` and `DELETE /v1/folders/unshare` contract in `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`. It must configure hub folders as `sendreceive` with staggered versioning, and unshare a device without deleting customer files or history. These commits define and consume that contract but do not contain the CT 105 provisioner service itself; if it does not already exist, stop here and implement/deploy it before pairing.
+4. Give the provisioner a long random bearer token. Restrict the endpoint by firewall, tunnel, or access policy so only Laravel can reach it. Test unauthorized requests are rejected.
+5. In the Laravel operator environment, set `APP_URL=https://backup.rui.cam`, `SYNCTHING_PROVISIONER_ENDPOINT=<provisioner base URL>`, and `SYNCTHING_PROVISIONER_TOKEN=<same token>`. Do not place the Syncthing GUI URL or API key in Laravel.
+6. Deploy the Laravel changes using the normal operator process, run the database migrations, clear/rebuild Laravel configuration cache, and confirm the pairing page loads at the public `APP_URL`. The agent must not access Forge or production environment values.
+7. On a Windows 7 SP1 x64 test machine with Rust/Visual Studio prerequisites, run `.\build-windows.ps1`. Require zero build errors, a passing forbidden-import audit, and the packaged `dist\windows\backupsynctool.exe`, `syncthing.exe`, `syncthing-LICENSE.txt`, and updater ZIP. Do not release if the Windows 7 build or launch fails.
+8. On macOS, run `./build-macos.sh`. Confirm the packaged app launches, no Terminal or Syncthing GUI appears, no Keychain password prompt appears, and `codesign --verify --strict "dist/macos/Backup Sync Tool.app"` succeeds.
+9. In each desktop app, set **Control plane URL** to exactly `https://backup.rui.cam`, select a new disposable test folder, start pairing, approve it in Laravel, and verify the returned hub address is `sync.rui.cam:22000` rather than a control-plane or GUI address.
+10. Pair at least Windows 7, a current Windows machine, and macOS to the same disposable customer. Confirm all three retain different stable local Syncthing device IDs while sharing the same customer folder ID.
+11. Test convergence in both directions: create and edit a file on each device, rename a file, make one device offline and reconnect it, and create a concurrent-edit conflict. Wait for all devices and CT 105 to become idle after each case.
+12. Test deletion propagation explicitly. Delete a disposable file on Windows, then a different file on macOS. Confirm both deletions reach every device and CT 105. There is intentionally no per-device deletion permission.
+13. From CT 105 staggered versions, restore one deleted file and one earlier file version. Confirm the recovered files synchronize back to every device. Do not use the removed S3 restore workflow.
+14. Quit and relaunch every desktop app. Confirm the local device IDs do not change, sync resumes, the engine remains private, and logs contain no `control_plane_url mismatch`.
+15. Only after the complete smoke test, run `./release.sh` from macOS with the verified Windows bundle already in `dist/windows/`. This is the only supported release path.
+16. Separately revoke the obsolete Garage/S3 access keys and decide the retention/deletion date for old object-storage data. This is irreversible infrastructure work and is intentionally outside these code commits.
 
-| Action | How |
-| --- | --- |
-| Main window | Manual launch or **left-click** menubar shield opens the full titled `NSWindow` directly. Closing hides it to the menu bar. |
-| Tray menu | Secondary click → **Open Backup Sync Tool…** / **Restore Backup…** / **Open Logs** / **Control plane URL…** / **Quit Backup Sync**. |
-| Shortcuts | Minimal `NSApp` main menu: **⌘Q** Quit · **⌘W** Close frontmost (status hides to menubar; pair QR closes) |
-| Logs | Tray menu **Open Logs** |
-| Quit | Tray menu **Quit Backup Sync** (also ⌘Q) |
-| Daemon only | `backupsynctool --daemon` |
-
-Pairing QR remains a separate `NSPanel` (`notify.rs`). Routine notices use `notify_user()` / tray tips — not `NSAlert` action sheets for primary workflow. Manual launch shows the main window; LaunchAgent `--daemon` remains hidden.
-
-Config/state: `~/Library/Application Support/BackupSyncTool/` · Logs: `~/Library/Application Support/BackupSyncTool/logs/` (outside the sealed `.app`) · Secrets: Keychain `cam.rui.backupsynctool` (see Keychain table above).
-
-Checklist: menubar icon · click → full window · watch folder · pair QR / Change Server / Cancel → automatic initial sync · two live filenames with byte percentages · retry ordinary failure · auth pause · quit/relaunch **no Keychain password prompt** (ad-hoc + `-A`) · tray Restore with progress/cancel · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
-
-Limits: not notarized; release assets `backupsynctool.exe` + `backupsynctool-macos-*.tar.gz` on GitHub Releases.
+If tomorrow stops before completion, record the last successful numbered step and the exact desktop, Laravel, provisioner, or CT 105 log error. Do not work around a failure by exposing port `8384`, enabling Syncthing self-update, changing a device ID, or disabling deletion propagation.

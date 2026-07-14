@@ -310,7 +310,7 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
         &bridge_server_name(st),
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
-    let conn_color = if is_paired(&st.config) && !st.config.remote_folder.trim().is_empty() {
+    let conn_color = if is_paired(&st.config) && !st.config.syncthing_folder_label.trim().is_empty() {
         C_BRIDGE_PATH_TXT
     } else if st.bridge_conn_ok {
         C_BRIDGE_CONN_OK
@@ -352,44 +352,30 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
 
     let hf_detail = st.hfont_small;
     let syncing = bridge_syncing_progress(st);
-    let checking = st.sync_status_state == crate::sync::ActivityState::Checking as usize;
+    let checking = st.sync_status_state == UiSyncState::Checking as usize;
     let all_synced = st.bridge_sync_head == "All synced";
 
     let (head, pct, bar_color, detail, eta) = if syncing {
-        let byte_done = st
-            .transfer_bytes
-            .iter()
-            .map(|row| row.transferred.min(row.total))
-            .sum::<u64>();
-        let byte_total = st.transfer_bytes.iter().map(|row| row.total).sum::<u64>();
-        let file_done = st.sync_progress_done.min(st.sync_progress_total);
-        let file_total = st.sync_progress_total;
-        let pct = if byte_total > 0 {
-            (byte_done.saturating_mul(100) / byte_total).min(100)
-        } else if file_total > 0 {
-            ((file_done * 100) / file_total) as u64
+        let app = st.app.snapshot();
+        let file_total = app.global_files;
+        let file_done = file_total.saturating_sub(app.need_files);
+        let pct = if file_total > 0 {
+            file_done.saturating_mul(100) / file_total
         } else {
             0
         };
-        let detail = if byte_total > 0 {
+        let detail = if app.need_bytes > 0 {
             format!(
-                "{} of {}",
-                format_transfer_bytes(byte_done),
-                format_transfer_bytes(byte_total)
+                "{} file(s) · {} remaining",
+                app.need_files,
+                format_transfer_bytes(app.need_bytes)
             )
         } else if file_total > 0 {
             format!("{file_done} of {file_total} files")
         } else {
             String::new()
         };
-        let eta = st
-            .sync_status_text
-            .split("ETA ")
-            .nth(1)
-            .and_then(|s| s.split('\u{00B7}').next())
-            .map(|eta| format!("ETA {eta}"))
-            .unwrap_or_default();
-        ("Syncing".to_string(), pct, C_BLUE, detail, eta)
+        ("Syncing".to_string(), pct, C_BLUE, detail, String::new())
     } else if checking {
         (
             "Checking…".to_string(),
@@ -509,6 +495,15 @@ fn format_transfer_bytes(bytes: u64) -> String {
     }
 }
 
+fn format_transfer_rate(bytes_per_second: f64) -> String {
+    const MIB: f64 = (1024 * 1024) as f64;
+    if bytes_per_second >= MIB {
+        format!("{:.1} MB/s", bytes_per_second / MIB)
+    } else {
+        format!("{:.1} KB/s", bytes_per_second / 1024.0)
+    }
+}
+
 unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
     let mut cr = RECT::default();
     GetClientRect(hwnd, &mut cr).ok();
@@ -529,8 +524,8 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
 
     let sr = (*st).status_strip_rect;
     if STATUS_ROW_H > 0 && sr.right > sr.left && sr.bottom > sr.top && !status_text.is_empty() {
-        let syncing = (*st).sync_status_state == crate::sync::ActivityState::Checking as usize
-            || (*st).sync_status_state == crate::sync::ActivityState::Syncing as usize;
+        let syncing = (*st).sync_status_state == UiSyncState::Checking as usize
+            || (*st).sync_status_state == UiSyncState::Syncing as usize;
         draw_status_pill_row(
             hdc,
             &sr,
@@ -559,10 +554,7 @@ unsafe fn paint_bg(hwnd: HWND, hdc: HDC) {
     }
 
     let fr = (*st).sync_footer_rect;
-    if fr.right > fr.left
-        && fr.bottom > fr.top
-        && ((*st).sync_footer_busy || (*st).sync_last_failed > 0)
-    {
+    if fr.right > fr.left && fr.bottom > fr.top && (*st).sync_footer_busy {
         if (*st).sync_footer_busy {
             fill_rect_color(hdc, &fr, C_STATUS_BG);
             frame_rect_color(hdc, &fr, C_FOOTER_BUSY_BORDER);
@@ -596,19 +588,17 @@ fn bridge_pc_path(st: &WndState) -> String {
 }
 
 fn bridge_server_name(st: &WndState) -> String {
-    let url = st.config.s3_endpoint.trim();
-    if url.is_empty() {
-        return "Server".to_string();
-    }
-
-    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let Some(address) = st.config.syncthing_hub_addresses.first() else {
+        return "Syncthing hub".to_string();
+    };
+    let without_scheme = address.split_once("://").map(|(_, rest)| rest).unwrap_or(address);
     let host = without_scheme
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default()
         .trim();
     if host.is_empty() {
-        "Server".to_string()
+        "Syncthing hub".to_string()
     } else {
         host.to_string()
     }

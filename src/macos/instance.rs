@@ -1,7 +1,7 @@
 //! Single-instance guard via pid file (macOS).
 //!
 //! Interactive and `--daemon` share one lock so two sync engines never run.
-//! Interactive can take over a daemon (kill + replace lock) so pair/restore stay usable.
+//! Interactive can take over a daemon (kill + replace lock) so pairing stays usable.
 
 use crate::logs;
 use crate::paths;

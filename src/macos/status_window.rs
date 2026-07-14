@@ -26,7 +26,7 @@ const H: f64 = 560.0;
 const PAD: f64 = 20.0;
 const COL_GAP: f64 = 16.0;
 const ACT_H: f64 = 200.0;
-/// Shared short Push height (Open / Change / Connect / Restore).
+/// Shared short Push height (Open / Change / Connect).
 const BTN_H: f64 = 22.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +34,6 @@ pub enum StatusAction {
     OpenWatch,
     ChooseWatch,
     Pair,
-    RetryFailed,
-    CancelRestore,
     ToggleLogin,
     ToggleAutoUpdate,
     Update,
@@ -46,7 +44,7 @@ pub enum StatusAction {
 #[derive(Clone, Default)]
 pub struct StatusSnapshot {
     pub watch_folder: String,
-    pub remote_folder: String,
+    pub folder_label: String,
     pub connected: bool,
     pub server_status: String,
     pub start_at_login: bool,
@@ -54,10 +52,10 @@ pub struct StatusSnapshot {
     pub activity_lines: Vec<String>,
     pub syncing: bool,
     pub sync_status: String,
-    pub transferred_bytes: u64,
-    pub total_bytes: u64,
-    pub failed: usize,
-    pub restoring: bool,
+    pub local_files: u64,
+    pub global_files: u64,
+    pub need_files: u64,
+    pub need_bytes: u64,
     pub version: String,
     pub update_available: bool,
 }
@@ -73,8 +71,6 @@ struct Widgets {
     server_title: Retained<NSTextField>,
     server_detail: Retained<NSTextField>,
     pair: Retained<NSButton>,
-    retry: Retained<NSButton>,
-    cancel_restore: Retained<NSButton>,
     sync_spinner: Retained<NSProgressIndicator>,
     act_body: Retained<NSTextField>,
     act_sub: Retained<NSTextField>,
@@ -118,14 +114,6 @@ define_class!(
         #[unsafe(method(actPair:))]
         fn act_pair(&self, _: Option<&AnyObject>) {
             fire(StatusAction::Pair);
-        }
-        #[unsafe(method(actRetryFailed:))]
-        fn act_retry_failed(&self, _: Option<&AnyObject>) {
-            fire(StatusAction::RetryFailed);
-        }
-        #[unsafe(method(actCancelRestore:))]
-        fn act_cancel_restore(&self, _: Option<&AnyObject>) {
-            fire(StatusAction::CancelRestore);
         }
         #[unsafe(method(actLogin:))]
         fn act_login(&self, _: Option<&AnyObject>) {
@@ -297,10 +285,10 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     };
     ui.watch.setStringValue(&NSString::from_str(watch));
 
-    let connected_title = if s.remote_folder.trim().is_empty() {
-        "Connected"
+    let connected_title = if s.folder_label.trim().is_empty() {
+        "Syncthing hub"
     } else {
-        s.remote_folder.as_str()
+        s.folder_label.as_str()
     };
     let (sym, tint, title, detail) = if s.connected {
         (
@@ -309,7 +297,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
             connected_title,
             if s.syncing {
                 if s.sync_status.is_empty() {
-                    "Uploading…"
+                    "Syncing…"
                 } else {
                     s.sync_status.as_str()
                 }
@@ -366,19 +354,20 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     }
 
     let n = s.activity_lines.len();
-    ui.retry.setHidden(s.failed == 0 || s.restoring);
-    ui.cancel_restore.setHidden(!s.restoring);
-    ui.act_sub.setHidden(s.failed > 0 || s.restoring);
+    let activity_summary = if s.need_files > 0 || s.need_bytes > 0 {
+        format!(
+            "{} file(s) remaining · {}",
+            s.need_files,
+            format_bytes(s.need_bytes)
+        )
+    } else {
+        format!(
+            "{} local / {} global · {n} recent event(s)",
+            s.local_files, s.global_files
+        )
+    };
     ui.act_sub
-        .setStringValue(&NSString::from_str(&if s.total_bytes > 0 {
-            format!(
-                "{} / {} MB",
-                s.transferred_bytes / (1024 * 1024),
-                s.total_bytes / (1024 * 1024)
-            )
-        } else {
-            format!("{n} current-run events")
-        }));
+        .setStringValue(&NSString::from_str(&activity_summary));
     let preview = if s.activity_lines.is_empty() {
         "No recent activity".to_string()
     } else {
@@ -592,32 +581,13 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     let act_sub = label(
         mtm,
         "Showing last 0 events",
-        rect(W - PAD - 160.0, y, 160.0, 16.0),
+        rect(W - PAD - 300.0, y, 300.0, 16.0),
         11.0,
         false,
     );
     act_sub.setAlignment(NSTextAlignment::Right);
     act_sub.setTextColor(Some(&crate::macos::brand::caption()));
     root.addSubview(&act_sub);
-    let retry = button(
-        mtm,
-        &target,
-        "Retry Failed",
-        sel!(actRetryFailed:),
-        rect(W - PAD - 92.0, y - 5.0, 92.0, BTN_H),
-    );
-    retry.setHidden(true);
-    root.addSubview(&retry);
-    let cancel_restore = button(
-        mtm,
-        &target,
-        "Cancel Restore",
-        sel!(actCancelRestore:),
-        rect(W - PAD - 104.0, y - 5.0, 104.0, BTN_H),
-    );
-    cancel_restore.setHidden(true);
-    root.addSubview(&cancel_restore);
-
     y -= ACT_H + 8.0;
     let scroll = NSScrollView::new(mtm);
     scroll.setFrame(rect(PAD, y, inner, ACT_H));
@@ -667,7 +637,6 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         rect(PAD + 170.0, y, 140.0, 22.0),
     );
     root.addSubview(&auto_update);
-
     let foot_y = 12.0;
     let version = label(
         mtm,
@@ -711,8 +680,6 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         server_title,
         server_detail,
         pair,
-        retry,
-        cancel_restore,
         sync_spinner,
         act_body,
         act_sub,
@@ -720,6 +687,15 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         auto_update,
         version,
         update_btn,
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const MIB: f64 = (1024 * 1024) as f64;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / MIB)
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
     }
 }
 

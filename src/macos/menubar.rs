@@ -149,9 +149,9 @@ unsafe impl Sync for MainTray {}
 
 struct Ids {
     open_window: String,
-    restore: String,
     open_logs: String,
     set_control_plane: String,
+    repair_installation: String,
     quit: String,
 }
 
@@ -169,7 +169,6 @@ struct Shared {
     icons: Arc<TrayIcons>,
     busy: Arc<AtomicBool>,
     update_available: Arc<AtomicBool>,
-    restore_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
 }
 
 /// Run accessory menu-bar app (icon in the macOS status bar). Blocks until Quit.
@@ -181,8 +180,9 @@ pub fn run() {
 
     let host = Arc::new(Mutex::new(SyncHost::load()));
     let _ = logs::ensure_logs_dir();
+    let repair_required = crate::paths::validate_bundled_engine_installation().is_err();
 
-    {
+    if !repair_required {
         let mut h = host.lock().expect("host lock");
         if h.is_configured() {
             if let Err(err) = h.restart_sync() {
@@ -196,24 +196,24 @@ pub fn run() {
     let icon_complete = png_to_icon(ICON_COMPLETE).expect("menubar complete icon");
 
     let open_window = TrayMenuItem::new("Open Backup Sync Tool…", true, None);
-    let restore = TrayMenuItem::new("Restore Backup…", true, None);
     let open_logs = TrayMenuItem::new("Open Logs", true, None);
     let set_control_plane = TrayMenuItem::new("Control plane URL…", true, None);
+    let repair_installation = TrayMenuItem::new("Repair Installation…", repair_required, None);
     let quit = TrayMenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
         open_window: open_window.id().as_ref().to_string(),
-        restore: restore.id().as_ref().to_string(),
         open_logs: open_logs.id().as_ref().to_string(),
         set_control_plane: set_control_plane.id().as_ref().to_string(),
+        repair_installation: repair_installation.id().as_ref().to_string(),
         quit: quit.id().as_ref().to_string(),
     };
 
     let menu = Menu::new();
     let _ = menu.append(&open_window);
-    let _ = menu.append(&restore);
     let _ = menu.append(&open_logs);
     let _ = menu.append(&set_control_plane);
+    let _ = menu.append(&repair_installation);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
@@ -241,12 +241,16 @@ pub fn run() {
         icons: icons.clone(),
         busy: busy.clone(),
         update_available: update_available.clone(),
-        restore_cancel: Arc::new(Mutex::new(None)),
     };
     apply_status(&shared);
 
-    // Always check once so Update link can appear when needed (Windows parity).
-    {
+    // Repair the old-updater rollout even when the installed version equals
+    // the latest release. Pairing is intentionally not required for repair.
+    if repair_required {
+        let shared_repair = shared.clone();
+        thread::spawn(move || run_bundle_repair(&shared_repair));
+    } else {
+        // Always check once so Update link can appear when needed (Windows parity).
         let shared_up = shared.clone();
         let auto = host.lock().expect("host").config.auto_update;
         thread::spawn(move || match updater::check(env!("CARGO_PKG_VERSION")) {
@@ -289,17 +293,17 @@ pub fn run() {
             open_main_window(&shared_ev);
             return;
         }
-        if id == ids.restore {
-            open_main_window(&shared_ev);
-            start_restore(&shared_ev);
-            return;
-        }
         if id == ids.open_logs {
             do_open_logs();
             return;
         }
         if id == ids.set_control_plane {
             start_set_control_plane(&shared_ev);
+            return;
+        }
+        if id == ids.repair_installation {
+            let shared = shared_ev.clone();
+            thread::spawn(move || run_bundle_repair(&shared));
         }
     }));
 
@@ -337,6 +341,26 @@ pub fn run() {
     app.run();
 }
 
+fn run_bundle_repair(shared: &Shared) {
+    if shared.busy.swap(true, Ordering::SeqCst) {
+        tip(&shared.tray, "Repair already running…");
+        return;
+    }
+    tip(&shared.tray, "Repairing installation…");
+    if let Err(error) = updater::repair_current_bundle(|_| {}) {
+        logs::append(&format!("Installation repair failed: {error}"));
+        tip(
+            &shared.tray,
+            "Repair failed — choose Repair Installation to retry",
+        );
+        notify::alert(
+            "Backup Sync — Repair Failed",
+            &format!("{error}\n\nChoose Repair Installation from the menu bar to try again."),
+        );
+        shared.busy.store(false, Ordering::SeqCst);
+    }
+}
+
 fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
     let app = host.app_snapshot();
     let paired = host.is_paired();
@@ -345,29 +369,21 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         crate::app::ConnectionState::ReconnectRequired { .. } => "Reconnect required".into(),
         crate::app::ConnectionState::Connecting => "Connecting…".into(),
         crate::app::ConnectionState::Connected => "Connected".into(),
-        crate::app::ConnectionState::Disconnected if paired => "Reconnect required".into(),
+        crate::app::ConnectionState::Disconnected if paired => "Hub offline".into(),
         crate::app::ConnectionState::Disconnected => "Not connected".into(),
     };
     let syncing = matches!(
         app.work,
-        crate::app::WorkState::Scanning
-            | crate::app::WorkState::Uploading
-            | crate::app::WorkState::Restoring
+        crate::app::WorkState::Scanning | crate::app::WorkState::Syncing
     );
-    let sync_status = if matches!(app.work, crate::app::WorkState::Restoring) {
-        "Restoring…".into()
-    } else if matches!(app.work, crate::app::WorkState::Scanning) {
+    let sync_status = if matches!(app.work, crate::app::WorkState::Scanning) {
         "Checking files…".into()
-    } else if matches!(app.work, crate::app::WorkState::Uploading) {
-        let percent = if app.total_bytes == 0 {
-            0
+    } else if matches!(app.work, crate::app::WorkState::Syncing) {
+        if app.need_files > 0 {
+            format!("Syncing… {} file(s) remaining", app.need_files)
         } else {
-            app.transferred_bytes
-                .saturating_mul(100)
-                .checked_div(app.total_bytes)
-                .unwrap_or(0)
-        };
-        format!("Uploading… {percent}%")
+            "Syncing…".into()
+        }
     } else if connected {
         "Idle".into()
     } else {
@@ -375,45 +391,18 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
     };
     StatusSnapshot {
         watch_folder: host.config.watch_folder.clone(),
-        remote_folder: host.config.remote_folder.clone(),
+        folder_label: host.config.syncthing_folder_label.clone(),
         connected,
         server_status,
         start_at_login: host.config.start_with_windows,
         auto_update: host.config.auto_update,
-        activity_lines: app
-            .activity
-            .iter()
-            .rev()
-            .map(|row| {
-                let state = match row.status {
-                    crate::app::ActivityStatus::Started => "Starting",
-                    crate::app::ActivityStatus::Progress => match row.kind {
-                        crate::sync::TransferKind::Upload => "Uploading",
-                        crate::sync::TransferKind::Download
-                        | crate::sync::TransferKind::Restore => "Restoring",
-                    },
-                    crate::app::ActivityStatus::Completed => "Complete",
-                    crate::app::ActivityStatus::Failed => "Failed",
-                    crate::app::ActivityStatus::Cancelled => "Cancelled",
-                };
-                let suffix = row
-                    .error
-                    .as_deref()
-                    .map(|error| format!(" · {error}"))
-                    .unwrap_or_default();
-                format!(
-                    "{} · {state} · {}%{suffix}",
-                    row.relative_path,
-                    row.percent()
-                )
-            })
-            .collect(),
+        activity_lines: app.activity.iter().rev().cloned().collect(),
         syncing,
         sync_status,
-        transferred_bytes: app.transferred_bytes,
-        total_bytes: app.total_bytes,
-        failed: app.failed,
-        restoring: matches!(app.work, crate::app::WorkState::Restoring),
+        local_files: app.local_files,
+        global_files: app.global_files,
+        need_files: app.need_files,
+        need_bytes: app.need_bytes,
         version: env!("CARGO_PKG_VERSION").into(),
         update_available,
     }
@@ -436,8 +425,6 @@ fn open_main_window(shared: &Shared) {
         }
         StatusAction::ChooseWatch => start_set_watch(&shared_cb),
         StatusAction::Pair => start_pair(&shared_cb),
-        StatusAction::RetryFailed => start_retry_failed(&shared_cb),
-        StatusAction::CancelRestore => cancel_restore(&shared_cb),
         StatusAction::ToggleLogin => {
             do_toggle_login(&shared_cb);
             refresh_status_window(&shared_cb);
@@ -610,7 +597,7 @@ fn start_pair(shared: &Shared) {
                     .unwrap_or_else(|_| "https://backup.rui.cam".into());
                 let Some(raw) = notify::prompt_url(
                     "Change Server",
-                    "Control plane URL used for pairing (not the S3 endpoint).",
+                    "Control plane URL used for pairing.",
                     &current,
                 ) else {
                     shared.busy.store(false, Ordering::SeqCst);
@@ -736,84 +723,6 @@ fn run_pair_attempt(shared: &Shared) -> PairAttempt {
     }
 }
 
-fn start_restore(shared: &Shared) {
-    let shared = shared.clone();
-    thread::spawn(move || {
-        let Some(parent) = notify::pick_folder("Choose parent folder for restore") else {
-            return;
-        };
-        if shared.busy.swap(true, Ordering::SeqCst) {
-            tip(&shared.tray, "Already busy…");
-            return;
-        }
-        set_icon(&shared.tray, &shared.icons, IconKind::Syncing);
-        tip(&shared.tray, "Restoring…");
-        let cancel = Arc::new(AtomicBool::new(false));
-        if let Ok(mut active) = shared.restore_cancel.lock() {
-            *active = Some(cancel.clone());
-        }
-        let job = shared
-            .host
-            .lock()
-            .map_err(|_| "host lock poisoned".to_string())
-            .and_then(|host| host.start_restore_job(parent, cancel));
-        let result = match job {
-            Ok(receiver) => receiver
-                .recv()
-                .unwrap_or_else(|_| Err("Restore worker stopped unexpectedly.".into())),
-            Err(err) => Err(err),
-        };
-        if let Ok(mut active) = shared.restore_cancel.lock() {
-            *active = None;
-        }
-        match result {
-            Ok(path) => {
-                tip(&shared.tray, &format!("Restored to {}", path.display()));
-                set_icon(&shared.tray, &shared.icons, IconKind::Complete);
-                let _ = std::process::Command::new("open").arg(&path).status();
-                shared.busy.store(false, Ordering::SeqCst);
-            }
-            Err(err) => {
-                tip(&shared.tray, &format!("Restore failed: {err}"));
-                set_icon(&shared.tray, &shared.icons, IconKind::Idle);
-                shared.busy.store(false, Ordering::SeqCst);
-            }
-        }
-    });
-}
-
-fn cancel_restore(shared: &Shared) {
-    if let Ok(active) = shared.restore_cancel.lock() {
-        if let Some(cancel) = active.as_ref() {
-            cancel.store(true, Ordering::SeqCst);
-            tip(&shared.tray, "Cancelling restore…");
-        }
-    }
-}
-
-fn start_retry_failed(shared: &Shared) {
-    if shared.busy.swap(true, Ordering::SeqCst) {
-        tip(&shared.tray, "Already busy…");
-        return;
-    }
-    let shared = shared.clone();
-    thread::spawn(move || {
-        tip(&shared.tray, "Retrying failed uploads…");
-        let result = shared
-            .host
-            .lock()
-            .map_err(|_| "host lock poisoned".to_string())
-            .and_then(|mut host| host.retry_failed_uploads());
-        match result {
-            Ok(0) => tip(&shared.tray, "No failed uploads to retry"),
-            Ok(count) => tip(&shared.tray, &format!("Retried {count} upload(s)")),
-            Err(err) => tip(&shared.tray, &format!("Retry failed: {err}")),
-        }
-        shared.busy.store(false, Ordering::SeqCst);
-        apply_status(&shared);
-    });
-}
-
 fn start_update(shared: &Shared) {
     let shared = shared.clone();
     thread::spawn(move || {
@@ -878,12 +787,25 @@ fn set_icon(tray: &Arc<Mutex<MainTray>>, icons: &Arc<TrayIcons>, kind: IconKind)
 
 fn apply_status(shared: &Shared) {
     let (kind, tip_text) = {
-        // try_lock: never freeze menubar if pair/restore briefly holds host
+        // try_lock: never freeze the menubar while pairing holds the host.
         let Ok(h) = shared.host.try_lock() else {
             return;
         };
+        let app = h.app_snapshot();
         if h.auth_failed() {
             (IconKind::Idle, "Backup Sync — re-pair required".into())
+        } else if matches!(
+            app.work,
+            crate::app::WorkState::Scanning | crate::app::WorkState::Syncing
+        ) {
+            (
+                IconKind::Syncing,
+                if app.need_files > 0 {
+                    format!("Backup Sync — {} file(s) remaining", app.need_files)
+                } else {
+                    "Backup Sync — syncing".into()
+                },
+            )
         } else if h.engine_running() {
             (
                 IconKind::Complete,
@@ -897,7 +819,7 @@ fn apply_status(shared: &Shared) {
                 ),
             )
         } else if h.is_configured() {
-            (IconKind::Complete, "Backup Sync — idle / configured".into())
+            (IconKind::Complete, "Backup Sync — configured".into())
         } else if h.is_paired() {
             (IconKind::Idle, "Backup Sync — set watch folder".into())
         } else {

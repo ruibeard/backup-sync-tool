@@ -1,9 +1,12 @@
 //! updater.rs — check GitHub releases, download, replace in place, restart.
-//! Windows: `.exe` asset + `.bat` swap. macOS: `backupsynctool-macos-*.tar.gz` or raw binary.
+//! A release is one tested unit: desktop executable, bundled Syncthing engine,
+//! and the engine license. The updater always stages and swaps the whole unit.
 
 use serde::Deserialize;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 
 const RELEASES_API: &str = "https://api.github.com/repos/ruibeard/backup-sync-tool/releases/latest";
 
@@ -31,23 +34,9 @@ pub enum CheckResult {
 }
 
 pub fn check(current_version: &str) -> CheckResult {
-    let resp = match ureq::get(RELEASES_API)
-        .set("User-Agent", "backup-sync-tool-updater")
-        .timeout(std::time::Duration::from_secs(10))
-        .call()
-    {
-        Ok(resp) => resp,
-        Err(err) => return CheckResult::Error(err.to_string()),
-    };
-
-    let body = match resp.into_string() {
-        Ok(body) => body,
-        Err(err) => return CheckResult::Error(err.to_string()),
-    };
-
-    let release: GhRelease = match serde_json::from_str(&body) {
+    let release = match fetch_latest_release() {
         Ok(release) => release,
-        Err(err) => return CheckResult::Error(format!("Invalid release JSON: {err}")),
+        Err(error) => return CheckResult::Error(error),
     };
 
     let version = release.tag_name.trim_start_matches('v').to_string();
@@ -72,10 +61,45 @@ pub fn check(current_version: &str) -> CheckResult {
     })
 }
 
+fn fetch_latest_release() -> Result<GhRelease, String> {
+    let resp = ureq::get(RELEASES_API)
+        .set("User-Agent", "backup-sync-tool-updater")
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .map_err(|error| error.to_string())?;
+
+    let body = resp.into_string().map_err(|error| error.to_string())?;
+    serde_json::from_str(&body).map_err(|error| format!("Invalid release JSON: {error}"))
+}
+
+/// Repair an old-updater rollout that installed the desktop executable without
+/// its bundled engine. This intentionally ignores semantic-version equality.
+pub fn repair_current_bundle(progress: impl Fn(u8)) -> Result<(), String> {
+    let health = crate::paths::validate_bundled_engine_installation();
+    if !repair_required(&health) {
+        return Ok(());
+    }
+    let release = fetch_latest_release()?;
+    let asset = find_asset_for_platform(&release.assets).ok_or_else(|| {
+        format!(
+            "Release {} has no complete bundle for {}.",
+            release.tag_name,
+            std::env::consts::OS
+        )
+    })?;
+    download_and_replace(&asset.browser_download_url, progress)
+}
+
+fn repair_required(installation_health: &Result<(), String>) -> bool {
+    installation_health.is_err()
+}
+
 fn find_asset_for_platform(assets: &[GhAsset]) -> Option<&GhAsset> {
     #[cfg(windows)]
     {
-        return assets.iter().find(|a| a.name.ends_with(".exe"));
+        return assets
+            .iter()
+            .find(|a| a.name == "backupsynctool-windows-amd64.zip");
     }
     #[cfg(target_os = "macos")]
     {
@@ -90,13 +114,7 @@ fn find_asset_for_platform(assets: &[GhAsset]) -> Option<&GhAsset> {
                 return Some(a);
             }
         }
-        if let Some(a) = assets
-            .iter()
-            .find(|a| a.name.starts_with("backupsynctool-macos-") && a.name.ends_with(".tar.gz"))
-        {
-            return Some(a);
-        }
-        return assets.iter().find(|a| a.name == "backupsynctool");
+        return None;
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -158,18 +176,127 @@ pub fn download_and_replace(url: &str, progress: impl Fn(u8)) -> Result<(), Stri
 
 #[cfg(windows)]
 fn replace_windows(exe: &Path, buf: &[u8]) -> Result<(), String> {
-    let tmp = exe.with_extension("tmp");
-    let bat_path = exe.with_extension("update.bat");
+    let stage = std::env::temp_dir().join(format!("backupsynctool-update-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
+    let archive = stage.join("update.zip");
+    std::fs::write(&archive, buf).map_err(|e| e.to_string())?;
 
-    std::fs::write(&tmp, buf).map_err(|e| e.to_string())?;
+    // Shell.Application ZIP extraction is present on Windows 7 and avoids
+    // depending on Expand-Archive, which was introduced in later PowerShell.
+    let app = stage.join("backupsynctool.exe");
+    let engine = stage.join("syncthing.exe");
+    let license = stage.join("syncthing-LICENSE.txt");
+    let ps = format!(
+        "$zip={zip};$dest={dest};$shell=New-Object -ComObject Shell.Application;\
+         $source=$shell.NameSpace($zip);$target=$shell.NameSpace($dest);\
+         if(($null -eq $source) -or ($null -eq $target)){{exit 2}};\
+         $target.CopyHere($source.Items(),20);\
+         for($i=0;$i -lt 300;$i++){{\
+           if((Test-Path {app}) -and (Test-Path {engine}) -and (Test-Path {license})){{exit 0}};\
+           Start-Sleep -Milliseconds 100\
+         }};exit 3",
+        zip = powershell_literal(&archive),
+        dest = powershell_literal(&stage),
+        app = powershell_literal(&app),
+        engine = powershell_literal(&engine),
+        license = powershell_literal(&license),
+    );
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        .status()
+        .map_err(|error| format!("Could not extract update bundle: {error}"))?;
+    if !status.success() || !app.is_file() || !engine.is_file() || !license.is_file() {
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err("The Windows update archive is incomplete or could not be extracted.".into());
+    }
+    let version = std::process::Command::new(&engine)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("Could not validate the update engine: {error}"))?;
+    let version_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&version.stdout),
+        String::from_utf8_lossy(&version.stderr)
+    );
+    if !version.status.success()
+        || !version_text.starts_with("syncthing v2.1.1")
+        || !version_text.contains("noupgrade")
+    {
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(format!(
+            "The update contains an unexpected Syncthing engine: {}",
+            version_text.trim()
+        ));
+    }
+
+    let install_dir = exe
+        .parent()
+        .ok_or_else(|| "The running executable has no install directory.".to_string())?;
+    let installed_engine = install_dir.join("syncthing.exe");
+    let installed_license = install_dir.join("syncthing-LICENSE.txt");
+    let bat_path = stage.join("install-update.bat");
+    let old_app = stage.join("backupsynctool.old.exe");
+    let old_engine = stage.join("syncthing.old.exe");
+    let old_license = stage.join("syncthing-LICENSE.old.txt");
+    std::fs::copy(exe, &old_app)
+        .map_err(|error| format!("Could not stage app rollback copy: {error}"))?;
+    let had_engine = installed_engine.is_file();
+    let had_license = installed_license.is_file();
+    if had_engine {
+        std::fs::copy(&installed_engine, &old_engine)
+            .map_err(|error| format!("Could not stage engine rollback copy: {error}"))?;
+    }
+    if had_license {
+        std::fs::copy(&installed_license, &old_license)
+            .map_err(|error| format!("Could not stage license rollback copy: {error}"))?;
+    }
 
     let bat = format!(
-        "@echo off\r\ntimeout /t 2 /nobreak >nul\r\nmove /y \"{tmp}\" \"{exe}\"\r\nstart \"\" \"{exe}\"\r\ndel \"%~f0\"\r\n",
-        tmp = tmp.display(),
+        "@echo off\r\n\
+         ping 127.0.0.1 -n 3 >nul\r\n\
+         for /L %%i in (1,1,30) do (\r\n\
+           move /y \"%~dp0syncthing.exe\" \"{engine}\" >nul 2>&1 && goto engine_done\r\n\
+           ping 127.0.0.1 -n 2 >nul\r\n\
+         )\r\n\
+         goto rollback\r\n\
+         :engine_done\r\n\
+         move /y \"%~dp0syncthing-LICENSE.txt\" \"{license}\" >nul 2>&1 || goto rollback\r\n\
+         move /y \"%~dp0backupsynctool.exe\" \"{exe}\" >nul 2>&1 || goto rollback\r\n\
+         start \"\" \"{exe}\"\r\n",
         exe = exe.display(),
+        engine = installed_engine.display(),
+        license = installed_license.display(),
     );
+    let rollback = format!(
+        ":rollback\r\n\
+         move /y \"%~dp0backupsynctool.old.exe\" \"{exe}\" >nul 2>&1\r\n\
+         {restore_engine}\r\n\
+         {restore_license}\r\n\
+         start \"\" \"{exe}\"\r\n\
+         exit /b 12\r\n",
+        exe = exe.display(),
+        restore_engine = if had_engine {
+            format!(
+                "move /y \"%~dp0syncthing.old.exe\" \"{}\" >nul 2>&1",
+                installed_engine.display()
+            )
+        } else {
+            format!("del /f /q \"{}\" >nul 2>&1", installed_engine.display())
+        },
+        restore_license = if had_license {
+            format!(
+                "move /y \"%~dp0syncthing-LICENSE.old.txt\" \"{}\" >nul 2>&1",
+                installed_license.display()
+            )
+        } else {
+            format!("del /f /q \"{}\" >nul 2>&1", installed_license.display())
+        },
+    );
+    let bat = format!("{bat}{rollback}");
     std::fs::write(&bat_path, bat).map_err(|e| e.to_string())?;
 
+    shutdown_engine_for_update()?;
     std::process::Command::new("cmd")
         .args(["/c", &bat_path.to_string_lossy()])
         .spawn()
@@ -177,28 +304,79 @@ fn replace_windows(exe: &Path, buf: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn shutdown_engine_for_update() -> Result<(), String> {
+    crate::syncthing::SyncthingSupervisor::shutdown_if_running()
+        .map_err(|error| format!("Could not stop the bundled engine before update: {error}"))
+}
+
+#[cfg(windows)]
+fn powershell_literal(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+}
+
 #[cfg(target_os = "macos")]
 fn replace_macos(exe: &Path, url: &str, buf: &[u8]) -> Result<(), String> {
-    let new_bin = if url.contains(".tar.gz") || looks_like_gzip(buf) {
+    if !url.contains(".tar.gz") && !looks_like_gzip(buf) {
+        return Err("The macOS update is not a complete app and engine archive.".into());
+    }
+    let staged_app = if url.contains(".tar.gz") || looks_like_gzip(buf) {
         extract_via_system_tar(buf)?
     } else {
-        buf.to_vec()
+        unreachable!()
     };
 
-    let tmp = exe.with_extension("tmp");
-    std::fs::write(&tmp, &new_bin).map_err(|e| e.to_string())?;
-    set_executable(&tmp)?;
+    let app_root = macos_app_root(exe)?;
+    verify_macos_update_app(&staged_app)?;
 
+    // Copy the verified bundle beside the installed app before exit. Both
+    // final renames are then same-volume directory operations.
+    let parent = app_root
+        .parent()
+        .ok_or_else(|| "The app bundle has no install directory.".to_string())?;
+    let prepared = parent.join(format!(
+        ".Backup Sync Tool.update-{}.app",
+        std::process::id()
+    ));
+    let rollback = parent.join(format!(
+        ".Backup Sync Tool.rollback-{}.app",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&prepared);
+    let _ = std::fs::remove_dir_all(&rollback);
+    let status = std::process::Command::new("ditto")
+        .arg(&staged_app)
+        .arg(&prepared)
+        .status()
+        .map_err(|error| format!("Could not stage the app update: {error}"))?;
+    if !status.success() {
+        return Err("Could not stage the app update beside the installed app.".into());
+    }
+    verify_macos_update_app(&prepared)?;
+
+    let stage = staged_app
+        .parent()
+        .ok_or_else(|| "Update staging directory is unavailable.".to_string())?;
+    let script_path = stage.join("install-update.sh");
     let script = format!(
-        "#!/bin/bash\nsleep 1\nmv -f \"{tmp}\" \"{exe}\"\nchmod +x \"{exe}\"\nrm -f \"{script}\"\nexec \"{exe}\"\n",
-        tmp = tmp.display(),
-        exe = exe.display(),
-        script = exe.with_extension("update.sh").display(),
+        "#!/bin/bash\nset -e\nsleep 1\n\
+         mv {current} {rollback}\n\
+         if mv {prepared} {current}; then\n\
+           open {current}\n\
+           rm -rf {rollback} {stage}\n\
+         else\n\
+           mv {rollback} {current}\n\
+           open {current}\n\
+           exit 12\n\
+         fi\n",
+        current = bash_literal(&app_root),
+        rollback = bash_literal(&rollback),
+        prepared = bash_literal(&prepared),
+        stage = bash_literal(stage),
     );
-    let script_path = exe.with_extension("update.sh");
     std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
     set_executable(&script_path)?;
 
+    shutdown_engine_for_update()?;
     std::process::Command::new("bash")
         .arg(&script_path)
         .spawn()
@@ -212,7 +390,7 @@ fn looks_like_gzip(buf: &[u8]) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn extract_via_system_tar(buf: &[u8]) -> Result<Vec<u8>, String> {
+fn extract_via_system_tar(buf: &[u8]) -> Result<PathBuf, String> {
     let dir = std::env::temp_dir().join(format!("backupsynctool-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -228,32 +406,73 @@ fn extract_via_system_tar(buf: &[u8]) -> Result<Vec<u8>, String> {
         return Err("tar extract failed".into());
     }
 
-    let found = find_file_named(&dir, "backupsynctool")?;
-    let bytes = std::fs::read(&found).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(bytes)
+    find_app_bundle(&dir)
 }
 
 #[cfg(target_os = "macos")]
-fn find_file_named(root: &Path, name: &str) -> Result<PathBuf, String> {
-    fn walk(dir: &Path, name: &str) -> Option<PathBuf> {
-        let entries = std::fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(found) = walk(&path, name) {
-                    return Some(found);
-                }
-            } else if path.file_name().and_then(|s| s.to_str()) == Some(name) {
-                return Some(path);
-            }
-        }
-        None
+fn find_app_bundle(root: &Path) -> Result<PathBuf, String> {
+    let direct = root.join("Backup Sync Tool.app");
+    if direct.join("Contents/MacOS/backupsynctool").is_file() {
+        return Ok(direct);
     }
-    walk(root, name).ok_or_else(|| format!("archive has no {name} binary"))
+    Err("archive has no complete Backup Sync Tool.app bundle".into())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn macos_app_root(exe: &Path) -> Result<PathBuf, String> {
+    let executable_dir = exe
+        .parent()
+        .ok_or_else(|| "The running executable has no install directory.".to_string())?;
+    if executable_dir.file_name().and_then(|name| name.to_str()) == Some("MacOS") {
+        let contents = executable_dir
+            .parent()
+            .ok_or_else(|| "The app bundle has no Contents directory.".to_string())?;
+        let app_root = contents
+            .parent()
+            .ok_or_else(|| "The app bundle root is unavailable.".to_string())?;
+        if app_root.extension().and_then(|ext| ext.to_str()) == Some("app") {
+            return Ok(app_root.to_path_buf());
+        }
+    }
+    Err("Auto-update requires the packaged Backup Sync Tool.app.".into())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_update_app(app: &Path) -> Result<(), String> {
+    let engine = app.join("Contents/Resources/syncthing");
+    let license = app.join("Contents/Resources/syncthing-LICENSE.txt");
+    let desktop = app.join("Contents/MacOS/backupsynctool");
+    if !desktop.is_file() || !engine.is_file() || !license.is_file() {
+        return Err("The macOS update bundle is missing the app, engine, or license.".into());
+    }
+    let version = std::process::Command::new(&engine)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("Could not validate the bundled engine: {error}"))?;
+    let version_text = String::from_utf8_lossy(&version.stdout);
+    if !version.status.success() || !version_text.starts_with("syncthing v2.1.1") {
+        return Err(format!(
+            "The update contains an unexpected Syncthing engine: {}",
+            version_text.trim()
+        ));
+    }
+    let signature = std::process::Command::new("codesign")
+        .args(["--verify", "--strict"])
+        .arg(app)
+        .status()
+        .map_err(|error| format!("Could not verify the update signature: {error}"))?;
+    if !signature.success() {
+        return Err("The macOS update app failed strict code-signature verification.".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn bash_literal(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+#[cfg(target_os = "macos")]
 fn set_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)
@@ -305,6 +524,51 @@ mod tests {
     fn is_newer_old_scheme_to_year_scheme() {
         assert!(is_newer("2026.0.1", "0.3.0"));
         assert!(!is_newer("0.9.0", "2026.0.1"));
+    }
+
+    #[test]
+    fn repair_bypasses_version_only_when_bundle_health_fails() {
+        assert!(!repair_required(&Ok(())));
+        assert!(repair_required(&Err("missing engine".into())));
+        assert!(repair_required(&Err("missing license".into())));
+    }
+
+    fn asset(name: &str) -> GhAsset {
+        GhAsset {
+            name: name.into(),
+            browser_download_url: format!("https://example.invalid/{name}"),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn mac_repair_selects_only_exact_arch_complete_bundle() {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "aarch64",
+            other => other,
+        };
+        let wanted = format!("backupsynctool-macos-{arch}.tar.gz");
+        let assets = vec![
+            asset("backupsynctool"),
+            asset("backupsynctool-macos-wrong.tar.gz"),
+            asset(&wanted),
+        ];
+        assert_eq!(find_asset_for_platform(&assets).unwrap().name, wanted);
+        assert!(find_asset_for_platform(&assets[..2]).is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_repair_selects_only_complete_zip() {
+        let assets = vec![
+            asset("backupsynctool.exe"),
+            asset("backupsynctool-windows-amd64.zip"),
+        ];
+        assert_eq!(
+            find_asset_for_platform(&assets).unwrap().name,
+            "backupsynctool-windows-amd64.zip"
+        );
+        assert!(find_asset_for_platform(&assets[..1]).is_none());
     }
 
     #[test]

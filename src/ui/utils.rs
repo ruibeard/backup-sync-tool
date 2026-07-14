@@ -17,18 +17,18 @@ unsafe fn update_bridge_display(hwnd: HWND) {
     let st = stmut(hwnd);
     let paired = is_paired(&st.config);
     let auth_fail = st.auth_failure_notified;
-    let is_checking = st.sync_status_state == crate::sync::ActivityState::Checking as usize;
-    let is_syncing = st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
+    let is_checking = st.sync_status_state == UiSyncState::Checking as usize;
+    let is_syncing = st.sync_status_state == UiSyncState::Syncing as usize;
 
     st.bridge_conn_ok = paired && st.connected && !auth_fail;
     st.bridge_conn_label = if !paired {
         "Not connected".to_string()
-    } else if !st.config.remote_folder.trim().is_empty() {
-        st.config.remote_folder.trim().to_string()
+    } else if !st.config.syncthing_folder_label.trim().is_empty() {
+        st.config.syncthing_folder_label.trim().to_string()
     } else if auth_fail {
-        "Remote folder unavailable".to_string()
+        "Syncthing hub unavailable".to_string()
     } else {
-        "Remote folder unavailable".to_string()
+        "Syncthing hub unavailable".to_string()
     };
 
     st.bridge_sync_head = if auth_fail && !is_syncing && !is_checking {
@@ -39,26 +39,16 @@ unsafe fn update_bridge_display(hwnd: HWND) {
         "Syncing".to_string()
     } else if is_checking {
         "Checking".to_string()
-    } else if st.sync_last_failed > 0 {
-        "Sync paused".to_string()
     } else {
         "All synced".to_string()
     };
 
-    let uploading = st
-        .activity_rows
-        .iter()
-        .any(|row| row.kind == ActivityKind::Downloading);
     st.bridge_sync_meta = if auth_fail && !is_syncing && !is_checking {
-        "Credentials invalid\r\nreconnect to resume".to_string()
+        "Assignment invalid\r\nreconnect to resume".to_string()
     } else if !paired {
         "Pair with server\r\nto start backup".to_string()
     } else if is_syncing {
-        if uploading {
-            "Downloading\r\nServer → PC".to_string()
-        } else {
-            "Uploading\r\nPC → Server".to_string()
-        }
+        "Synchronizing\r\nchanges both ways".to_string()
     } else if is_checking {
         "Checking...".to_string()
     } else {
@@ -104,8 +94,8 @@ unsafe fn restore_server_status_after_pair_cancel(hwnd: HWND) {
 }
 
 fn sync_is_busy(st: &WndState) -> bool {
-    st.sync_status_state == crate::sync::ActivityState::Checking as usize
-        || st.sync_status_state == crate::sync::ActivityState::Syncing as usize
+    st.sync_status_state == UiSyncState::Checking as usize
+        || st.sync_status_state == UiSyncState::Syncing as usize
 }
 
 unsafe fn set_status_strip_text(hwnd: HWND, text: &str) {
@@ -146,14 +136,8 @@ unsafe fn set_status_strip_connection(hwnd: HWND) {
     set_status_dot_color(hwnd, color);
 }
 
-unsafe fn idle_sync_footer_label(st: &WndState, failed: usize) -> String {
-    if failed > 0 {
-        if failed == 1 {
-            "1 upload failed".to_string()
-        } else {
-            format!("{failed} uploads failed")
-        }
-    } else if is_paired(&st.config) {
+unsafe fn idle_sync_footer_label(st: &WndState) -> String {
+    if is_paired(&st.config) {
         "All synced".to_string()
     } else {
         "Ready".to_string()
@@ -164,14 +148,13 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     let status_hwnd = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
     let eta_hwnd = GetDlgItem(hwnd, IDC_SYNC_ETA as i32);
     let prog_hwnd = GetDlgItem(hwnd, IDC_SYNC_PROGRESS as i32);
-    let is_checking = state == crate::sync::ActivityState::Checking as usize;
-    let is_syncing = state == crate::sync::ActivityState::Syncing as usize;
+    let is_checking = state == UiSyncState::Checking as usize;
+    let is_syncing = state == UiSyncState::Syncing as usize;
     let is_busy = is_checking || is_syncing;
     let st = stmut(hwnd);
     let was_busy = st.sync_footer_busy;
     st.sync_footer_busy = is_busy && (progress.1 > 0 || is_checking);
-    let show_fail_footer = !is_busy && progress.2.max(st.sync_last_failed) > 0;
-    let footer_h = if show_fail_footer { SYNC_FOOTER_H } else { 0 };
+    let footer_h = 0;
     if st.sync_row_h != footer_h {
         st.sync_row_h = footer_h;
         layout_main(hwnd);
@@ -188,12 +171,10 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
         set_status_subtitle(hwnd, "");
     } else {
         let st = stmut(hwnd);
-        let failed = progress.2.max(st.sync_last_failed);
-        let label = idle_sync_footer_label(st, failed);
+        let label = idle_sync_footer_label(st);
         set_status_subtitle(hwnd, &label);
         let _ = SetWindowTextW(status_hwnd, &hstring(&label));
         let _ = SetWindowTextW(eta_hwnd, &hstring(""));
-        update_retry_failed_button(hwnd);
     }
 
     ShowWindow(prog_hwnd, SW_HIDE);
@@ -202,31 +183,8 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
     update_bridge_display(hwnd);
 
     let footer_hwnd = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
-    ShowWindow(
-        footer_hwnd,
-        if show_fail_footer { SW_SHOW } else { SW_HIDE },
-    );
+    ShowWindow(footer_hwnd, SW_HIDE);
     ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
-    let fr = stmut(hwnd).sync_footer_rect;
-    ShowWindow(
-        GetDlgItem(hwnd, IDC_RETRY_FAILED as i32),
-        if show_fail_footer { SW_SHOW } else { SW_HIDE },
-    );
-    if show_fail_footer {
-        InvalidateRect(hwnd, Some(&fr), TRUE);
-    }
-}
-
-unsafe fn update_status_strip_after_sync(
-    hwnd: HWND,
-    state: usize,
-    progress: (usize, usize, usize),
-) {
-    let st = stmut(hwnd);
-    if !st.auth_failure_notified {
-        set_status_strip_connection(hwnd);
-    }
-    update_sync_footer(hwnd, state, progress);
 }
 
 unsafe fn update_status_strip_from_connection(hwnd: HWND) {
@@ -237,11 +195,7 @@ unsafe fn update_status_strip_from_connection(hwnd: HWND) {
     }
     set_status_strip_connection(hwnd);
     invalidate_bridge(hwnd);
-    let progress = (
-        st.sync_progress_done,
-        st.sync_progress_total,
-        st.sync_last_failed,
-    );
+    let progress = (st.sync_progress_done, st.sync_progress_total, 0);
     update_sync_footer(hwnd, st.sync_status_state, progress);
 }
 
@@ -250,13 +204,6 @@ fn required_pair_field(value: Option<String>, name: &str) -> std::result::Result
         Some(value) => Ok(value.trim().to_string()),
         None => Err(format!("Pairing approved but no {name} was returned.")),
     }
-}
-
-fn approved_remote_folder(remote_folder: Option<&str>) -> std::result::Result<String, String> {
-    let Some(remote_folder) = remote_folder else {
-        return Err("Pairing approved but no destination folder was returned.".to_string());
-    };
-    crate::pairing::validate_destination_name(remote_folder)
 }
 
 unsafe fn apply_server_readonly(hwnd: HWND) {
@@ -274,39 +221,18 @@ unsafe fn apply_server_readonly(hwnd: HWND) {
 }
 
 unsafe fn start_connection_check(hwnd: HWND) {
-    let st = stmut(hwnd);
-    let cfg = st.config.clone();
-    let s3_secret = st.s3_secret_plain.clone();
-    if !is_sync_configured(&cfg, &s3_secret) {
-        return;
-    }
-    let raw = hwnd.0 as isize;
-    std::thread::spawn(move || {
-        let ok = match transport::build(&cfg, &s3_secret) {
-            Ok(t) => t.test_connection().is_ok(),
-            Err(_) => false,
-        };
-        unsafe {
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_CONNECTED,
-                WPARAM(if ok { 1 } else { 0 }),
-                LPARAM(0),
-            )
-            .ok();
-        }
-    });
+    let connected = stmut(hwnd).app.snapshot().hub_connected;
+    PostMessageW(
+        hwnd,
+        WM_APP_CONNECTED,
+        WPARAM(usize::from(connected)),
+        LPARAM(0),
+    )
+    .ok();
 }
 
-fn is_sync_configured(cfg: &Config, s3_secret: &str) -> bool {
-    if !watch_folder_is_valid(&cfg.watch_folder) || cfg.remote_folder.trim().is_empty() {
-        return false;
-    }
-    matches!(config::transport_kind(cfg), Some(TransportKind::S3))
-        && !cfg.s3_endpoint.trim().is_empty()
-        && !cfg.s3_bucket.trim().is_empty()
-        && !cfg.s3_access_key.trim().is_empty()
-        && !s3_secret.is_empty()
+fn is_sync_configured(cfg: &Config) -> bool {
+    watch_folder_is_valid(&cfg.watch_folder) && config::is_paired(cfg)
 }
 
 fn watch_folder_is_valid(path: &str) -> bool {
@@ -327,13 +253,7 @@ unsafe fn update_pair_button_enabled(hwnd: HWND) {
 
     let refresh_hwnd = GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32);
     if !refresh_hwnd.0.is_null() {
-        let refresh_enabled = enabled && is_paired(&st.config) && !st.auth_failure_notified;
-        let _ = ShowWindow(
-            refresh_hwnd,
-            if refresh_enabled { SW_SHOW } else { SW_HIDE },
-        );
-        let _ = EnableWindow(refresh_hwnd, refresh_enabled);
-        let _ = InvalidateRect(refresh_hwnd, None, TRUE);
+        ShowWindow(refresh_hwnd, SW_HIDE);
     }
 }
 
@@ -381,319 +301,73 @@ unsafe fn ensure_or_prompt_watch_folder(hwnd: HWND) -> bool {
     }
 }
 
-fn transfer_events_for_window(raw: isize) -> crate::sync::TransferEventFn {
-    Arc::new(move |event| unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_TRANSFER_EVENT,
-            WPARAM(0),
-            LPARAM(Box::into_raw(Box::new(event)) as isize),
-        )
-        .ok();
-    })
-}
-
-/// Stop any running engine and start a new one when credentials and folders are set.
-unsafe fn do_retry_failed_uploads(hwnd: HWND) {
-    read_ctrls(hwnd, stmut(hwnd));
-    let paths = stmut(hwnd).failed_upload_paths.clone();
-    if paths.is_empty() {
-        notify_user(hwnd, "No failed uploads to retry.");
-        return;
-    }
-    {
-        let st = stmut(hwnd);
-        st.failed_upload_paths.clear();
-        st.sync_last_failed = 0;
-    }
-    update_retry_failed_button(hwnd);
-    let cfg = stmut(hwnd).config.clone();
-    let s3_secret = stmut(hwnd).s3_secret_plain.clone();
-    if !is_sync_configured(&cfg, &s3_secret) {
-        notify_user(hwnd, "Cannot retry: sync is not configured.");
-        return;
-    }
-    let Ok(transport) = transport::build(&cfg, &s3_secret) else {
-        notify_user(hwnd, "Cannot retry: storage transport is not configured.");
-        return;
-    };
-    let count = paths.len();
-    let retry_msg = if count == 1 {
-        "Retrying 1 failed upload...".to_string()
-    } else {
-        format!("Retrying {count} failed uploads...")
-    };
-    notify_user(hwnd, &retry_msg);
-    set_status_strip_connection(hwnd);
-
-    let raw = hwnd.0 as isize;
-    let log: crate::sync::LogFn = Arc::new(move |m: String| {
-        logs::append(&m);
-        let s = Box::new(m);
-        unsafe {
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_LOG,
-                WPARAM(0),
-                LPARAM(Box::into_raw(s) as isize),
-            )
-            .ok();
-        }
-    });
-    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_SYNC_ACTIVITY,
-            WPARAM(info.state as usize),
-            LPARAM(Box::into_raw(Box::new((
-                info.completed,
-                info.total,
-                info.failed,
-                info.failed_paths,
-            ))) as isize),
-        )
-        .ok();
-    });
-    let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_AUTH_FAILED,
-            WPARAM(0),
-            LPARAM(0),
-        )
-        .ok();
-    });
-    let events = transfer_events_for_window(raw);
-
-    std::thread::spawn(move || {
-        activity(crate::sync::ActivityInfo {
-            state: crate::sync::ActivityState::Syncing,
-            completed: 0,
-            total: count,
-            failed: 0,
-            failed_paths: Vec::new(),
-        });
-        let batch = crate::sync::retry_uploads_with_events(
-            &cfg,
-            transport,
-            &paths,
-            &log,
-            &activity,
-            &auth_failed,
-            events,
-        );
-        activity(crate::sync::ActivityInfo {
-            state: crate::sync::ActivityState::Idle,
-            completed: batch.succeeded,
-            total: batch.attempted,
-            failed: batch.failed,
-            failed_paths: batch.failed_paths,
-        });
-    });
-}
-
-unsafe fn do_refresh_remote_changes(hwnd: HWND) {
-    read_ctrls(hwnd, stmut(hwnd));
-    {
-        let st = stmut(hwnd);
-        if let Some(cancel) = &st.restore_cancel {
-            cancel.store(true, Ordering::Relaxed);
-            notify_user(hwnd, "Cancelling restore...");
-            return;
-        }
-        if st.auth_failure_notified {
-            notify_user_status(
-                hwnd,
-                "Reconnect required",
-                C_RED,
-                "Cannot restore until credentials are reconnected.",
-            );
-            return;
-        }
-        if sync_is_busy(st) {
-            notify_user(hwnd, "Sync is already running.");
-            return;
-        }
-    }
-
-    let cfg = stmut(hwnd).config.clone();
-    let s3_secret = stmut(hwnd).s3_secret_plain.clone();
-    if !is_sync_configured(&cfg, &s3_secret) {
-        notify_user(hwnd, "Cannot restore: sync is not configured.");
-        return;
-    }
-    let Ok(transport) = transport::build(&cfg, &s3_secret) else {
-        notify_user(hwnd, "Cannot restore: storage transport is not configured.");
-        return;
-    };
-
-    let Some(destination_parent) = browse_restore_parent(hwnd) else {
-        return;
-    };
-    let cancel = Arc::new(AtomicBool::new(false));
-    stmut(hwnd).restore_cancel = Some(cancel.clone());
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32),
-        &hstring("Cancel restore"),
-    );
-
-    notify_user(hwnd, "Restoring customer backup...");
-    set_status_strip_text(hwnd, "Preparing restore");
-
-    let raw = hwnd.0 as isize;
-    let log: crate::sync::LogFn = Arc::new(move |m: String| {
-        logs::append(&m);
-        let s = Box::new(m);
-        unsafe {
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_LOG,
-                WPARAM(0),
-                LPARAM(Box::into_raw(s) as isize),
-            )
-            .ok();
-        }
-    });
-    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_SYNC_ACTIVITY,
-            WPARAM(info.state as usize),
-            LPARAM(Box::into_raw(Box::new((
-                info.completed,
-                info.total,
-                info.failed,
-                info.failed_paths,
-            ))) as isize),
-        )
-        .ok();
-    });
-    let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_AUTH_FAILED,
-            WPARAM(0),
-            LPARAM(0),
-        )
-        .ok();
-    });
-    let events = transfer_events_for_window(raw);
-
-    std::thread::spawn(move || {
-        let result = crate::sync::restore_customer_backup_with_events(
-            &cfg,
-            transport,
-            Path::new(&destination_parent),
-            &cancel,
-            &log,
-            &activity,
-            &auth_failed,
-            events,
-        );
-        match result {
-            Ok(path) => log(format!("Restore saved to {}", path.display())),
-            Err(error) => log(format!("Restore failed: {error}")),
-        }
-        unsafe {
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_RESTORE_DONE,
-                WPARAM(0),
-                LPARAM(0),
-            )
-            .ok();
-        }
-    });
-}
-
+/// Stop the current bundled engine, apply the approved Syncthing assignment,
+/// then keep the shared native snapshot refreshed from its loopback API.
 unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     read_ctrls(hwnd, stmut(hwnd));
+    if let Some(cancel) = stmut(hwnd).sync_cancel.take() {
+        cancel.store(true, Ordering::Release);
+    }
+    stmut(hwnd).sync_engine = None;
     if !ensure_or_prompt_watch_folder(hwnd) {
-        stmut(hwnd).sync_engine = None;
-        return Err("Sync not started: choose a valid backup folder on this PC.".to_string());
+        return Err("Sync not started: choose a valid backup folder on this PC.".into());
     }
     let cfg = stmut(hwnd).config.clone();
-    let s3_secret = stmut(hwnd).s3_secret_plain.clone();
-    if !is_sync_configured(&cfg, &s3_secret) {
-        stmut(hwnd).sync_engine = None;
-        return Err(
-            "Sync not started: origin folder, server credentials, and destination are required."
-                .to_string(),
-        );
+    if !is_sync_configured(&cfg) {
+        return Err("Sync not started: pair this computer and choose a folder.".into());
     }
-    let transport = transport::build(&cfg, &s3_secret)?;
     {
         let st = stmut(hwnd);
-        st.sync_status_text = "Starting...".to_string();
-        st.sync_status_state = crate::sync::ActivityState::Checking as usize;
+        st.sync_status_text = "Starting...".into();
+        st.sync_status_state = UiSyncState::Checking as usize;
         st.sync_progress_done = 0;
         st.sync_progress_total = 0;
-        st.sync_last_failed = 0;
-        st.sync_started_at = None;
-        st.sync_engine = None;
+        let _ = st.app.send(crate::app::AppCommand::EngineStarting);
     }
 
-    let raw = hwnd.0 as isize;
-    let log: crate::sync::LogFn = Arc::new(move |m: String| {
-        logs::append(&m);
-        let s = Box::new(m);
-        unsafe {
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_LOG,
-                WPARAM(0),
-                LPARAM(Box::into_raw(s) as isize),
-            )
-            .ok();
-        }
-    });
-    let activity: crate::sync::ActivityFn = Arc::new(move |info| unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_SYNC_ACTIVITY,
-            WPARAM(info.state as usize),
-            LPARAM(Box::into_raw(Box::new((
-                info.completed,
-                info.total,
-                info.failed,
-                info.failed_paths,
-            ))) as isize),
-        )
-        .ok();
-    });
-    let auth_failed: crate::sync::AuthFailedFn = Arc::new(move || unsafe {
-        PostMessageW(
-            HWND(raw as *mut _),
-            WM_APP_AUTH_FAILED,
-            WPARAM(0),
-            LPARAM(0),
-        )
-        .ok();
-    });
-    let events = transfer_events_for_window(raw);
+    let engine = crate::syncthing::SyncthingSupervisor::start()?;
+    engine.configure_folder(&crate::syncthing::FolderAssignment {
+        local_device_id: cfg.syncthing_device_id.clone(),
+        hub_device_id: cfg.syncthing_hub_device_id.clone(),
+        hub_addresses: cfg.syncthing_hub_addresses.clone(),
+        folder_id: cfg.syncthing_folder_id.clone(),
+        folder_label: cfg.syncthing_folder_label.clone(),
+        path: std::path::PathBuf::from(&cfg.watch_folder),
+    })?;
+    let status = engine.status(&cfg.syncthing_folder_id, &cfg.syncthing_hub_device_id)?;
+    let app = stmut(hwnd).app.clone();
+    let _ = app.send(crate::app::AppCommand::SyncthingStatus(status));
+    stmut(hwnd).sync_engine = Some(engine);
 
-    match crate::sync::SyncEngine::start_with_events(
-        cfg.clone(),
-        transport,
-        log,
-        activity,
-        auth_failed,
-        events,
-    ) {
-        Ok(engine) => {
-            stmut(hwnd).sync_engine = Some(engine);
-            let started = format!("Sync engine started for {}", cfg.watch_folder);
-            logs::append(&started);
-            Ok(())
+    let cancel = Arc::new(AtomicBool::new(false));
+    stmut(hwnd).sync_cancel = Some(cancel.clone());
+    let folder_id = cfg.syncthing_folder_id.clone();
+    let hub_device_id = cfg.syncthing_hub_device_id.clone();
+    std::thread::spawn(move || {
+        let Ok(client) = crate::syncthing::SyncthingSupervisor::start() else {
+            return;
+        };
+        let mut since = 0;
+        while !cancel.load(Ordering::Acquire) {
+            if let Ok(status) = client.status(&folder_id, &hub_device_id) {
+                let _ = app.send(crate::app::AppCommand::SyncthingStatus(status));
+            }
+            if let Ok(events) = client.poll_events(since, 1) {
+                since = events.iter().map(|event| event.id).max().unwrap_or(since);
+                if !events.is_empty() {
+                    let _ = app.send(crate::app::AppCommand::SyncthingEvents(events));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        Err(err) => Err(err),
-    }
+    });
+    logs::append(&format!("Syncthing started for {}", cfg.watch_folder));
+    Ok(())
 }
 
 unsafe fn read_ctrls(hwnd: HWND, st: &mut WndState) {
     st.config.watch_folder = gettext(hwnd, IDC_WATCH_FOLDER);
     st.config.start_with_windows = checked(hwnd, IDC_START_WINDOWS);
-    st.config.sync_remote_changes = false;
     st.config.auto_update = checked(hwnd, IDC_AUTO_UPDATE);
     let raw_plane = gettext(hwnd, IDC_PAIR_API_BASE);
     if !raw_plane.trim().is_empty() {

@@ -18,7 +18,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
 
     if notif == BN_CLICKED as u16 {
         match id {
-            IDC_START_WINDOWS | IDC_SYNC_REMOTE | IDC_AUTO_UPDATE => {
+            IDC_START_WINDOWS | IDC_AUTO_UPDATE => {
                 persist_settings_on_toggle(hwnd, id);
                 return LRESULT(0);
             }
@@ -39,11 +39,6 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         x if x == tray::ID_TRAY_LOGS as u16 => {
             do_open_logs(hwnd);
         }
-        x if x == tray::ID_TRAY_RESTORE as u16 => {
-            ShowWindow(hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(hwnd);
-            do_refresh_remote_changes(hwnd);
-        }
         x if x == tray::ID_TRAY_EXIT as u16 => {
             DestroyWindow(hwnd).ok();
         }
@@ -54,8 +49,6 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         IDC_UPDATE_LINK => do_update(hwnd),
         IDC_GITHUB => do_open_repo(hwnd),
         IDC_PAIR_DEVICE => do_pair_device(hwnd),
-        IDC_REFRESH_REMOTE => do_refresh_remote_changes(hwnd),
-        IDC_RETRY_FAILED => do_retry_failed_uploads(hwnd),
         _ => {}
     }
     LRESULT(0)
@@ -82,14 +75,12 @@ unsafe fn apply_pairing_folder_hint(hwnd: HWND, watch_folder: &str) {
     };
 
     let st = stmut(hwnd);
-    st.config.remote_folder = folder;
     st.detected_customer = customer;
     st.remote_folder_from_xd = from_xd;
-    let display = destination_display_text(
-        &st.config,
-        st.remote_folder_from_xd,
-        st.detected_customer.as_deref(),
-    );
+    let display = st
+        .detected_customer
+        .clone()
+        .unwrap_or(folder);
     let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
         &hstring(&display),
@@ -145,9 +136,9 @@ unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
             read_ctrls(hwnd, stmut(hwnd));
             stmut(hwnd)
                 .app
-                .send(crate::app::AppCommand::SetWatchFolder(std::path::PathBuf::from(
-                    &s,
-                )))
+                .send(crate::app::AppCommand::SetWatchFolder(
+                    std::path::PathBuf::from(&s),
+                ))
                 .ok();
             update_pair_button_enabled(hwnd);
             apply_pairing_folder_hint(hwnd, &s);
@@ -163,37 +154,6 @@ unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
             }
         }
     }
-    ILFree(Some(pidl));
-    selected
-}
-
-unsafe fn browse_restore_parent(hwnd: HWND) -> Option<String> {
-    let title: Vec<u16> = "Select where to create the restore folder\0"
-        .encode_utf16()
-        .collect();
-    let mut display = [0u16; 260];
-    let bi = BROWSEINFOW {
-        hwndOwner: hwnd,
-        lpszTitle: PCWSTR(title.as_ptr()),
-        pszDisplayName: PWSTR(display.as_mut_ptr()),
-        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
-        ..Default::default()
-    };
-    let pidl = SHBrowseForFolderW(&bi);
-    if pidl.is_null() {
-        return None;
-    }
-    let mut buffer = [0u16; 260];
-    let selected = if SHGetPathFromIDListW(pidl, &mut buffer).as_bool() {
-        let end = buffer
-            .iter()
-            .position(|&character| character == 0)
-            .unwrap_or(buffer.len());
-        let path = String::from_utf16_lossy(&buffer[..end]);
-        (!path.trim().is_empty()).then_some(path)
-    } else {
-        None
-    };
     ILFree(Some(pidl));
     selected
 }
@@ -288,14 +248,9 @@ unsafe fn do_pair_device(hwnd: HWND) {
         })
         .or_else(|| crate::xd::build_host_folder_hint(&watch_folder));
     if let Some(folder) = detected_folder.as_ref() {
-        st.config.remote_folder = folder.clone();
         st.remote_folder_from_xd = xd.is_some();
         st.detected_customer = xd.as_ref().and_then(|d| non_empty(d.customer.clone()));
-        let display = destination_display_text(
-            &st.config,
-            st.remote_folder_from_xd,
-            st.detected_customer.as_deref(),
-        );
+        let display = st.detected_customer.clone().unwrap_or_else(|| folder.clone());
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
             &hstring(&display),
@@ -304,7 +259,13 @@ unsafe fn do_pair_device(hwnd: HWND) {
         update_server_tooltip(hwnd);
     }
     let cancel = Arc::new(AtomicBool::new(false));
-    let candidate_config_base = st.config.clone();
+    let syncthing_device_id = match crate::syncthing::ensure_local_device_id() {
+        Ok(device_id) => device_id,
+        Err(error) => {
+            notify_user_status(hwnd, "Syncthing could not start", C_RED, &error);
+            return;
+        }
+    };
     st.pair_id = st.pair_id.wrapping_add(1);
     let pair_id = st.pair_id;
     st.pair_cancel = Some(cancel.clone());
@@ -331,6 +292,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
             xd.as_ref().map(|detected| detected.number.clone()),
             xd.as_ref().map(|detected| detected.customer.clone()),
             detected_folder,
+            syncthing_device_id.clone(),
             &cancel,
         ) {
             Ok(start) => {
@@ -376,9 +338,9 @@ unsafe fn do_pair_device(hwnd: HWND) {
                             match status.status.as_str() {
                             "approved" => {
                                 approval_received = true;
-                                if !crate::pairing::is_s3_approval(&status) {
+                                if !crate::pairing::is_syncthing_approval(&status) {
                                     break Err(
-                                        "Pairing approved without S3 credentials. Pair again after the server enables S3."
+                                        "Pairing approved without a Syncthing assignment. Pair again."
                                             .to_string(),
                                     );
                                 }
@@ -387,54 +349,27 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                         Ok(value) => value,
                                         Err(err) => break Err(err),
                                     };
-                                let s3_endpoint =
-                                    match required_pair_field(status.s3_endpoint, "S3 endpoint") {
-                                        Ok(value) => value,
-                                        Err(err) => break Err(err),
-                                    };
-                                if let Err(err) = validate_https_url(&s3_endpoint, "S3 endpoint") {
-                                    break Err(format!(
-                                        "Pairing approved with invalid S3 endpoint: {err}"
-                                    ));
-                                }
-                                let s3_bucket_raw =
-                                    match required_pair_field(status.s3_bucket, "S3 bucket") {
-                                        Ok(value) => value,
-                                        Err(err) => break Err(err),
-                                    };
-                                let s3_bucket =
-                                    match crate::pairing::validate_destination_name(&s3_bucket_raw)
-                                    {
-                                        Ok(value) => value,
-                                        Err(err) => break Err(err),
-                                    };
-                                let remote_raw = match required_pair_field(
-                                    status.remote_folder,
-                                    "customer destination",
+                                let hub_device_id = match required_pair_field(
+                                    status.syncthing_hub_device_id,
+                                    "Syncthing hub device ID",
                                 ) {
                                     Ok(value) => value,
                                     Err(err) => break Err(err),
                                 };
-                                let remote_folder =
-                                    match crate::pairing::validate_destination_name(&remote_raw) {
-                                        Ok(folder) => folder,
-                                        Err(err) => break Err(err),
-                                    };
-                                let s3_access_key = match required_pair_field(
-                                    status.s3_access_key,
-                                    "S3 access key",
+                                let folder_id = match required_pair_field(
+                                    status.syncthing_folder_id,
+                                    "Syncthing folder ID",
                                 ) {
                                     Ok(value) => value,
                                     Err(err) => break Err(err),
                                 };
-                                let s3_secret_key = match required_pair_field(
-                                    status.s3_secret_key,
-                                    "S3 secret key",
+                                let folder_label = match required_pair_field(
+                                    status.syncthing_folder_label,
+                                    "Syncthing folder label",
                                 ) {
                                     Ok(value) => value,
                                     Err(err) => break Err(err),
                                 };
-                                let s3_prefix = status.s3_prefix.unwrap_or_default();
                                 let device_uuid = match required_pair_field(
                                     status.device_uuid,
                                     "device UUID",
@@ -446,25 +381,12 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     pair_id,
                                     device_uuid,
                                     device_token,
-                                    remote_folder,
-                                    credential_profile_id: status.credential_profile_id,
-                                    credential_version: status.credential_version,
-                                    s3_endpoint,
-                                    s3_region: status
-                                        .s3_region
-                                        .unwrap_or_else(|| "garage".to_string()),
-                                    s3_bucket,
-                                    s3_access_key,
-                                    s3_secret_key,
-                                    s3_path_style: status.s3_path_style.unwrap_or(true),
-                                    s3_prefix,
+                                    syncthing_device_id: syncthing_device_id.clone(),
+                                    syncthing_hub_device_id: hub_device_id,
+                                    syncthing_hub_addresses: status.syncthing_hub_addresses,
+                                    syncthing_folder_id: folder_id,
+                                    syncthing_folder_label: folder_label,
                                 };
-                                if let Err(err) = validate_candidate_connection(
-                                    &candidate_config_base,
-                                    &pair,
-                                ) {
-                                    break Err(err);
-                                }
                                 break Ok(pair);
                             }
                             "rejected" => break Err("Pairing was rejected.".to_string()),
@@ -521,23 +443,6 @@ unsafe fn do_pair_device(hwnd: HWND) {
     });
 }
 
-fn validate_candidate_connection(
-    base: &Config,
-    pair: &PairResult,
-) -> std::result::Result<(), String> {
-    let mut candidate = base.clone();
-    candidate.schema_version = 2;
-    candidate.transport = "s3".to_string();
-    candidate.s3_endpoint = pair.s3_endpoint.clone();
-    candidate.s3_region = pair.s3_region.clone();
-    candidate.s3_bucket = pair.s3_bucket.clone();
-    candidate.s3_access_key = pair.s3_access_key.clone();
-    candidate.s3_path_style = pair.s3_path_style;
-    candidate.s3_prefix = pair.s3_prefix.clone();
-    candidate.remote_folder = pair.remote_folder.clone();
-    crate::transport::validate_candidate(&candidate, &pair.s3_secret_key)
-}
-
 unsafe fn persist_pair_api_base_on_blur(hwnd: HWND) {
     let raw = gettext(hwnd, IDC_PAIR_API_BASE);
     let st = stmut(hwnd);
@@ -586,13 +491,9 @@ unsafe fn persist_pair_api_base_on_blur(hwnd: HWND) {
 unsafe fn persist_settings_on_toggle(hwnd: HWND, id: u16) {
     let st = stmut(hwnd);
     let prev_start = st.config.start_with_windows;
-    let prev_sync = st.config.sync_remote_changes;
     let prev_auto_update = st.config.auto_update;
     read_ctrls(hwnd, st);
     if id == IDC_START_WINDOWS && st.config.start_with_windows == prev_start {
-        return;
-    }
-    if id == IDC_SYNC_REMOTE && st.config.sync_remote_changes == prev_sync {
         return;
     }
     if id == IDC_AUTO_UPDATE && st.config.auto_update == prev_auto_update {
@@ -609,85 +510,25 @@ unsafe fn persist_settings_on_toggle(hwnd: HWND, id: u16) {
 
 unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
     let st = stmut(hwnd);
-    let was_paired = is_paired(&st.config);
-    let locked_remote_folder = st.config.remote_folder.clone();
-    let locked_transport = st.config.transport.clone();
-    let locked_s3_endpoint = st.config.s3_endpoint.clone();
-    let locked_s3_region = st.config.s3_region.clone();
-    let locked_s3_bucket = st.config.s3_bucket.clone();
-    let locked_s3_access_key = st.config.s3_access_key.clone();
-    let locked_s3_secret = st.s3_secret_plain.clone();
-    let locked_s3_path_style = st.config.s3_path_style;
-    let locked_s3_prefix = st.config.s3_prefix.clone();
-    let locked_s3_part_size = st.config.s3_part_size_mib;
     read_ctrls(hwnd, st);
-    if was_paired {
-        st.config.remote_folder = locked_remote_folder;
-        st.config.transport = locked_transport;
-        st.config.s3_endpoint = locked_s3_endpoint;
-        st.config.s3_region = locked_s3_region;
-        st.config.s3_bucket = locked_s3_bucket;
-        st.config.s3_access_key = locked_s3_access_key;
-        st.s3_secret_plain = locked_s3_secret;
-        st.config.s3_path_style = locked_s3_path_style;
-        st.config.s3_prefix = locked_s3_prefix;
-        st.config.s3_part_size_mib = locked_s3_part_size;
-        let _ = SetWindowTextW(
-            GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-            &hstring(&st.config.remote_folder),
-        );
-    }
     if st.config.watch_folder.trim().is_empty() {
         notify_user(hwnd, "Origin folder is required.");
         return;
-    }
-    if st.config.remote_folder.trim().is_empty() {
-        notify_user(hwnd, "Destination folder is required.");
-        return;
-    }
-    match config::transport_kind(&st.config) {
-        Some(TransportKind::S3) => {
-            if st.config.s3_endpoint.trim().is_empty() {
-                notify_user(hwnd, "S3 endpoint is required.");
-                return;
-            }
-            if let Err(err) = validate_https_url(&st.config.s3_endpoint, "S3 endpoint") {
-                notify_user_status(hwnd, "Save failed", C_RED, &err);
-                return;
-            }
-            match secret::encrypt(&st.s3_secret_plain) {
-                Ok(enc) => st.config.s3_secret_enc = enc,
-                Err(e) => {
-                    notify_user_status(
-                        hwnd,
-                        "Save failed",
-                        C_RED,
-                        &format!("S3 secret encrypt error: {e}"),
-                    );
-                    return;
-                }
-            }
-        }
-        None => {
-            notify_user(
-                hwnd,
-                "Not paired for S3. Pair again to get storage credentials.",
-            );
-            return;
-        }
     }
     if let Err(e) = crate::config::save(&st.config) {
         notify_user_status(hwnd, "Save failed", C_RED, &format!("Save error: {e}"));
         return;
     }
     apply_startup(&st.config);
-    let cfg = st.config.clone();
-    let s3_secret = st.s3_secret_plain.clone();
-    let raw = hwnd.0 as isize;
-    match restart_sync_engine(hwnd) {
+    let result = if is_sync_configured(&st.config) {
+        restart_sync_engine(hwnd)
+    } else {
+        Ok(())
+    };
+    match result {
         Ok(()) => {
             let st = stmut(hwnd);
-            st.sync_status_state = crate::sync::ActivityState::Checking as usize;
+            st.sync_status_state = UiSyncState::Checking as usize;
             set_status_strip_connection(hwnd);
             if notify_ok {
                 notify_user(hwnd, "Settings saved. Sync started.");
@@ -695,25 +536,13 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
         }
         Err(e) => notify_user_status(hwnd, "Sync error", C_RED, &e),
     }
-    if is_sync_configured(&cfg, &s3_secret) {
-        set_status_dot_color(hwnd, C_AMBER);
-        std::thread::spawn(move || {
-            let ok = match transport::build(&cfg, &s3_secret) {
-                Ok(t) => t.test_connection().is_ok(),
-                Err(_) => false,
-            };
-            PostMessageW(
-                HWND(raw as *mut _),
-                WM_APP_CONNECTED,
-                WPARAM(if ok { 1 } else { 0 }),
-                LPARAM(0),
-            )
-            .ok();
-        });
-    }
 }
 
 unsafe fn do_update(hwnd: HWND) {
+    if stmut(hwnd).repair_required {
+        start_bundle_repair(hwnd);
+        return;
+    }
     let url = match stmut(hwnd).update_url.clone() {
         Some(u) => u,
         None => return,
@@ -725,6 +554,39 @@ unsafe fn do_update(hwnd: HWND) {
     ) {
         start_update_install(hwnd, url);
     }
+}
+
+unsafe fn start_bundle_repair(hwnd: HWND) {
+    let button = GetDlgItem(hwnd, IDC_UPDATE_LINK as i32);
+    let _ = SetWindowTextW(button, &hstring("Repairing..."));
+    EnableWindow(button, false);
+    ShowWindow(button, SW_SHOW);
+    let raw = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        if let Err(error) = crate::updater::repair_current_bundle(|pct| {
+            let message = Box::new(format!("Repair download: {pct}%"));
+            unsafe {
+                PostMessageW(
+                    HWND(raw as *mut _),
+                    WM_APP_LOG,
+                    WPARAM(0),
+                    LPARAM(Box::into_raw(message) as isize),
+                )
+                .ok();
+            }
+        }) {
+            let error = Box::new(error);
+            unsafe {
+                PostMessageW(
+                    HWND(raw as *mut _),
+                    WM_APP_REPAIR_FAILED,
+                    WPARAM(0),
+                    LPARAM(Box::into_raw(error) as isize),
+                )
+                .ok();
+            }
+        }
+    });
 }
 
 unsafe fn start_update_install(hwnd: HWND, url: String) {
@@ -924,23 +786,12 @@ unsafe fn layout_main(hwnd: HWND) {
     };
     let footer_pad_x = 10;
     let footer_pad_y = 8;
-    let retry_btn_x = M + (*st).inner_w - footer_pad_x - ACTION_BTN_W;
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_RETRY_FAILED as i32),
-        None,
-        retry_btn_x,
-        y + footer_pad_y,
-        ACTION_BTN_W,
-        ACTION_BTN_H,
-        SWP_NOZORDER,
-    )
-    .ok();
     SetWindowPos(
         GetDlgItem(hwnd, IDC_SYNC_STATUS as i32),
         None,
         M + footer_pad_x,
         y + footer_pad_y,
-        retry_btn_x - M - footer_pad_x - PAD,
+        (*st).inner_w - footer_pad_x * 2,
         LBL_H,
         SWP_NOZORDER,
     )
@@ -956,9 +807,11 @@ unsafe fn layout_main(hwnd: HWND) {
     let check_h = 22;
     let check_y = y + (row_h - check_h) / 2;
     let startup_x = M;
-    let startup_w = 180i32;
-    let two_way_x = startup_x + startup_w + 12;
-    let two_way_w = M + (*st).inner_w - two_way_x;
+    let startup_w = 154i32;
+    let auto_update_x = startup_x + startup_w + 12;
+    let auto_update_w = 114i32;
+    let policy_x = auto_update_x + auto_update_w + 12;
+    let policy_w = (M + (*st).inner_w - policy_x).max(1);
 
     SetWindowPos(
         GetDlgItem(hwnd, IDC_START_WINDOWS as i32),
@@ -971,11 +824,21 @@ unsafe fn layout_main(hwnd: HWND) {
     )
     .ok();
     SetWindowPos(
-        GetDlgItem(hwnd, IDC_SYNC_REMOTE as i32),
+        GetDlgItem(hwnd, IDC_AUTO_UPDATE as i32),
         None,
-        two_way_x,
+        auto_update_x,
         check_y,
-        two_way_w,
+        auto_update_w,
+        check_h,
+        SWP_NOZORDER,
+    )
+    .ok();
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_SERVER_DELETION_POLICY as i32),
+        None,
+        policy_x,
+        check_y,
+        policy_w,
         check_h,
         SWP_NOZORDER,
     )
