@@ -16,28 +16,17 @@ Do not conflate pairing (control plane / `pair_api_base`) with object storage (`
 
 ## Build & Launch Rules
 
-After **every** code change that affects the running app, build and relaunch. Do not leave the user on a stale binary.
+After **every** code change that affects the running app, rebuild. Do not leave a stale binary.
 
-### Windows (Proxmox VM 102)
+Three scripts only:
 
-From Mac (only entry point):
+| Script | Use |
+| --- | --- |
+| `./build-macos.sh` | Mac build + launch `.app` (`--package` / `--install` / `--no-launch` / `--identity=…`) |
+| `./build-windows.sh` | From Mac: push → VM 102 Win7 build → `dist/windows/backupsynctool.exe` |
+| `./release.sh` | Bump + both builds + tag + GitHub assets |
 
-```bash
-./build-windows.sh
-```
-
-Pushes the branch, builds Win7 target on VM 102, pulls `dist/windows/backupsynctool.exe`. Never launch from `target/debug` or `target/release`.
-
-Confirm: release build 0 errors · `dist/windows/backupsynctool.exe` present.
-
-### macOS (this machine / Darwin host)
-
-```bash
-./build-macos.sh              # build + launch .app
-./build-macos.sh --package    # also → dist/macos/backupsynctool-macos-*.tar.gz
-```
-
-Script builds, codesigns, kills old process, launches `.app`, checks pid. Confirm: 0 errors · process running. Details in `SPEC.md`.
+Never launch from `target/debug` or `target/release`. Confirm: 0 errors · process running (Mac) or exe in `dist/windows/` (Windows).
 
 ## Project Rules
 
@@ -74,7 +63,7 @@ Script builds, codesigns, kills old process, launches `.app`, checks pid. Confir
 
 ## Release
 
-`./build-macos.sh` / `./build-windows.sh` for local cycles. `./release.sh` (Mac) for public `vX.Y.Z` with both platform assets. Do not force-move tags unless repairing.
+`./build-macos.sh` / `./build-windows.sh` for cycles; `./release.sh` for `vX.Y.Z`. Do not force-move tags unless repairing.
 
 ## Win32 Gotchas
 

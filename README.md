@@ -2,31 +2,20 @@
 
 Native clients that upload a local backup folder directly to Garage S3 after an administrator approves the device in Laravel.
 
-## Windows build (your Proxmox VM 102)
+## Build
 
-From a **clean** Mac checkout of this repo (`PROXMOX_HOST` default `root@192.168.0.46`, VM **102**):
-
-```bash
-# push branch → build on Win10 VM → pull exe here
-./build-windows.sh
-# optional: ./build-windows.sh my-branch
-
-ls -la dist/windows/backupsynctool.exe
-```
-
-Details: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md).
-
-**Smoke after build:** set Control plane URL to your Laravel `APP_URL`, pair, confirm status shows that server. Report failures.
-
-## Mac run / smoke (Control plane URL)
+Three scripts (clean tree for Windows/release):
 
 ```bash
-./build-macos.sh                 # build + launch .app
-# or already built:
-open "dist/macos/Backup Sync Tool.app"
+./build-macos.sh                 # .app + launch
+./build-macos.sh --package       # updater tarball
+./build-windows.sh               # → dist/windows/backupsynctool.exe (via Proxmox VM 102)
+./release.sh                     # bump, both platforms, tag, GitHub
 ```
 
-In the menu bar: **Control plane URL…** → set to your Laravel public base (same as `APP_URL`, e.g. `https://box-rui-cam.test` or `https://backup.rui.cam`). Pair and confirm the QR/status shows that server. Report failures.
+Mac flags: `--install` `/Applications`, `--no-launch`, `--identity=…` (default ad-hoc). Windows details: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md).
+
+**Smoke:** set Control plane URL to Laravel `APP_URL`, pair, confirm status. Report failures.
 
 | Platform | UI | Secrets |
 | --- | --- | --- |
@@ -52,22 +41,4 @@ Uploads are one-way and local deletions are not propagated. **Restore** download
 - Small files stream through PutObject; large files use persistent resumable multipart state under the platform app-support directory.
 - The upload manifest lives outside the watched folder (see [SPEC.md](SPEC.md)).
 
-## Build options (extra)
-
-```bash
-./build-macos.sh --install    # also → /Applications
-./build-macos.sh --no-launch  # build only
-./build-macos.sh --package    # updater tarball (no launch)
-```
-
-Icon masters: `assets/originals/*.svg`. Run `python3 assets/render-icons.py` after SVG edits.
-
-## Release
-
-From a clean Mac checkout (ships both assets):
-
-```bash
-./release.sh
-```
-
-Bumps patch in `Cargo.toml`, builds macOS tarball + Windows exe, tags `vX.Y.Z`, pushes, uploads to GitHub Releases. Details: [SPEC.md](SPEC.md).
+Icon masters: `assets/originals/*.svg`. After SVG edits: `python3 assets/render-icons.py`. Details: [SPEC.md](SPEC.md).

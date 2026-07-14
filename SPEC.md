@@ -122,9 +122,13 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 ## Build and verification
 
-**Windows (from Mac):** `./build-windows.sh` pushes the branch, builds on Proxmox VM 102 (`x86_64-win7-windows-msvc`), and copies `backupsynctool.exe` to `dist/windows/`. Validate on Win7 test VM 100 and a modern Windows VM.
+Three scripts only: `./build-macos.sh` · `./build-windows.sh` · `./release.sh`.
 
-**macOS:** `./build-macos.sh` builds, ad-hoc-signs the `.app` once (no Keychain password), and launches `dist/macos/Backup Sync Tool.app`. Real signing only with `--identity=…` / `MACOS_SIGN_IDENTITY`. `--install` copies to `/Applications` via `ditto` (preserves signature). `--no-launch` builds only. `--package` also writes `dist/macos/backupsynctool-macos-{aarch64|x86_64}.tar.gz` (updater asset; implies `--no-launch`). Never `open` the raw binary (opens Terminal / Taskgated SIGKILL).
+| Script | What |
+| --- | --- |
+| `./build-macos.sh` | Release `.app` under `dist/macos/`, ad-hoc codesign by default (no Keychain prompt). Flags: `--install`, `--no-launch`, `--package` → `backupsynctool-macos-{aarch64\|x86_64}.tar.gz`, `--identity=…` / `MACOS_SIGN_IDENTITY`. Never `open` the raw binary (Taskgated SIGKILL). |
+| `./build-windows.sh` | Clean tree. Push → Proxmox VM 102 Win7 target `x86_64-win7-windows-msvc` → `dist/windows/backupsynctool.exe`. Validate on Win7 VM 100 and a modern Windows VM. |
+| `./release.sh` | Clean tree. Bump patch → both builds → tag `vX.Y.Z` → `gh` upload. GHA may create notes-only shell; assets come from this script. |
 
 ### Icon assets
 
@@ -145,8 +149,6 @@ macOS does **not** load the `.ico` files. Windows does **not** load the menubar 
 ```bash
 python3 assets/render-icons.py   # cairosvg, Pillow, ImageMagick, iconutil
 ```
-
-**Release (Mac):** `./release.sh` on a clean tree — bump patch → commit → macOS package + Windows build → tag `vX.Y.Z` → push → upload both assets with `gh`. GitHub Actions may create notes-only release shell; assets come from `release.sh`.
 
 | Action | How |
 | --- | --- |
