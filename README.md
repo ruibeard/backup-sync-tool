@@ -11,18 +11,7 @@ From a **clean** Mac checkout of this repo (`PROXMOX_HOST` default `root@192.168
 ./build-windows.sh
 # optional: ./build-windows.sh my-branch
 
-# Artifact
 ls -la dist/windows/backupsynctool.exe
-```
-
-On the guest itself:
-
-```powershell
-cd C:\Users\user\code\backup-sync-tool
-git fetch
-git pull
-.\build-local.ps1
-# → root backupsynctool.exe (Win7 target x86_64-win7-windows-msvc)
 ```
 
 Details: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md).

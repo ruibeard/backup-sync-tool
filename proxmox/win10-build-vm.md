@@ -1,6 +1,6 @@
 # Win10 build VM (Proxmox) — compile host only
 
-Compiles `backupsynctool.exe`. **App target stays Win7** (`x86_64-win7-windows-msvc` via `build-local.ps1`). This VM is not Garage and not Laravel.
+Compiles `backupsynctool.exe`. **App target stays Win7** (`x86_64-win7-windows-msvc` via `./build-windows.sh`). This VM is not Garage and not Laravel.
 
 ## Identity
 
@@ -19,29 +19,9 @@ From a clean Mac/Linux checkout of this branch:
 ./build-windows.sh
 ```
 
-That script: `git push` → SSH `root@192.168.0.46` → VM **102** `git pull` → `.\build-local.ps1 -NoLaunch` → polls until `build-exitcode.txt` → pulls `backupsynctool.exe` into `dist/windows/`.
-
-Manual on the guest:
-
-```powershell
-cd C:\Users\user\code\backup-sync-tool
-git fetch
-git checkout s3-multipart-implementation
-git pull
-.\build-local.ps1
-```
-
-Must use Win7 target inside that script. Config beside root `backupsynctool.exe`.
+That script: `git push` → SSH `root@192.168.0.46` → VM **102** `git pull` → Win7 cargo build → polls until `build-exitcode.txt` → pulls `backupsynctool.exe` into `dist/windows/`.
 
 After build: pair against `https://backup.rui.cam`, expect schema v2 approval with `s3_endpoint: https://s3.rui.cam` and `s3_region: garage`.
-
-## Remote (optional)
-
-```bash
-ssh root@192.168.0.46
-qm agent 102 ping
-qm guest exec 102 -- powershell -NoProfile -Command "cd C:\Users\user\code\backup-sync-tool; .\build-local.ps1"
-```
 
 Bootstrap (new VM): `scripts/win10-build-bootstrap.ps1`.
 

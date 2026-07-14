@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build .app and relaunch (like build-local.ps1).
+# Build .app and relaunch.
 #
 # Default: ad-hoc codesign (`-`) — NO Keychain password prompts.
 # Real identity ONLY if you set MACOS_SIGN_IDENTITY (or --identity=...).

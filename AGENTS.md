@@ -20,21 +20,15 @@ After **every** code change that affects the running app, build and relaunch. Do
 
 ### Windows (Proxmox VM 102)
 
-From Mac (preferred):
+From Mac (only entry point):
 
 ```bash
 ./build-windows.sh
 ```
 
-On the VM:
+Pushes the branch, builds Win7 target on VM 102, pulls `dist/windows/backupsynctool.exe`. Never launch from `target/debug` or `target/release`.
 
-```powershell
-.\build-local.ps1
-```
-
-Always from repo root. Target is **`x86_64-win7-windows-msvc`** (Win7-compatible). Never launch from `target/debug` or `target/release`.
-
-Confirm: release build 0 errors · root/`dist/windows` `backupsynctool.exe` · app running when launched from repo root on the VM.
+Confirm: release build 0 errors · `dist/windows/backupsynctool.exe` present.
 
 ### macOS (this machine / Darwin host)
 

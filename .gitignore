@@ -18,3 +18,7 @@ obj/
 # Build artifacts
 *.exe
 /dist/
+/_build_windows.ps1
+/build-exitcode.txt
+/build-pid.txt
+/build-status.txt
