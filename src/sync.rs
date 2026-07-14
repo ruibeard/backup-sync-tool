@@ -2,7 +2,7 @@
 // Startup scans the local folder and fetches one remote manifest file.
 
 use crate::config::{self, Config};
-use crate::transport::{BackupTransport, FileMetadata, TransportError};
+use crate::transport::{BackupTransport, FileMetadata, TransferControl, TransportError};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -17,7 +17,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const REMOTE_HEAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MANIFEST_NAME: &str = ".backupsynctool-manifest.json";
 const MANIFEST_VERSION: u32 = 2;
-const _: () = assert!(MANIFEST_VERSION == 2, "paths::manifest_state_dir assumes state-v2");
+const _: () = assert!(
+    MANIFEST_VERSION == 2,
+    "paths::manifest_state_dir assumes state-v2"
+);
 const REMOTE_MANIFEST_NAME_S3: &str = ".backupsynctool-remote-manifest.json";
 
 fn remote_manifest_name(_cfg: &Config) -> &'static str {
@@ -50,6 +53,92 @@ pub struct SyncEngine {
 }
 
 pub type LogFn = Arc<dyn Fn(String) + Send + Sync>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransferKind {
+    Upload,
+    Download,
+    Restore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferState {
+    Started,
+    Progress,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferEvent {
+    pub kind: TransferKind,
+    pub state: TransferState,
+    pub relative_path: String,
+    pub transferred: u64,
+    pub total: u64,
+    pub error: Option<String>,
+    pub auth_failed: bool,
+}
+
+pub type TransferEventFn = Arc<dyn Fn(TransferEvent) + Send + Sync>;
+
+fn transfer_control(
+    events: &TransferEventFn,
+    kind: TransferKind,
+    relative_path: &str,
+    total: u64,
+    cancel: &Arc<AtomicBool>,
+) -> TransferControl {
+    events(TransferEvent {
+        kind,
+        state: TransferState::Started,
+        relative_path: relative_path.to_string(),
+        transferred: 0,
+        total,
+        error: None,
+        auth_failed: false,
+    });
+    let events = events.clone();
+    let relative_path = relative_path.to_string();
+    TransferControl::new(
+        cancel.clone(),
+        Arc::new(move |progress| {
+            events(TransferEvent {
+                kind,
+                state: TransferState::Progress,
+                relative_path: relative_path.clone(),
+                transferred: progress.transferred,
+                total: progress.total,
+                error: None,
+                auth_failed: false,
+            });
+        }),
+    )
+}
+
+fn emit_transfer_terminal(
+    events: &TransferEventFn,
+    kind: TransferKind,
+    relative_path: &str,
+    transferred: u64,
+    total: u64,
+    error: Option<&TransportError>,
+) {
+    events(TransferEvent {
+        kind,
+        state: match error {
+            None => TransferState::Completed,
+            Some(err) if err.is_cancelled() => TransferState::Cancelled,
+            Some(_) => TransferState::Failed,
+        },
+        relative_path: relative_path.to_string(),
+        transferred,
+        total,
+        error: error.map(ToString::to_string),
+        auth_failed: error.is_some_and(TransportError::is_auth_failed),
+    });
+}
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -102,8 +191,20 @@ impl SyncEngine {
         activity: ActivityFn,
         auth_failed: AuthFailedFn,
     ) -> Result<Self, String> {
+        Self::start_with_events(cfg, transport, log, activity, auth_failed, Arc::new(|_| {}))
+    }
+
+    pub fn start_with_events(
+        cfg: Config,
+        transport: Arc<dyn BackupTransport>,
+        log: LogFn,
+        activity: ActivityFn,
+        auth_failed: AuthFailedFn,
+        events: TransferEventFn,
+    ) -> Result<Self, String> {
         let pending: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
+        let auth_failed = pause_engine_on_auth(stop.clone(), auth_failed);
         let pending_clone = pending.clone();
         let stop_clone = stop.clone();
         let cfg_arc = Arc::new(cfg);
@@ -111,6 +212,7 @@ impl SyncEngine {
         let log_clone = log.clone();
         let activity_clone = activity.clone();
         let auth_failed_clone = auth_failed.clone();
+        let events_clone = events.clone();
         let cfg_watcher = cfg_arc.clone();
         let transport_watcher = transport.clone();
 
@@ -134,6 +236,8 @@ impl SyncEngine {
                 &log_clone,
                 &activity_clone,
                 &auth_failed_clone,
+                &stop_clone,
+                &events_clone,
             );
 
             activity_clone(ActivityInfo {
@@ -182,6 +286,8 @@ impl SyncEngine {
                         config::effective_parallel_uploads(&cfg_watcher),
                         Some(&activity_clone),
                         &auth_failed_clone,
+                        &stop_clone,
+                        &events_clone,
                     );
                     activity_clone(ActivityInfo {
                         state: ActivityState::Idle,
@@ -200,6 +306,8 @@ impl SyncEngine {
                         &log_clone,
                         &activity_clone,
                         &auth_failed_clone,
+                        &stop_clone,
+                        &events_clone,
                     );
                     if batch.attempted > 0 {
                         activity_clone(ActivityInfo {
@@ -250,6 +358,13 @@ impl SyncEngine {
     }
 }
 
+fn pause_engine_on_auth(stop: Arc<AtomicBool>, callback: AuthFailedFn) -> AuthFailedFn {
+    Arc::new(move || {
+        stop.store(true, Ordering::Relaxed);
+        callback();
+    })
+}
+
 impl Drop for SyncEngine {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -264,6 +379,8 @@ fn sync_startup(
     log: &LogFn,
     activity: &ActivityFn,
     auth_failed: &AuthFailedFn,
+    cancel: &Arc<AtomicBool>,
+    events: &TransferEventFn,
 ) -> UploadBatchResult {
     let mut total = UploadBatchResult::default();
     let local_state = scan_local_state(cfg);
@@ -272,45 +389,8 @@ fn sync_startup(
         cfg.watch_folder,
         local_state.files.len()
     ));
-    let remote_manifest = SyncManifest::default();
-    let suppressed: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
-
     if !had_local_manifest {
-        if cfg.sync_remote_changes && !remote_manifest.files.is_empty() {
-            log("No local manifest, downloading server files as baseline".to_string());
-            let mut downloads: Vec<String> = remote_manifest
-                .files
-                .keys()
-                .filter(|relative| !is_remote_manifest_name(cfg, relative))
-                .cloned()
-                .collect();
-            downloads.sort();
-
-            if !downloads.is_empty() {
-                log(format!("{} file(s) to download", downloads.len()));
-                activity(ActivityInfo {
-                    state: ActivityState::Syncing,
-                    completed: 0,
-                    total: downloads.len(),
-                    failed: 0,
-                    failed_paths: Vec::new(),
-                });
-                download_remote_paths(
-                    cfg,
-                    transport,
-                    manifest,
-                    &remote_manifest,
-                    &downloads,
-                    &suppressed,
-                    log,
-                    auth_failed,
-                );
-            }
-
-            return total;
-        }
-
-        log("No local manifest, using local files as baseline".to_string());
+        log("No local manifest; uploading every local file".to_string());
 
         let mut uploads: Vec<PathBuf> = local_state
             .files
@@ -337,6 +417,8 @@ fn sync_startup(
                 config::effective_parallel_uploads(cfg),
                 Some(activity),
                 auth_failed,
+                cancel,
+                events,
             );
             total.absorb(&batch);
             return total;
@@ -349,14 +431,10 @@ fn sync_startup(
     let remote_on_server = remote_file_states(cfg, transport, log, auth_failed);
 
     let mut uploads = Vec::new();
-    let mut downloads = Vec::new();
-
     for (relative, current_local) in &local_state.files {
         let local_baseline = local_manifest.files.get(relative);
-        let remote_baseline = remote_manifest.files.get(relative);
 
         let local_changed = local_baseline != Some(current_local);
-        let remote_changed = remote_baseline != local_baseline;
         let missing_on_server = remote_on_server
             .as_ref()
             .is_some_and(|present| !present.contains_key(relative));
@@ -367,40 +445,9 @@ fn sync_startup(
         });
         let listing_unavailable = remote_on_server.is_none();
 
-        if local_changed
-            || (listing_unavailable && remote_baseline.is_none())
-            || missing_on_server
-            || size_mismatch == Some(true)
-        {
+        if local_changed || listing_unavailable || missing_on_server || size_mismatch == Some(true) {
             uploads.push(local_path_for_relative(cfg, relative));
-            continue;
         }
-
-        if cfg.sync_remote_changes && remote_changed {
-            downloads.push(relative.clone());
-        }
-    }
-
-    if cfg.sync_remote_changes {
-        for relative in remote_manifest.files.keys() {
-            if !local_state.files.contains_key(relative) {
-                downloads.push(relative.clone());
-            }
-        }
-    }
-
-    if !downloads.is_empty() {
-        log(format!("{} file(s) to download", downloads.len()));
-        download_remote_paths(
-            cfg,
-            transport,
-            manifest,
-            &remote_manifest,
-            &downloads,
-            &suppressed,
-            log,
-            auth_failed,
-        );
     }
 
     if !uploads.is_empty() {
@@ -421,119 +468,13 @@ fn sync_startup(
             config::effective_parallel_uploads(cfg),
             Some(activity),
             auth_failed,
+            cancel,
+            events,
         );
         total.absorb(&batch);
     }
 
     total
-}
-
-fn apply_remote_manifest(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    manifest: &Arc<Mutex<SyncManifest>>,
-    remote_manifest: &SyncManifest,
-    suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>,
-    log: &LogFn,
-    auth_failed: &AuthFailedFn,
-) -> usize {
-    let local_manifest = manifest.lock().unwrap().clone();
-    let mut downloads = Vec::new();
-
-    for (relative, remote_state) in &remote_manifest.files {
-        let local_baseline = local_manifest.files.get(relative);
-        if local_baseline != Some(remote_state) {
-            downloads.push(relative.clone());
-        }
-    }
-
-    if downloads.is_empty() {
-        return 0;
-    }
-    let download_count = downloads.len();
-
-    download_remote_paths(
-        cfg,
-        transport,
-        manifest,
-        remote_manifest,
-        &downloads,
-        suppressed,
-        log,
-        auth_failed,
-    );
-
-    download_count
-}
-
-fn download_remote_paths(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    manifest: &Arc<Mutex<SyncManifest>>,
-    remote_manifest: &SyncManifest,
-    paths: &[String],
-    suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>,
-    log: &LogFn,
-    auth_failed: &AuthFailedFn,
-) {
-    for relative in paths {
-        if is_remote_manifest_name(cfg, relative) {
-            continue;
-        }
-        if !is_safe_remote_relative(relative) {
-            log(format!("Rejected unsafe server path: {}", relative));
-            continue;
-        }
-        if !remote_manifest.files.contains_key(relative) {
-            continue;
-        }
-
-        let local_path = local_path_for_relative(cfg, relative);
-        log(format!("Downloading: {}", relative));
-        mark_suppressed(suppressed, &local_path);
-        let meta = match transport.download_file(relative, &local_path) {
-            Ok(meta) => meta,
-            Err(err) => {
-                handle_transport_err(&err, auth_failed);
-                log(format!("Remote download failed {}: {}", relative, err));
-                continue;
-            }
-        };
-
-        // Prefer source mtime from remote manifest when transport did not supply one.
-        let mtime = if meta.mtime > 0 {
-            meta.mtime
-        } else {
-            remote_manifest
-                .files
-                .get(relative)
-                .map(|s| s.mtime)
-                .unwrap_or(0)
-        };
-        if mtime > 0 {
-            let _ = set_local_mtime(&local_path, mtime);
-        }
-
-        mark_suppressed(suppressed, &local_path);
-        let mut guard = manifest.lock().unwrap();
-        guard.files.insert(
-            relative.clone(),
-            FileState {
-                size: if meta.size > 0 {
-                    meta.size
-                } else {
-                    file_size(&local_path)
-                },
-                mtime: if mtime > 0 {
-                    mtime
-                } else {
-                    file_mtime_epoch(&local_path)
-                },
-            },
-        );
-        save_local_manifest(cfg, &guard);
-        log(format!("Downloaded: {}", relative));
-    }
 }
 
 fn upload_path(
@@ -543,6 +484,8 @@ fn upload_path(
     manifest: &Arc<Mutex<SyncManifest>>,
     log: &LogFn,
     auth_failed: &AuthFailedFn,
+    cancel: &Arc<AtomicBool>,
+    events: &TransferEventFn,
 ) -> UploadOutcome {
     if !path.is_file() || should_ignore_path(&cfg.watch_folder, path) {
         return UploadOutcome::Skipped;
@@ -556,17 +499,40 @@ fn upload_path(
         Ok(meta) => meta.len(),
         Err(err) => {
             let msg = format!("Read error: {err}");
+            let error = TransportError::Other(msg.clone());
+            let _control = transfer_control(events, TransferKind::Upload, &relative, 0, cancel);
+            emit_transfer_terminal(events, TransferKind::Upload, &relative, 0, 0, Some(&error));
             log(format!("Upload failed {}: {}", relative, msg));
             return UploadOutcome::Failed(relative);
         }
     };
     let mtime = file_mtime_epoch(path);
+    let source_mtime_ns = file_mtime_ns(path);
     let metadata = FileMetadata { size, mtime };
+    let control = transfer_control(events, TransferKind::Upload, &relative, size, cancel);
 
     log(format!("Uploading: {}", relative));
     log(format!("Upload progress: {}|0", relative));
-    match transport.upload_file(&relative, path, &metadata) {
+    match transport.upload_file_with(&relative, path, &metadata, &control) {
         Ok(_) => {
+            let current_size = file_size(path);
+            let current_mtime = file_mtime_epoch(path);
+            if current_size != size
+                || current_mtime != mtime
+                || file_mtime_ns(path) != source_mtime_ns
+            {
+                let err = TransportError::SourceChanged;
+                emit_transfer_terminal(
+                    events,
+                    TransferKind::Upload,
+                    &relative,
+                    size,
+                    size,
+                    Some(&err),
+                );
+                log(format!("Upload failed {}: {}", relative, err));
+                return UploadOutcome::Failed(relative);
+            }
             log(format!("Upload progress: {}|100", relative));
             let mut guard = manifest.lock().unwrap();
             guard.files.insert(
@@ -577,10 +543,19 @@ fn upload_path(
                 },
             );
             save_local_manifest(cfg, &guard);
+            emit_transfer_terminal(events, TransferKind::Upload, &relative, size, size, None);
             log(format!("Uploaded: {}", relative));
             UploadOutcome::Success
         }
         Err(err) => {
+            emit_transfer_terminal(
+                events,
+                TransferKind::Upload,
+                &relative,
+                control.transferred(),
+                size,
+                Some(&err),
+            );
             handle_transport_err(&err, auth_failed);
             let msg = err.to_string();
             log(format!("Upload failed {}: {}", relative, msg));
@@ -598,27 +573,54 @@ fn upload_paths_parallel(
     max_parallel: usize,
     activity: Option<&ActivityFn>,
     auth_failed: &AuthFailedFn,
+    cancel: &Arc<AtomicBool>,
+    events: &TransferEventFn,
 ) -> UploadBatchResult {
     let total = paths.len();
     if total == 0 {
         return UploadBatchResult::default();
     }
-    let width = max_parallel.max(1).min(total);
+    let width = upload_worker_width(max_parallel, total);
     let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let succeeded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let failed_paths = Arc::new(Mutex::new(Vec::<String>::new()));
     let queue = Arc::new(Mutex::new(VecDeque::from(paths.to_vec())));
+    let auth_failed_seen = Arc::new(AtomicBool::new(false));
+    let auth_failed_callback = auth_failed.clone();
+    let batch_auth_failed: AuthFailedFn = {
+        let auth_failed_seen = auth_failed_seen.clone();
+        Arc::new(move || {
+            auth_failed_seen.store(true, Ordering::Relaxed);
+            auth_failed_callback();
+        })
+    };
     std::thread::scope(|scope| {
         for _ in 0..width {
             let queue = queue.clone();
             let processed = processed.clone();
             let succeeded = succeeded.clone();
             let failed_paths = failed_paths.clone();
+            let auth_failed_seen = auth_failed_seen.clone();
+            let batch_auth_failed = batch_auth_failed.clone();
+            let cancel = cancel.clone();
+            let events = events.clone();
             scope.spawn(move || loop {
+                if auth_failed_seen.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
+                    break;
+                }
                 let Some(path) = queue.lock().unwrap().pop_front() else {
                     break;
                 };
-                match upload_path(cfg, transport, &path, manifest, log, auth_failed) {
+                match upload_path(
+                    cfg,
+                    transport,
+                    &path,
+                    manifest,
+                    log,
+                    &batch_auth_failed,
+                    &cancel,
+                    &events,
+                ) {
                     UploadOutcome::Success => {
                         succeeded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
@@ -640,13 +642,22 @@ fn upload_paths_parallel(
             });
         }
     });
+    let attempted = processed.load(std::sync::atomic::Ordering::SeqCst);
     let ok = succeeded.load(std::sync::atomic::Ordering::SeqCst);
     let paths_failed = failed_paths.lock().unwrap().clone();
     UploadBatchResult {
-        attempted: total,
+        attempted,
         succeeded: ok,
         failed: paths_failed.len(),
         failed_paths: paths_failed,
+    }
+}
+
+fn upload_worker_width(configured: usize, total: usize) -> usize {
+    if total == 0 {
+        0
+    } else {
+        configured.clamp(1, 2).min(total)
     }
 }
 
@@ -659,6 +670,26 @@ pub fn retry_uploads(
     activity: &ActivityFn,
     auth_failed: &AuthFailedFn,
 ) -> UploadBatchResult {
+    retry_uploads_with_events(
+        cfg,
+        transport,
+        relative_paths,
+        log,
+        activity,
+        auth_failed,
+        Arc::new(|_| {}),
+    )
+}
+
+pub fn retry_uploads_with_events(
+    cfg: &Config,
+    transport: Arc<dyn BackupTransport>,
+    relative_paths: &[String],
+    log: &LogFn,
+    activity: &ActivityFn,
+    auth_failed: &AuthFailedFn,
+    events: TransferEventFn,
+) -> UploadBatchResult {
     let watch = Path::new(cfg.watch_folder.trim());
     if watch.as_os_str().is_empty() {
         return UploadBatchResult::default();
@@ -669,6 +700,7 @@ pub fn retry_uploads(
         .map(|rel| watch.join(rel))
         .filter(|p| p.is_file())
         .collect();
+    let cancel = Arc::new(AtomicBool::new(false));
     upload_paths_parallel(
         cfg,
         &transport,
@@ -678,6 +710,8 @@ pub fn retry_uploads(
         config::effective_parallel_uploads(cfg),
         Some(activity),
         auth_failed,
+        &cancel,
+        &events,
     )
 }
 
@@ -689,6 +723,28 @@ pub fn restore_customer_backup(
     log: &LogFn,
     activity: &ActivityFn,
     auth_failed: &AuthFailedFn,
+) -> Result<PathBuf, String> {
+    restore_customer_backup_with_events(
+        cfg,
+        transport,
+        destination_parent,
+        cancel,
+        log,
+        activity,
+        auth_failed,
+        Arc::new(|_| {}),
+    )
+}
+
+pub fn restore_customer_backup_with_events(
+    cfg: &Config,
+    transport: Arc<dyn BackupTransport>,
+    destination_parent: &Path,
+    cancel: &Arc<AtomicBool>,
+    log: &LogFn,
+    activity: &ActivityFn,
+    auth_failed: &AuthFailedFn,
+    events: TransferEventFn,
 ) -> Result<PathBuf, String> {
     if !destination_parent.is_dir() {
         return Err("Restore destination does not exist.".into());
@@ -735,11 +791,42 @@ pub fn restore_customer_backup(
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
-        match transport.download_file(&remote.relative_path, &destination) {
-            Ok(_) => completed += 1,
+        let control = transfer_control(
+            &events,
+            TransferKind::Restore,
+            &remote.relative_path,
+            remote.size,
+            cancel,
+        );
+        match transport.download_file_with(&remote.relative_path, &destination, &control) {
+            Ok(metadata) => {
+                emit_transfer_terminal(
+                    &events,
+                    TransferKind::Restore,
+                    &remote.relative_path,
+                    metadata.size,
+                    metadata.size.max(remote.size),
+                    None,
+                );
+                completed += 1;
+            }
             Err(err) => {
+                emit_transfer_terminal(
+                    &events,
+                    TransferKind::Restore,
+                    &remote.relative_path,
+                    control.transferred(),
+                    remote.size,
+                    Some(&err),
+                );
                 if err.is_auth_failed() {
                     auth_failed();
+                }
+                if err.is_cancelled() {
+                    return Err(format!(
+                        "Restore cancelled. Completed files remain in {}",
+                        restore_root.display()
+                    ));
                 }
                 failed_paths.push(remote.relative_path);
             }
@@ -953,6 +1040,8 @@ fn heal_missing_uploads(
     log: &LogFn,
     activity: &ActivityFn,
     auth_failed: &AuthFailedFn,
+    cancel: &Arc<AtomicBool>,
+    events: &TransferEventFn,
 ) -> UploadBatchResult {
     let Some(remote_on_server) = remote_file_states(cfg, transport, log, auth_failed) else {
         return UploadBatchResult::default();
@@ -994,6 +1083,8 @@ fn heal_missing_uploads(
         config::effective_parallel_uploads(cfg),
         Some(activity),
         auth_failed,
+        cancel,
+        events,
     )
 }
 
@@ -1132,13 +1223,13 @@ fn relative_path_for_watch(watch_folder: &str, path: &Path) -> Option<String> {
 }
 
 fn local_path_for_relative(cfg: &Config, relative: &str) -> PathBuf {
-    relative
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .fold(PathBuf::from(&cfg.watch_folder), |mut path, part| {
+    relative.split('/').filter(|part| !part.is_empty()).fold(
+        PathBuf::from(&cfg.watch_folder),
+        |mut path, part| {
             path.push(part);
             path
-        })
+        },
+    )
 }
 
 fn load_local_manifest(cfg: &Config) -> SyncManifest {
@@ -1221,6 +1312,15 @@ fn file_mtime_epoch(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+fn file_mtime_ns(path: &Path) -> u128 {
+    fs::metadata(path)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
 fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
@@ -1255,7 +1355,29 @@ fn mark_suppressed(suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>, path: &Path
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_remote_relative, safe_restore_relative_path};
+    use super::{
+        emit_transfer_terminal, is_safe_remote_relative, pause_engine_on_auth,
+        safe_restore_relative_path, upload_worker_width, TransferKind, TransferState,
+    };
+    use crate::transport::TransportError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn auth_failure_pauses_engine_and_notifies_host() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let notified = Arc::new(AtomicBool::new(false));
+        let notified_callback = notified.clone();
+        let callback = pause_engine_on_auth(
+            stopped.clone(),
+            Arc::new(move || notified_callback.store(true, Ordering::Relaxed)),
+        );
+
+        callback();
+
+        assert!(stopped.load(Ordering::Relaxed));
+        assert!(notified.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn remote_paths_cannot_escape_watch_folder() {
@@ -1279,5 +1401,46 @@ mod tests {
         assert!(safe_restore_relative_path("folder/../../outside.zip").is_none());
         assert!(safe_restore_relative_path("/absolute.zip").is_none());
         assert!(safe_restore_relative_path("").is_none());
+    }
+
+    #[test]
+    fn upload_worker_count_never_exceeds_two() {
+        assert_eq!(upload_worker_width(0, 10), 1);
+        assert_eq!(upload_worker_width(1, 10), 1);
+        assert_eq!(upload_worker_width(20, 10), 2);
+        assert_eq!(upload_worker_width(20, 1), 1);
+        assert_eq!(upload_worker_width(20, 0), 0);
+    }
+
+    #[test]
+    fn terminal_events_distinguish_cancel_auth_and_success() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_callback = seen.clone();
+        let callback: super::TransferEventFn =
+            Arc::new(move |event| seen_callback.lock().unwrap().push(event));
+
+        emit_transfer_terminal(&callback, TransferKind::Upload, "a", 1, 2, None);
+        emit_transfer_terminal(
+            &callback,
+            TransferKind::Upload,
+            "b",
+            1,
+            2,
+            Some(&TransportError::Cancelled),
+        );
+        emit_transfer_terminal(
+            &callback,
+            TransferKind::Upload,
+            "c",
+            0,
+            2,
+            Some(&TransportError::AuthFailed("denied".into())),
+        );
+
+        let events = seen.lock().unwrap();
+        assert_eq!(events[0].state, TransferState::Completed);
+        assert_eq!(events[1].state, TransferState::Cancelled);
+        assert_eq!(events[2].state, TransferState::Failed);
+        assert!(events[2].auth_failed);
     }
 }

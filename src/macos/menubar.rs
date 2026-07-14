@@ -5,18 +5,14 @@ use crate::host::SyncHost;
 use crate::logs;
 use crate::macos::launchd;
 use crate::macos::notify;
-use crate::macos::popover::{self, PopoverAction};
-use crate::macos::status_window::{self, StatusAction, StatusSnapshot, TrayAnchor};
+use crate::macos::status_window::{self, StatusAction, StatusSnapshot};
 use crate::updater::{self, CheckResult};
 use dispatch::Queue;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusItem,
-};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem};
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -37,7 +33,7 @@ define_class!(
     unsafe impl NSObjectProtocol for MenuTarget {}
 
     impl MenuTarget {
-        /// ⌘W — dismiss popover / close pair panel / hide status window.
+        /// ⌘W — close the pair panel or hide the status window.
         #[unsafe(method(bstCloseFront:))]
         fn bst_close_front(&self, _: Option<&AnyObject>) {
             close_frontmost_window();
@@ -46,10 +42,6 @@ define_class!(
 );
 
 fn close_frontmost_window() {
-    if popover::is_open() {
-        popover::close();
-        return;
-    }
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
@@ -73,8 +65,12 @@ fn close_frontmost_window() {
 /// Minimal main menu so ⌘Q / ⌘W work (LSUIElement has no default menu).
 fn install_main_menu(mtm: MainThreadMarker) {
     let app = NSApplication::sharedApplication(mtm);
-    let target: Retained<MenuTarget> =
-        unsafe { msg_send![super(MenuTarget::alloc(mtm).set_ivars(MenuTargetIvars)), init] };
+    let target: Retained<MenuTarget> = unsafe {
+        msg_send![
+            super(MenuTarget::alloc(mtm).set_ivars(MenuTargetIvars)),
+            init
+        ]
+    };
 
     let main_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("MainMenu"));
 
@@ -153,6 +149,7 @@ unsafe impl Sync for MainTray {}
 
 struct Ids {
     open_window: String,
+    restore: String,
     open_logs: String,
     set_control_plane: String,
     quit: String,
@@ -172,6 +169,7 @@ struct Shared {
     icons: Arc<TrayIcons>,
     busy: Arc<AtomicBool>,
     update_available: Arc<AtomicBool>,
+    restore_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
 }
 
 /// Run accessory menu-bar app (icon in the macOS status bar). Blocks until Quit.
@@ -198,12 +196,14 @@ pub fn run() {
     let icon_complete = png_to_icon(ICON_COMPLETE).expect("menubar complete icon");
 
     let open_window = TrayMenuItem::new("Open Backup Sync Tool…", true, None);
+    let restore = TrayMenuItem::new("Restore Backup…", true, None);
     let open_logs = TrayMenuItem::new("Open Logs", true, None);
     let set_control_plane = TrayMenuItem::new("Control plane URL…", true, None);
     let quit = TrayMenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
         open_window: open_window.id().as_ref().to_string(),
+        restore: restore.id().as_ref().to_string(),
         open_logs: open_logs.id().as_ref().to_string(),
         set_control_plane: set_control_plane.id().as_ref().to_string(),
         quit: quit.id().as_ref().to_string(),
@@ -211,6 +211,7 @@ pub fn run() {
 
     let menu = Menu::new();
     let _ = menu.append(&open_window);
+    let _ = menu.append(&restore);
     let _ = menu.append(&open_logs);
     let _ = menu.append(&set_control_plane);
     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -223,7 +224,7 @@ pub fn run() {
         .with_menu(Box::new(menu))
         .build()
         .expect("create menubar status item");
-    // Primary click → popover; menu stays for secondary click.
+    // Primary click opens the full status window; menu stays for secondary click.
     tray.set_show_menu_on_left_click(false);
 
     let tray = Arc::new(Mutex::new(MainTray(tray)));
@@ -240,6 +241,7 @@ pub fn run() {
         icons: icons.clone(),
         busy: busy.clone(),
         update_available: update_available.clone(),
+        restore_cancel: Arc::new(Mutex::new(None)),
     };
     apply_status(&shared);
 
@@ -250,9 +252,7 @@ pub fn run() {
         thread::spawn(move || match updater::check(env!("CARGO_PKG_VERSION")) {
             CheckResult::UpdateAvailable(info) => {
                 logs::append(&format!("Update available: v{}", info.version));
-                shared_up
-                    .update_available
-                    .store(true, Ordering::SeqCst);
+                shared_up.update_available.store(true, Ordering::SeqCst);
                 refresh_status_window(&shared_up);
                 if auto {
                     tip(&shared_up.tray, &format!("Downloading v{}…", info.version));
@@ -263,9 +263,7 @@ pub fn run() {
             }
             CheckResult::UpToDate => {
                 logs::append("updater: up to date");
-                shared_up
-                    .update_available
-                    .store(false, Ordering::SeqCst);
+                shared_up.update_available.store(false, Ordering::SeqCst);
                 refresh_status_window(&shared_up);
             }
             CheckResult::Error(e) => {
@@ -291,6 +289,11 @@ pub fn run() {
             open_main_window(&shared_ev);
             return;
         }
+        if id == ids.restore {
+            open_main_window(&shared_ev);
+            start_restore(&shared_ev);
+            return;
+        }
         if id == ids.open_logs {
             do_open_logs();
             return;
@@ -308,16 +311,10 @@ pub fn run() {
             ..
         } = event
         {
-            // Always resolve NSStatusItem frame on main (Cocoa bottom-left).
-            // Never use tray-icon event.rect (physical / flipped Y → mid-screen).
             let shared = shared_tray.clone();
             Queue::main().exec_async(move || {
-                let anchor = cocoa_status_item_anchor(&shared);
-                logs::append(&format!(
-                    "menubar: primary click → popover anchor={:?}",
-                    anchor.map(|a| (a.x, a.y, a.w, a.h))
-                ));
-                open_popover(&shared, anchor);
+                logs::append("menubar: primary click → status window");
+                open_main_window(&shared);
             });
         }
     }));
@@ -336,40 +333,41 @@ pub fn run() {
 
     logs::append("macOS menubar started (status icon)");
     eprintln!("Menu bar icon is live — look at the top-right of the screen.");
+    open_main_window(&shared);
     app.run();
 }
 
-/// Cocoa screen frame of the status-item button (bottom-left origin).
-fn cocoa_status_item_anchor(shared: &Shared) -> Option<TrayAnchor> {
-    let mtm = MainThreadMarker::new()?;
-    let tray = shared.tray.lock().ok()?;
-    let item: Retained<NSStatusItem> = tray.0.ns_status_item()?;
-    let button = item.button(mtm)?;
-    let window = button.window()?;
-    // Button bounds → screen (same space as NSWindow.setFrame).
-    let f = window.convertRectToScreen(button.frame());
-    Some(TrayAnchor {
-        x: f.origin.x,
-        y: f.origin.y,
-        w: f.size.width,
-        h: f.size.height,
-        scale: 1.0,
-    })
-}
-
 fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
+    let app = host.app_snapshot();
     let paired = host.is_paired();
-    let connected = paired && !host.auth_failed();
-    let server_status = if host.auth_failed() {
-        "Re-pair required".into()
-    } else if connected {
-        "Connected".into()
-    } else {
-        "Not connected".into()
+    let connected = matches!(app.connection, crate::app::ConnectionState::Connected);
+    let server_status = match &app.connection {
+        crate::app::ConnectionState::ReconnectRequired { .. } => "Reconnect required".into(),
+        crate::app::ConnectionState::Connecting => "Connecting…".into(),
+        crate::app::ConnectionState::Connected => "Connected".into(),
+        crate::app::ConnectionState::Disconnected if paired => "Reconnect required".into(),
+        crate::app::ConnectionState::Disconnected => "Not connected".into(),
     };
-    let syncing = host.engine_running() && connected;
-    let sync_status = if syncing {
-        "Uploading…".into()
+    let syncing = matches!(
+        app.work,
+        crate::app::WorkState::Scanning
+            | crate::app::WorkState::Uploading
+            | crate::app::WorkState::Restoring
+    );
+    let sync_status = if matches!(app.work, crate::app::WorkState::Restoring) {
+        "Restoring…".into()
+    } else if matches!(app.work, crate::app::WorkState::Scanning) {
+        "Checking files…".into()
+    } else if matches!(app.work, crate::app::WorkState::Uploading) {
+        let percent = if app.total_bytes == 0 {
+            0
+        } else {
+            app.transferred_bytes
+                .saturating_mul(100)
+                .checked_div(app.total_bytes)
+                .unwrap_or(0)
+        };
+        format!("Uploading… {percent}%")
     } else if connected {
         "Idle".into()
     } else {
@@ -377,46 +375,52 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
     };
     StatusSnapshot {
         watch_folder: host.config.watch_folder.clone(),
+        remote_folder: host.config.remote_folder.clone(),
         connected,
         server_status,
         start_at_login: host.config.start_with_windows,
         auto_update: host.config.auto_update,
-        activity_lines: Vec::new(),
+        activity_lines: app
+            .activity
+            .iter()
+            .rev()
+            .map(|row| {
+                let state = match row.status {
+                    crate::app::ActivityStatus::Started => "Starting",
+                    crate::app::ActivityStatus::Progress => match row.kind {
+                        crate::sync::TransferKind::Upload => "Uploading",
+                        crate::sync::TransferKind::Download
+                        | crate::sync::TransferKind::Restore => "Restoring",
+                    },
+                    crate::app::ActivityStatus::Completed => "Complete",
+                    crate::app::ActivityStatus::Failed => "Failed",
+                    crate::app::ActivityStatus::Cancelled => "Cancelled",
+                };
+                let suffix = row
+                    .error
+                    .as_deref()
+                    .map(|error| format!(" · {error}"))
+                    .unwrap_or_default();
+                format!(
+                    "{} · {state} · {}%{suffix}",
+                    row.relative_path,
+                    row.percent()
+                )
+            })
+            .collect(),
         syncing,
         sync_status,
+        transferred_bytes: app.transferred_bytes,
+        total_bytes: app.total_bytes,
+        failed: app.failed,
+        restoring: matches!(app.work, crate::app::WorkState::Restoring),
         version: env!("CARGO_PKG_VERSION").into(),
         update_available,
     }
 }
 
-/// Glance open/refresh: status fields only. Popover reads upload basenames itself on open.
-fn glance_snapshot(shared: &Shared, host: &SyncHost) -> StatusSnapshot {
-    let mut s = snapshot_from(host, shared.update_available.load(Ordering::SeqCst));
-    s.activity_lines = Vec::new();
-    s
-}
-
 fn window_snapshot(shared: &Shared, host: &SyncHost) -> StatusSnapshot {
-    let mut s = snapshot_from(host, shared.update_available.load(Ordering::SeqCst));
-    // Filtered UI feed (no Upload progress spam) — raw lines stay on disk.
-    s.activity_lines = crate::logs::recent_activity_for_ui(60);
-    s
-}
-
-fn open_popover(shared: &Shared, anchor: Option<TrayAnchor>) {
-    let snap = shared
-        .host
-        .lock()
-        .map(|h| glance_snapshot(shared, &h))
-        .unwrap_or_default();
-    let shared_cb = shared.clone();
-    let on_action = Arc::new(move |action| match action {
-        PopoverAction::OpenWindow => {
-            popover::close();
-            open_main_window(&shared_cb);
-        }
-    });
-    popover::toggle(snap, on_action, anchor);
+    snapshot_from(host, shared.update_available.load(Ordering::SeqCst))
 }
 
 fn open_main_window(shared: &Shared) {
@@ -432,7 +436,8 @@ fn open_main_window(shared: &Shared) {
         }
         StatusAction::ChooseWatch => start_set_watch(&shared_cb),
         StatusAction::Pair => start_pair(&shared_cb),
-        StatusAction::Restore => start_restore(&shared_cb),
+        StatusAction::RetryFailed => start_retry_failed(&shared_cb),
+        StatusAction::CancelRestore => cancel_restore(&shared_cb),
         StatusAction::ToggleLogin => {
             do_toggle_login(&shared_cb);
             refresh_status_window(&shared_cb);
@@ -469,11 +474,6 @@ fn refresh_status_window(shared: &Shared) {
     if status_window::is_open() {
         if let Ok(h) = shared.host.lock() {
             status_window::refresh(window_snapshot(shared, &h));
-        }
-    }
-    if popover::is_open() {
-        if let Ok(h) = shared.host.lock() {
-            popover::refresh(glance_snapshot(shared, &h));
         }
     }
 }
@@ -517,16 +517,29 @@ fn do_toggle_login(shared: &Shared) {
 }
 
 fn start_set_watch(shared: &Shared) {
+    logs::append("menubar: Change watch folder…");
     let shared = shared.clone();
     thread::spawn(move || {
-        if let Some(path) = pick_folder("Choose watch folder") {
-            match shared.host.lock().expect("host").set_watch_folder(path.clone()) {
-                Ok(()) => {
-                    tip(&shared.tray, &format!("Watching {}", path.display()));
-                    apply_status(&shared);
-                    refresh_status_window(&shared);
-                }
-                Err(err) => tip(&shared.tray, &format!("Watch folder: {err}")),
+        let path = notify::pick_folder("Choose watch folder");
+        let Some(path) = path else {
+            logs::append("menubar: watch folder pick cancelled");
+            return;
+        };
+        let path_disp = path.display().to_string();
+        logs::append(&format!("menubar: watch folder picked: {path_disp}"));
+        let result = shared
+            .host
+            .lock()
+            .map_err(|_| "host lock poisoned".to_string())
+            .and_then(|mut host| host.set_watch_folder(path));
+        match result {
+            Ok(()) => {
+                tip(&shared.tray, &format!("Watching {path_disp}"));
+                apply_status(&shared);
+            }
+            Err(err) => {
+                logs::append(&format!("menubar: set watch folder failed: {err}"));
+                tip(&shared.tray, &format!("Watch folder: {err}"));
             }
         }
     });
@@ -578,35 +591,59 @@ fn start_pair(shared: &Shared) {
     set_icon(&shared.tray, &shared.icons, IconKind::Syncing);
     tip(&shared.tray, "Pairing…");
     logs::append("menubar: Pair Device clicked");
-    thread::spawn(move || {
-        let finish_busy = |shared: &Shared| {
-            shared.busy.store(false, Ordering::SeqCst);
-        };
-
-        let (start, api_base) = {
-            let h = match shared.host.lock() {
-                Ok(h) => h,
-                Err(_) => {
-                    tip(&shared.tray, "Pair failed: host lock");
+    thread::spawn(move || loop {
+        match run_pair_attempt(&shared) {
+            PairAttempt::Complete => {
+                notify::pair_finished();
+                tip(&shared.tray, "Paired — sync started");
+                set_icon(&shared.tray, &shared.icons, IconKind::Complete);
+                thread::sleep(Duration::from_secs(2));
+                shared.busy.store(false, Ordering::SeqCst);
+                apply_status(&shared);
+                break;
+            }
+            PairAttempt::ChangeServer => {
+                let current = shared
+                    .host
+                    .lock()
+                    .map(|h| h.config.pair_api_base.clone())
+                    .unwrap_or_else(|_| "https://backup.rui.cam".into());
+                let Some(raw) = notify::prompt_url(
+                    "Change Server",
+                    "Control plane URL used for pairing (not the S3 endpoint).",
+                    &current,
+                ) else {
+                    shared.busy.store(false, Ordering::SeqCst);
                     set_icon(&shared.tray, &shared.icons, IconKind::Idle);
-                    finish_busy(&shared);
-                    return;
+                    break;
+                };
+                let changed = shared
+                    .host
+                    .lock()
+                    .map_err(|_| "host lock poisoned".to_string())
+                    .and_then(|mut host| host.set_pair_api_base(&raw));
+                if let Err(err) = changed {
+                    notify::pair_failed(&format!("Control plane URL: {err}"));
+                    shared.busy.store(false, Ordering::SeqCst);
+                    set_icon(&shared.tray, &shared.icons, IconKind::Idle);
+                    break;
                 }
-            };
-            let api_base = {
-                let base = h.config.pair_api_base.trim();
-                if base.is_empty() {
-                    "https://backup.rui.cam".into()
-                } else {
-                    h.config.pair_api_base.clone()
+                logs::append("Pairing request cancelled; restarting with changed server");
+            }
+            PairAttempt::Cancelled => {
+                if let Ok(host) = shared.host.lock() {
+                    host.cancel_pairing();
                 }
-            };
-            (h.pair_start_request(), api_base)
-        }; // host lock dropped before network/UI
-
-        let start = match start {
-            Ok(s) => s,
-            Err(err) => {
+                logs::append("Pairing cancelled by user; existing connection retained");
+                tip(&shared.tray, "Pairing cancelled");
+                shared.busy.store(false, Ordering::SeqCst);
+                apply_status(&shared);
+                break;
+            }
+            PairAttempt::Failed(err) => {
+                if let Ok(host) = shared.host.lock() {
+                    host.pairing_failed(err.clone(), true);
+                }
                 if err.contains("watch folder") {
                     notify::pair_watch_folder_required();
                 } else {
@@ -614,78 +651,95 @@ fn start_pair(shared: &Shared) {
                 }
                 tip(&shared.tray, &format!("Pair failed: {err}"));
                 set_icon(&shared.tray, &shared.icons, IconKind::Idle);
-                finish_busy(&shared);
-                return;
-            }
-        };
-
-        eprintln!("Pairing code: {}", start.code);
-        eprintln!("Control plane: {api_base}");
-        eprintln!("Approve URL:  {}", start.approve_url);
-        let waiting = format!("Pairing… code {} — {api_base}", start.code);
-        tip(&shared.tray, &waiting);
-        notify::pair_started(&start.code, &start.approve_url, &api_base);
-
-        let sleep_ms = start.poll_interval_ms.clamp(1000, 10_000);
-        let deadline = std::time::Instant::now() + Duration::from_secs(300);
-        let result = loop {
-            if std::time::Instant::now() > deadline {
-                let msg = format!(
-                    "Pairing timed out.\nCode: {}\nApprove URL: {}",
-                    start.code, start.approve_url
-                );
-                break Err(msg);
-            }
-            thread::sleep(Duration::from_millis(sleep_ms));
-            let Some(status) = crate::pairing::poll_pairing(&api_base, &start.poll_token) else {
-                tip(&shared.tray, &waiting);
-                continue;
-            };
-            match status.status.as_str() {
-                "approved" => {
-                    let apply = shared
-                        .host
-                        .lock()
-                        .map_err(|_| "host lock poisoned".to_string())
-                        .and_then(|mut h| h.pair_apply_and_sync(status));
-                    break apply;
-                }
-                "rejected" => break Err("Pairing rejected by server.".into()),
-                "expired" => break Err("Pairing code expired. Try again.".into()),
-                "pending" | "waiting" => {
-                    tip(&shared.tray, &waiting);
-                    eprint!(".");
-                }
-                other => {
-                    logs::append(&format!("Pair poll status: {other}"));
-                    tip(&shared.tray, &waiting);
-                }
-            }
-        };
-
-        match result {
-            Ok(()) => {
-                notify::pair_finished();
-                tip(&shared.tray, "Paired — sync started");
-                set_icon(&shared.tray, &shared.icons, IconKind::Complete);
-                thread::sleep(Duration::from_secs(2));
-                finish_busy(&shared);
-                apply_status(&shared);
-            }
-            Err(err) => {
-                notify::pair_failed(&err);
-                tip(&shared.tray, &format!("Pair failed: {err}"));
-                set_icon(&shared.tray, &shared.icons, IconKind::Idle);
-                finish_busy(&shared);
+                shared.busy.store(false, Ordering::SeqCst);
+                break;
             }
         }
     });
 }
 
+enum PairAttempt {
+    Complete,
+    Cancelled,
+    ChangeServer,
+    Failed(String),
+}
+
+fn run_pair_attempt(shared: &Shared) -> PairAttempt {
+    let (start, api_base) = {
+        let h = match shared.host.lock() {
+            Ok(host) => host,
+            Err(_) => return PairAttempt::Failed("host lock poisoned".into()),
+        };
+        let api_base = if h.config.pair_api_base.trim().is_empty() {
+            "https://backup.rui.cam".into()
+        } else {
+            h.config.pair_api_base.clone()
+        };
+        (h.pair_start_request(), api_base)
+    };
+    let start = match start {
+        Ok(start) => start,
+        Err(err) => return PairAttempt::Failed(err),
+    };
+
+    let waiting = format!("Pairing… code {} — {api_base}", start.code);
+    tip(&shared.tray, &waiting);
+    notify::pair_started(&start.code, &start.approve_url, &api_base);
+    let sleep_ms = start.poll_interval_ms.clamp(1000, 10_000);
+    let deadline = std::time::Instant::now() + Duration::from_secs(600);
+    loop {
+        if std::time::Instant::now() > deadline {
+            return PairAttempt::Failed(format!(
+                "Pairing timed out.\nCode: {}\nApprove URL: {}",
+                start.code, start.approve_url
+            ));
+        }
+        thread::sleep(Duration::from_millis(sleep_ms));
+        match notify::take_pair_panel_action() {
+            Some(notify::PairPanelAction::Cancel) => return PairAttempt::Cancelled,
+            Some(notify::PairPanelAction::ChangeServer) => return PairAttempt::ChangeServer,
+            None => {}
+        }
+        let status = match crate::pairing::poll_pairing_result(&api_base, &start.poll_token) {
+            Ok(status) => status,
+            Err(err) if err.is_transient() => {
+                logs::append(&format!("Pair poll retry: {err}"));
+                continue;
+            }
+            Err(err) => return PairAttempt::Failed(err.to_string()),
+        };
+        match status.status.as_str() {
+            "approved" => {
+                let result = shared
+                    .host
+                    .lock()
+                    .map_err(|_| "host lock poisoned".to_string())
+                    .and_then(|mut host| host.pair_apply_and_sync(status));
+                return result
+                    .map(|_| PairAttempt::Complete)
+                    .unwrap_or_else(PairAttempt::Failed);
+            }
+            "rejected" => return PairAttempt::Failed("Pairing rejected by server.".into()),
+            "expired" => return PairAttempt::Failed("Pairing code expired. Try again.".into()),
+            "failed" => {
+                return PairAttempt::Failed("Pairing failed on the server. Try again.".into())
+            }
+            "consumed" => {
+                return PairAttempt::Failed(
+                    "Pairing credentials were already collected. Start a new pairing.".into(),
+                )
+            }
+            "pending" | "waiting" | "provisioning" => tip(&shared.tray, &waiting),
+            other => logs::append(&format!("Pair poll status: {other}")),
+        }
+    }
+}
+
 fn start_restore(shared: &Shared) {
     let shared = shared.clone();
     thread::spawn(move || {
-        let Some(parent) = pick_folder("Choose parent folder for restore") else {
+        let Some(parent) = notify::pick_folder("Choose parent folder for restore") else {
             return;
         };
         if shared.busy.swap(true, Ordering::SeqCst) {
@@ -694,8 +748,25 @@ fn start_restore(shared: &Shared) {
         }
         set_icon(&shared.tray, &shared.icons, IconKind::Syncing);
         tip(&shared.tray, "Restoring…");
-        // Restore holds host lock across I/O; apply_status uses try_lock so menubar stays live.
-        match shared.host.lock().expect("host").restore_blocking(&parent) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Ok(mut active) = shared.restore_cancel.lock() {
+            *active = Some(cancel.clone());
+        }
+        let job = shared
+            .host
+            .lock()
+            .map_err(|_| "host lock poisoned".to_string())
+            .and_then(|host| host.start_restore_job(parent, cancel));
+        let result = match job {
+            Ok(receiver) => receiver
+                .recv()
+                .unwrap_or_else(|_| Err("Restore worker stopped unexpectedly.".into())),
+            Err(err) => Err(err),
+        };
+        if let Ok(mut active) = shared.restore_cancel.lock() {
+            *active = None;
+        }
+        match result {
             Ok(path) => {
                 tip(&shared.tray, &format!("Restored to {}", path.display()));
                 set_icon(&shared.tray, &shared.icons, IconKind::Complete);
@@ -708,6 +779,38 @@ fn start_restore(shared: &Shared) {
                 shared.busy.store(false, Ordering::SeqCst);
             }
         }
+    });
+}
+
+fn cancel_restore(shared: &Shared) {
+    if let Ok(active) = shared.restore_cancel.lock() {
+        if let Some(cancel) = active.as_ref() {
+            cancel.store(true, Ordering::SeqCst);
+            tip(&shared.tray, "Cancelling restore…");
+        }
+    }
+}
+
+fn start_retry_failed(shared: &Shared) {
+    if shared.busy.swap(true, Ordering::SeqCst) {
+        tip(&shared.tray, "Already busy…");
+        return;
+    }
+    let shared = shared.clone();
+    thread::spawn(move || {
+        tip(&shared.tray, "Retrying failed uploads…");
+        let result = shared
+            .host
+            .lock()
+            .map_err(|_| "host lock poisoned".to_string())
+            .and_then(|mut host| host.retry_failed_uploads());
+        match result {
+            Ok(0) => tip(&shared.tray, "No failed uploads to retry"),
+            Ok(count) => tip(&shared.tray, &format!("Retried {count} upload(s)")),
+            Err(err) => tip(&shared.tray, &format!("Retry failed: {err}")),
+        }
+        shared.busy.store(false, Ordering::SeqCst);
+        apply_status(&shared);
     });
 }
 
@@ -804,24 +907,4 @@ fn apply_status(shared: &Shared) {
     set_icon(&shared.tray, &shared.icons, kind);
     tip(&shared.tray, &tip_text);
     refresh_status_window(shared);
-}
-
-fn pick_folder(prompt: &str) -> Option<PathBuf> {
-    let script = format!(
-        "POSIX path of (choose folder with prompt \"{}\")",
-        prompt.replace('"', "\\\"")
-    );
-    let out = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
 }

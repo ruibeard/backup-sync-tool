@@ -2,7 +2,7 @@
 
 ## Architecture
 
-| Layer | Windows | macOS (v1) |
+| Layer | Windows | macOS |
 | --- | --- | --- |
 | UI | Raw Win32 through `windows-rs` | Menu bar app (default); `--daemon` for LaunchAgent |
 | HTTP | Blocking `ureq` | same |
@@ -27,8 +27,8 @@ Must match the Laravel install’s public `APP_URL` (no trailing slash). Default
 
 | Platform | How to set | Persist |
 | --- | --- | --- |
-| Windows | Main UI **CONTROL PLANE URL** field | On blur and when starting pair |
-| macOS | Tray menu **Control plane URL…** | Immediately via `set_pair_api_base` |
+| Windows | Pair window **Change Server** | Before starting the replacement request |
+| macOS | Pair window **Change Server…** or tray **Control plane URL…** | Before starting the replacement request |
 
 During pair, the UI shows which control plane is in use. `POST /api/pair/start` may return optional `control_plane_url`; if present and it differs from configured `pair_api_base`, the client logs `control_plane_url mismatch: configured=… echoed=…`. Garage `s3_*` credentials and endpoint still come **only** from pair approve — desktop does not choose storage.
 
@@ -36,11 +36,11 @@ On macOS, `s3_secret_enc` / `device_token_enc` store Keychain handles (`kc1:<acc
 
 ### macOS Keychain (secrets)
 
-Service: `cam.rui.backupsynctool`. Accounts: `s3_secret`, `device_token`.
+Service: `cam.rui.backupsynctool`. Config stores opaque `kc1:<account>` handles. New pairing credentials use unique candidate account names so the active handles remain readable until the candidate config is verified and atomically installed.
 
 | Rule | Detail |
 | --- | --- |
-| Store | `security add-generic-password … -A` after deleting any existing row for that account (`src/secret.rs`). `-A` = any app may read without a Keychain UI prompt — required because ad-hoc codesign changes CDHash every local rebuild. |
+| Store | `security add-generic-password … -A` into unique candidate accounts (`src/secret.rs`). `-A` = any app may read without a Keychain UI prompt — required because ad-hoc codesign changes CDHash every local rebuild. Old handles are removed only after atomic config replacement. |
 | Load | CLI `find-generic-password -w` with a **2 s timeout**. On timeout or auth failure, delete the stale item and fail closed (no hang, no password dialog). |
 | Startup | `purge_stale_keychain_handles()` runs before decrypt in `SyncHost::load`. |
 | Local build | `./build-macos.sh` defaults to ad-hoc (`--sign -`). Combined with `-A` storage, rebuild + relaunch must not ask for the login Keychain password. |
@@ -94,7 +94,11 @@ XD detection is optional and checks only:
 
 The app decrypts `Number` and `ClientComercialName` and sends them separately with the detected install/backup paths and suggested customer label. A manually chosen folder does not pretend to be an XD installation. Pairing remains available when detection fails.
 
-The QR popup is a dedicated pairing window (~380×500): title “Scan to pair…”, large QR of the approve URL, status “Waiting for admin approval…”, pairing code, expiry note, approve link, and the active control-plane base. Windows uses Win32 (`pair_qr.rs`); macOS uses a modeless `NSPanel` with the same layout. The client polls until approved/rejected/expired. An approved response must contain `device_uuid`, device token, S3 endpoint/region/bucket/access key/secret, and the admin-approved customer name. Approval is persisted with DPAPI (Windows) or Keychain (macOS) and immediately starts the upload engine. macOS never sends XD detection fields.
+The QR popup is a dedicated pairing window: title “Scan to pair…”, large QR of the approve URL, status “Waiting for admin approval…”, pairing code, expiry note, approve link, active control-plane base, **Cancel**, and **Change Server**. Change Server cancels local polling, validates and persists the new control-plane URL, then creates a fresh request. Windows uses Win32 (`pair_qr.rs`); macOS uses a modeless `NSPanel` with the same workflow. The client polls typed pending/approved/rejected/expired/failed states; transport and malformed response errors are never silently converted to pending.
+
+An approved response must contain `device_uuid`, device token, S3 endpoint/region/bucket/access key/secret, and the admin-approved customer name. Before local activation, the client proves List plus temporary Put/Head/Delete access under `.backupsynctool-validation/`. It stages DPAPI/Keychain secrets, atomically replaces the complete config, then starts the initial upload. Cancellation, rejection, and timeout leave the active local config untouched. The current Laravel backend may already have revoked the old key after an approval, so a failed post-approval validation is shown as **Reconnect required**; true server-side rollback requires the separately planned two-phase activation API.
+
+macOS sends its chosen backup path and a `{hostname}-{folder}` suggestion, but never sends XD licence fields.
 
 Wire contract: `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`.
 
@@ -116,6 +120,9 @@ Agent does not run Windows VM / interactive GUI smoke. Operator:
 - Update the manifest only after S3 verifies the successful object size.
 - Periodically rescan and heal missing/size-mismatched objects.
 - Maximum two concurrent file uploads.
+- Transfer workers emit typed per-file events with actual bytes completed and total. The UI retains at most 200 rows from the current process run and never reconstructs activity from log text.
+- Connection state is independent of transfer state: a running watcher is not displayed as an active upload.
+- Ordinary failures remain visible with **Retry Failed**. S3 authentication/policy failures stop the engine and show **Reconnect required**.
 
 Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use persistent multipart:
 
@@ -136,7 +143,9 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 4. Reject absolute paths, parent traversal, prefixes, NULs, and empty keys.
 5. Stream each object to a `.part` file and atomically rename it on completion.
 6. Preserve relative directories and available source modification times.
-7. Report progress and failed paths. Authentication failures require new pairing.
+7. Report real byte progress and failed paths in the main window. Restore can be cancelled; partial `.part` files are removed. Authentication failures require new pairing.
+
+Restore starts from the secondary tray/menu and focuses the main window. It is not a primary main-window action.
 
 ## Build and verification
 
@@ -170,17 +179,17 @@ python3 assets/render-icons.py   # cairosvg, Pillow, ImageMagick, iconutil
 
 | Action | How |
 | --- | --- |
-| Main window | **Left-click** menubar shield → glance popover **under the status icon** (Cocoa `NSStatusItem` button window frame; status + **Recent uploads** after ~1s + **Open Window…** only). Full titled `NSWindow` via Open Window…. ⌘Q quits |
-| Tray menu | Secondary click (or menu) → **Open Backup Sync Tool…** / **Open Logs** / **Quit Backup Sync**. Left click does **not** show the menu (`set_show_menu_on_left_click(false)`). |
-| Shortcuts | Minimal `NSApp` main menu: **⌘Q** Quit · **⌘W** Close frontmost (status hides to menubar; pair QR closes; popover dismisses) |
+| Main window | Manual launch or **left-click** menubar shield opens the full titled `NSWindow` directly. Closing hides it to the menu bar. |
+| Tray menu | Secondary click → **Open Backup Sync Tool…** / **Restore Backup…** / **Open Logs** / **Control plane URL…** / **Quit Backup Sync**. |
+| Shortcuts | Minimal `NSApp` main menu: **⌘Q** Quit · **⌘W** Close frontmost (status hides to menubar; pair QR closes) |
 | Logs | Tray menu **Open Logs** |
 | Quit | Tray menu **Quit Backup Sync** (also ⌘Q) |
 | Daemon only | `backupsynctool --daemon` |
 
-Menubar: left click → popover under icon; tray menu keeps Open / Logs / Quit. Pairing QR remains a separate `NSPanel` (`notify.rs`). Routine notices use `notify_user()` / tray tips — not `NSAlert` action sheets for primary workflow.
+Pairing QR remains a separate `NSPanel` (`notify.rs`). Routine notices use `notify_user()` / tray tips — not `NSAlert` action sheets for primary workflow. Manual launch shows the main window; LaunchAgent `--daemon` remains hidden.
 
-Config/state: `~/Library/Application Support/BackupSyncTool/` · Secrets: Keychain `cam.rui.backupsynctool` (see Keychain table above).
+Config/state: `~/Library/Application Support/BackupSyncTool/` · Logs: `~/Library/Application Support/BackupSyncTool/logs/` (outside the sealed `.app`) · Secrets: Keychain `cam.rui.backupsynctool` (see Keychain table above).
 
-Checklist: menubar icon · click → glance popover (uploads after 1s) · Open Window full UI · watch folder · pair QR → sync · drop file uploads · quit/relaunch **no Keychain password prompt** (ad-hoc + `-A`) · restore · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
+Checklist: menubar icon · click → full window · watch folder · pair QR / Change Server / Cancel → automatic initial sync · two live filenames with byte percentages · retry ordinary failure · auth pause · quit/relaunch **no Keychain password prompt** (ad-hoc + `-A`) · tray Restore with progress/cancel · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
 
 Limits: not notarized; release assets `backupsynctool.exe` + `backupsynctool-macos-*.tar.gz` on GitHub Releases.

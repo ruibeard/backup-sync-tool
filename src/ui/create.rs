@@ -27,8 +27,24 @@ unsafe fn on_create(hwnd: HWND) {
     let s3_secret = secret::decrypt(&cfg.s3_secret_enc).unwrap_or_default();
     let sync_configured = is_sync_configured(&cfg, &s3_secret);
     let (bridge_icon_pc, bridge_icon_cloud) = load_bridge_icons(hwnd);
+    let initial_app = crate::app::AppSnapshot {
+        connection: if sync_configured {
+            crate::app::ConnectionState::Connected
+        } else {
+            crate::app::ConnectionState::Disconnected
+        },
+        watch_folder: (!cfg.watch_folder.trim().is_empty())
+            .then(|| std::path::PathBuf::from(&cfg.watch_folder)),
+        pair_api_base: cfg.pair_api_base.clone(),
+        start_at_login: cfg.start_with_windows,
+        auto_update: cfg.auto_update,
+        ..crate::app::AppSnapshot::default()
+    };
+    let (app_controller, app_events) = crate::app::AppController::start(initial_app);
+    std::thread::spawn(move || while app_events.recv().is_ok() {});
 
     let state = Box::new(WndState {
+        app: app_controller,
         config: cfg.clone(),
         s3_secret_plain: s3_secret.clone(),
         sync_engine: None,
@@ -46,6 +62,7 @@ unsafe fn on_create(hwnd: HWND) {
         },
         sync_progress_done: 0,
         sync_progress_total: 0,
+        transfer_bytes: Vec::new(),
         sync_last_failed: 0,
         sync_started_at: None,
         sync_anim_frame: 0,
@@ -158,8 +175,7 @@ unsafe fn on_create(hwnd: HWND) {
 
     let watch_for_xd = cfg.watch_folder.clone();
     if !is_paired(&cfg)
-        && (watch_for_xd.trim().is_empty()
-            || crate::xd::is_xd_default_watch_folder(&watch_for_xd))
+        && (watch_for_xd.trim().is_empty() || crate::xd::is_xd_default_watch_folder(&watch_for_xd))
     {
         std::thread::spawn(move || {
             if let Some(detected) = crate::xd::detect_customer_hint() {
@@ -322,30 +338,32 @@ unsafe fn build_ui(
 
     // ── CONTROL PLANE (which Laravel install to pair with) ───────────────────
     {
+        // Hidden compatibility controls: the active server is edited from the
+        // pairing window, not from the main status surface.
         mkstatic(
             hwnd,
             hi,
             IDC_PAIR_API_LABEL,
             "CONTROL PLANE URL",
-            M,
-            y,
-            INNER_W,
-            HDR_H,
+            0,
+            0,
+            1,
+            1,
             hf_hdr,
         );
-        y += HDR_H + 4;
+        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_API_LABEL as i32), SW_HIDE);
         mkedit_cue(
             hwnd,
             hi,
             IDC_PAIR_API_BASE,
             &cfg.pair_api_base,
             "https://backup.rui.cam",
-            M,
-            y,
-            INNER_W,
+            0,
+            0,
+            1,
             hf,
         );
-        y += INP_H + SECT;
+        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32), SW_HIDE);
     }
 
     // ── RECENT ACTIVITY ───────────────────────────────────────────────────────
@@ -355,7 +373,7 @@ unsafe fn build_ui(
             hwnd,
             hi,
             IDC_ACTIVITY_HDR,
-            "RECENT ACTIVITY LOG",
+            "CURRENT ACTIVITY",
             M,
             y,
             INNER_W - sub_w - PAD,
@@ -1051,23 +1069,15 @@ unsafe fn layout_bridge_section(
             place_btn(
                 hwnd,
                 hi,
-                IDC_REFRESH_REMOTE,
-                "Restore",
-                M + layout.refresh_btn_x,
-                layout.btn_y,
-                layout.refresh_btn_w,
-                BRIDGE_BTN_H,
-            );
-            place_btn(
-                hwnd,
-                hi,
                 IDC_PAIR_DEVICE,
                 pair_label,
-                M + layout.refresh_btn_x + layout.refresh_btn_w + PAD,
+                M + layout.pair_btn_x,
                 layout.btn_y,
-                BRIDGE_RECONNECT_BTN_W,
+                layout.pair_btn_w,
                 BRIDGE_BTN_H,
             );
+            // Restore is available from the secondary tray menu.
+            let _ = ShowWindow(GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32), SW_HIDE);
         } else {
             place_btn(
                 hwnd,

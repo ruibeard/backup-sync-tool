@@ -1,6 +1,102 @@
 //! Encrypt/decrypt for S3 secret / device token storage.
 //! Windows: DPAPI. macOS: Keychain (`kc1:<account>` handle in config JSON).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static CANDIDATE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedSecrets {
+    pub device_token_enc: String,
+    pub s3_secret_enc: String,
+}
+
+/// Secrets protected under candidate-only handles. Dropping an uncommitted
+/// candidate removes its macOS Keychain items; Windows candidates are inert
+/// DPAPI ciphertext until their config is atomically installed.
+pub struct CandidateSecrets {
+    protected: ProtectedSecrets,
+    old_device_token_enc: String,
+    old_s3_secret_enc: String,
+    committed: bool,
+}
+
+impl CandidateSecrets {
+    pub fn stage(
+        device_token: &str,
+        s3_secret: &str,
+        old_device_token_enc: &str,
+        old_s3_secret_enc: &str,
+    ) -> Result<Self, String> {
+        crate::logs::register_secret(device_token);
+        crate::logs::register_secret(s3_secret);
+        let nonce = candidate_nonce();
+        let device_account = format!("device_token_candidate_{nonce}");
+        let s3_account = format!("s3_secret_candidate_{nonce}");
+        let device_token_enc = protect(&device_account, device_token)?;
+        let s3_secret_enc = match protect(&s3_account, s3_secret) {
+            Ok(handle) => handle,
+            Err(err) => {
+                remove_handle(&device_token_enc);
+                return Err(err);
+            }
+        };
+        Ok(Self {
+            protected: ProtectedSecrets {
+                device_token_enc,
+                s3_secret_enc,
+            },
+            old_device_token_enc: old_device_token_enc.to_string(),
+            old_s3_secret_enc: old_s3_secret_enc.to_string(),
+            committed: false,
+        })
+    }
+
+    pub fn protected(&self) -> &ProtectedSecrets {
+        &self.protected
+    }
+
+    /// Mark the candidate active only after the new config was saved. Old
+    /// Keychain handles are removed at that point, never before.
+    pub fn commit(mut self) -> ProtectedSecrets {
+        self.committed = true;
+        remove_handle_if_replaced(&self.old_device_token_enc, &self.protected.device_token_enc);
+        remove_handle_if_replaced(&self.old_s3_secret_enc, &self.protected.s3_secret_enc);
+        self.protected.clone()
+    }
+}
+
+impl Drop for CandidateSecrets {
+    fn drop(&mut self) {
+        if !self.committed {
+            remove_handle(&self.protected.device_token_enc);
+            remove_handle(&self.protected.s3_secret_enc);
+        }
+    }
+}
+
+fn candidate_nonce() -> String {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = CANDIDATE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}_{time}_{sequence}", std::process::id())
+}
+
+fn remove_handle_if_replaced(old: &str, new: &str) {
+    if old != new {
+        remove_handle(old);
+    }
+}
+
+#[cfg(windows)]
+fn remove_handle(_encoded: &str) {}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn remove_handle(_encoded: &str) {}
+
 #[cfg(windows)]
 mod dpapi {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -149,6 +245,15 @@ fn kc_delete(account: &str) {
 }
 
 #[cfg(target_os = "macos")]
+fn remove_handle(encoded: &str) {
+    if let Some(account) = encoded.strip_prefix(KC_PREFIX) {
+        if !account.is_empty() {
+            kc_delete(account);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn kc_store(account: &str, plaintext: &str) -> Result<String, String> {
     use std::process::Command;
     // Delete first: `-U` can leave old CDHash-bound ACL on existing items.
@@ -184,7 +289,7 @@ fn kc_load_account(account: &str) -> Result<String, String> {
         return Err("empty Keychain account in secret handle".into());
     }
 
-    let mut child = Command::new("security")
+    let child = Command::new("security")
         .args([
             "find-generic-password",
             "-s",
@@ -209,15 +314,12 @@ fn kc_load_account(account: &str) -> Result<String, String> {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => return Err(format!("Keychain get failed: {e}")),
         Err(_) => {
-            let _ = Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
             if kc_item_exists(account) {
                 kc_delete(account);
             }
             return Err(
-                "Keychain get timed out (stale ACL item removed — pair again if sync stops)"
-                    .into(),
+                "Keychain get timed out (stale ACL item removed — pair again if sync stops)".into(),
             );
         }
     };
@@ -281,4 +383,14 @@ pub fn decrypt(encoded: &str) -> Result<String, String> {
         return Ok(String::new());
     }
     kc_load(encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::candidate_nonce;
+
+    #[test]
+    fn candidate_accounts_are_unique() {
+        assert_ne!(candidate_nonce(), candidate_nonce());
+    }
 }

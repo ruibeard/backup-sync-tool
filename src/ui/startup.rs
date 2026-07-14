@@ -5,7 +5,7 @@ unsafe fn apply_startup(cfg: &Config) {
     if RegOpenKeyExW(HKEY_CURRENT_USER, key, Some(0), KEY_SET_VALUE, &mut hk).is_ok() {
         if cfg.start_with_windows {
             if let Ok(exe) = std::env::current_exe() {
-                let command = format!("\"{}\"", exe.to_string_lossy());
+                let command = format!("\"{}\" --background", exe.to_string_lossy());
                 let v: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
                 let _ = RegSetValueExW(
                     hk,

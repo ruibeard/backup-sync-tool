@@ -677,6 +677,7 @@ pub fn is_transient(err: &TransportError) -> bool {
                 || lower.contains("temporarily")
         }
         TransportError::NotFound
+        | TransportError::Cancelled
         | TransportError::TooLarge { .. }
         | TransportError::AuthFailed(_)
         | TransportError::SourceChanged => false,

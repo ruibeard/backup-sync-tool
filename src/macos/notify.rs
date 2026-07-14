@@ -3,10 +3,12 @@
 use dispatch::Queue;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{
+    define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+};
 use objc2_app_kit::{
     NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
-    NSBezelStyle, NSButton, NSFont, NSImage, NSImageView, NSImageScaling, NSPanel, NSTextAlignment,
+    NSBezelStyle, NSButton, NSFont, NSImage, NSImageScaling, NSImageView, NSPanel, NSTextAlignment,
     NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
@@ -15,7 +17,9 @@ use objc2_foundation::{
 use qrcodegen::{QrCode, QrCodeEcc};
 use std::cell::RefCell;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 /// NSPanel is !Send; only touch on main queue.
@@ -28,6 +32,14 @@ unsafe impl Send for PairPanel {}
 unsafe impl Sync for PairPanel {}
 
 static PAIR_PANEL: Mutex<Option<PairPanel>> = Mutex::new(None);
+static EXTERNAL_PICKER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PAIR_ACTION: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairPanelAction {
+    Cancel,
+    ChangeServer,
+}
 
 struct PairLinkIvars {
     url: RefCell<String>,
@@ -49,6 +61,18 @@ define_class!(
             if let Some(nsurl) = NSURL::URLWithString(&NSString::from_str(&url)) {
                 let _ = NSWorkspace::sharedWorkspace().openURL(&nsurl);
             }
+        }
+
+        #[unsafe(method(actCancelPair:))]
+        fn act_cancel_pair(&self, _: Option<&AnyObject>) {
+            PAIR_ACTION.store(1, Ordering::SeqCst);
+            close_pair_panel_inner();
+        }
+
+        #[unsafe(method(actChangeServer:))]
+        fn act_change_server(&self, _: Option<&AnyObject>) {
+            PAIR_ACTION.store(2, Ordering::SeqCst);
+            close_pair_panel_inner();
         }
     }
 );
@@ -86,15 +110,18 @@ fn write_qr_png(approve_url: &str) -> Result<Vec<u8>, String> {
     }
     let mut buf = Vec::new();
     image::DynamicImage::ImageRgb8(img)
-        .write_to(
-            &mut std::io::Cursor::new(&mut buf),
-            image::ImageFormat::Png,
-        )
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .map_err(|e| format!("QR PNG encode: {e}"))?;
     Ok(buf)
 }
 
-fn label(mtm: MainThreadMarker, text: &str, frame: NSRect, size: f64, bold: bool) -> Retained<NSTextField> {
+fn label(
+    mtm: MainThreadMarker,
+    text: &str,
+    frame: NSRect,
+    size: f64,
+    bold: bool,
+) -> Retained<NSTextField> {
     let field = NSTextField::new(mtm);
     field.setStringValue(&NSString::from_str(text));
     field.setEditable(false);
@@ -120,6 +147,7 @@ pub fn pair_started(code: &str, approve_url: &str, api_base: &str) {
     let url = approve_url.to_string();
     let api_base = api_base.to_string();
     let png = write_qr_png(approve_url).ok();
+    PAIR_ACTION.store(0, Ordering::SeqCst);
 
     Queue::main().exec_async(move || {
         show_pair_panel(&code, &url, &api_base, png.as_deref());
@@ -138,12 +166,12 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
 
     // Match Windows PAIR_QR_CLIENT ~380×500.
     let width = 380.0;
-    let height = 520.0;
+    let height = 560.0;
     let rect = NSRect {
         origin: NSPoint { x: 0.0, y: 0.0 },
         size: NSSize { width, height },
     };
-    let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
+    let style = NSWindowStyleMask::Titled;
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
         NSPanel::alloc(mtm),
         rect,
@@ -197,7 +225,7 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
         mtm,
         "Waiting for admin approval...",
         NSRect {
-            origin: NSPoint { x: 18.0, y: 150.0 },
+            origin: NSPoint { x: 18.0, y: 188.0 },
             size: NSSize {
                 width: width - 36.0,
                 height: 22.0,
@@ -211,7 +239,7 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
         mtm,
         &format!("Code: {code}"),
         NSRect {
-            origin: NSPoint { x: 18.0, y: 128.0 },
+            origin: NSPoint { x: 18.0, y: 160.0 },
             size: NSSize {
                 width: width - 36.0,
                 height: 28.0,
@@ -225,7 +253,7 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
         mtm,
         &format!("Server: {api_base}"),
         NSRect {
-            origin: NSPoint { x: 18.0, y: 106.0 },
+            origin: NSPoint { x: 18.0, y: 138.0 },
             size: NSSize {
                 width: width - 36.0,
                 height: 18.0,
@@ -237,9 +265,9 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
 
     content.addSubview(&label(
         mtm,
-        "This code expires in 5 minutes · copied to clipboard",
+        "This code expires in 10 minutes · copied to clipboard",
         NSRect {
-            origin: NSPoint { x: 18.0, y: 84.0 },
+            origin: NSPoint { x: 18.0, y: 116.0 },
             size: NSSize {
                 width: width - 36.0,
                 height: 20.0,
@@ -262,7 +290,7 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
     link.setBezelStyle(NSBezelStyle::AccessoryBar);
     link.setBordered(false);
     link.setFrame(NSRect {
-        origin: NSPoint { x: 18.0, y: 32.0 },
+        origin: NSPoint { x: 18.0, y: 72.0 },
         size: NSSize {
             width: width - 36.0,
             height: 40.0,
@@ -272,10 +300,48 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
     link.setFont(Some(&font));
     link.setContentTintColor(Some(&crate::macos::brand::green()));
     unsafe {
-        link.setTarget(Some(&*( &*link_target as *const PairLinkTarget as *const AnyObject)));
+        link.setTarget(Some(
+            &*(&*link_target as *const PairLinkTarget as *const AnyObject),
+        ));
         link.setAction(Some(sel!(actOpenLink:)));
     }
     content.addSubview(&link);
+
+    let change = NSButton::new(mtm);
+    change.setTitle(&NSString::from_str("Change Server…"));
+    change.setBezelStyle(NSBezelStyle::Push);
+    change.setFrame(NSRect {
+        origin: NSPoint { x: 54.0, y: 28.0 },
+        size: NSSize {
+            width: 130.0,
+            height: 28.0,
+        },
+    });
+    unsafe {
+        change.setTarget(Some(
+            &*(&*link_target as *const PairLinkTarget as *const AnyObject),
+        ));
+        change.setAction(Some(sel!(actChangeServer:)));
+    }
+    content.addSubview(&change);
+
+    let cancel = NSButton::new(mtm);
+    cancel.setTitle(&NSString::from_str("Cancel"));
+    cancel.setBezelStyle(NSBezelStyle::Push);
+    cancel.setFrame(NSRect {
+        origin: NSPoint { x: 196.0, y: 28.0 },
+        size: NSSize {
+            width: 130.0,
+            height: 28.0,
+        },
+    });
+    unsafe {
+        cancel.setTarget(Some(
+            &*(&*link_target as *const PairLinkTarget as *const AnyObject),
+        ));
+        cancel.setAction(Some(sel!(actCancelPair:)));
+    }
+    content.addSubview(&cancel);
 
     panel.center();
     panel.makeKeyAndOrderFront(None);
@@ -283,10 +349,7 @@ fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[
     crate::logs::append("pair panel showing (Windows-style)");
 
     if let Ok(mut guard) = PAIR_PANEL.lock() {
-        *guard = Some(PairPanel {
-            panel,
-            link_target,
-        });
+        *guard = Some(PairPanel { panel, link_target });
     }
 }
 
@@ -299,7 +362,10 @@ pub fn pair_finished() {
 
 /// Close pair QR panel if showing (Cmd+W / finish).
 pub fn close_pair_panel() {
-    let run = || close_pair_panel_inner();
+    let run = || {
+        PAIR_ACTION.store(1, Ordering::SeqCst);
+        close_pair_panel_inner();
+    };
     if MainThreadMarker::new().is_some() {
         run();
     } else {
@@ -308,10 +374,15 @@ pub fn close_pair_panel() {
 }
 
 pub fn pair_panel_is_open() -> bool {
-    PAIR_PANEL
-        .lock()
-        .map(|g| g.is_some())
-        .unwrap_or(false)
+    PAIR_PANEL.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+pub fn take_pair_panel_action() -> Option<PairPanelAction> {
+    match PAIR_ACTION.swap(0, Ordering::SeqCst) {
+        1 => Some(PairPanelAction::Cancel),
+        2 => Some(PairPanelAction::ChangeServer),
+        _ => None,
+    }
 }
 
 pub fn is_pair_panel_window(window: &NSWindow) -> bool {
@@ -338,10 +409,19 @@ fn close_pair_panel_inner() {
     }
 }
 
-fn restore_accessory_policy() {
+pub(crate) fn restore_accessory_policy() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    // Status window needs Regular while visible — flipping to Accessory here
+    // can force-close it and SIGABRT in window teardown.
+    if super::status_window::is_visible() {
+        return;
+    }
+    let keep_pair = PAIR_PANEL.lock().ok().map(|g| g.is_some()).unwrap_or(false);
+    if keep_pair {
+        return;
+    }
     NSApplication::sharedApplication(mtm)
         .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 }
@@ -355,6 +435,83 @@ pub fn alert(title: &str, message: &str) {
     } else {
         Queue::main().exec_async(move || alert_inner(&title, &message));
     }
+}
+
+/// Folder picker via AppleScript — never touches our AppKit windows.
+///
+/// AppKit window teardown used to abort while the picker was open. Keeping the
+/// dialog in the `osascript` process isolates it from our retained windows.
+pub fn pick_folder(prompt: &str) -> Option<PathBuf> {
+    if EXTERNAL_PICKER_ACTIVE.swap(true, Ordering::SeqCst) {
+        crate::logs::append("pick_folder: ignored duplicate request");
+        return None;
+    }
+    struct ResetPicker;
+    impl Drop for ResetPicker {
+        fn drop(&mut self) {
+            EXTERNAL_PICKER_ACTIVE.store(false, Ordering::SeqCst);
+        }
+    }
+    let _reset = ResetPicker;
+
+    match pick_folder_via_osascript(prompt) {
+        PickerResult::Picked(path) => Some(path),
+        PickerResult::Cancelled | PickerResult::Failed => None,
+    }
+}
+
+enum PickerResult {
+    Picked(PathBuf),
+    Cancelled,
+    Failed,
+}
+
+fn pick_folder_via_osascript(prompt: &str) -> PickerResult {
+    let escaped = escape_as_string(prompt);
+    let script = format!(
+        r#"try
+  set theFolder to choose folder with prompt "{escaped}"
+  return "BST_PICKED:" & POSIX path of theFolder
+on error errorMessage number errorNumber
+  if errorNumber is -128 then return "BST_CANCELLED"
+  return "BST_FAILED:" & errorNumber & ":" & errorMessage
+end try"#
+    );
+    run_osascript_path(&script)
+}
+
+fn escape_as_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn run_osascript_path(script: &str) -> PickerResult {
+    let out = match Command::new("osascript").arg("-e").arg(script).output() {
+        Ok(o) => o,
+        Err(err) => {
+            crate::logs::append(&format!("pick_folder: spawn failed: {err}"));
+            return PickerResult::Failed;
+        }
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        crate::logs::append(&format!(
+            "pick_folder: failed status={}: {}",
+            out.status,
+            err.trim()
+        ));
+        return PickerResult::Failed;
+    }
+    let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if result == "BST_CANCELLED" {
+        return PickerResult::Cancelled;
+    }
+    if let Some(path) = result.strip_prefix("BST_PICKED:") {
+        if !path.is_empty() {
+            return PickerResult::Picked(PathBuf::from(path));
+        }
+    }
+    crate::logs::append(&format!("pick_folder: {result}"));
+    PickerResult::Failed
 }
 
 /// Modal text prompt (NSAlert + NSTextField). Safe from a background thread via channel.
@@ -407,15 +564,7 @@ fn prompt_url_inner(title: &str, message: &str, default: &str) -> Option<String>
     window.makeKeyAndOrderFront(None);
     window.orderFrontRegardless();
     let response = alert.runModal();
-
-    let keep = PAIR_PANEL
-        .lock()
-        .ok()
-        .map(|g| g.is_some())
-        .unwrap_or(false);
-    if !keep {
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    }
+    restore_accessory_policy();
 
     if response != NSAlertFirstButtonReturn {
         return None;
@@ -443,14 +592,7 @@ fn alert_inner(title: &str, message: &str) {
     window.makeKeyAndOrderFront(None);
     window.orderFrontRegardless();
     let _ = alert.runModal();
-    let keep = PAIR_PANEL
-        .lock()
-        .ok()
-        .map(|g| g.is_some())
-        .unwrap_or(false);
-    if !keep {
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    }
+    restore_accessory_policy();
 }
 
 pub fn pair_watch_folder_required() {
@@ -473,4 +615,3 @@ pub fn pair_failed(message: &str) {
         });
     }
 }
-

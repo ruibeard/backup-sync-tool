@@ -16,6 +16,7 @@ unsafe fn show_pair_qr_window(parent: HWND) {
         code: String::new(),
         approve_url: String::new(),
         ready: false,
+        editing_server: false,
         hfont,
         hfont_b,
         hfont_code,
@@ -148,6 +149,12 @@ unsafe extern "system" fn pair_qr_wnd_proc(
             );
             LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
         }
+        WM_CTLCOLOREDIT => {
+            let hdc = HDC(wp.0 as *mut _);
+            SetBkColor(hdc, COLORREF(C_INPUT_BG));
+            SetTextColor(hdc, COLORREF(C_LABEL));
+            LRESULT(GetStockObject(WHITE_BRUSH).0 as isize)
+        }
         WM_DRAWITEM => on_draw_item(lp),
         WM_COMMAND => {
             let id = (wp.0 & 0xFFFF) as u16;
@@ -171,6 +178,7 @@ unsafe extern "system" fn pair_qr_wnd_proc(
                     cancel_pairing_from_popup(st.parent);
                     DestroyWindow(hwnd).ok();
                 }
+                IDC_PAIR_QR_CHANGE_SERVER => pair_qr_change_server(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -242,8 +250,8 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
     mkstatic_align(
         hwnd,
         hi,
-        0,
-        "This code expires in 5 minutes",
+        IDC_PAIR_QR_EXPIRY,
+        "This code expires in 10 minutes",
         margin,
         412,
         PAIR_QR_CLIENT_W - margin * 2,
@@ -263,17 +271,127 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         st.hfont,
         SS_CENTER | SS_NOTIFY,
     );
+    mkedit_cue(
+        hwnd,
+        hi,
+        IDC_PAIR_QR_SERVER_EDIT,
+        &st.api_base,
+        "https://backup.example.com",
+        margin,
+        432,
+        PAIR_QR_CLIENT_W - margin * 2,
+        st.hfont,
+    );
+    ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_SERVER_EDIT as i32), SW_HIDE);
+    let button_gap = 10;
+    let button_w = 128;
+    let buttons_w = button_w * 2 + button_gap;
+    let buttons_x = (PAIR_QR_CLIENT_W - buttons_w) / 2;
+    mkbtn_grey(
+        hwnd,
+        hi,
+        IDC_PAIR_QR_CHANGE_SERVER,
+        "Change Server",
+        buttons_x,
+        472,
+        button_w,
+        ACTION_BTN_H,
+        st.hfont,
+    );
     mkbtn_grey(
         hwnd,
         hi,
         IDC_PAIR_QR_CANCEL,
         "Cancel",
-        (PAIR_QR_CLIENT_W - ACTION_BTN_W) / 2,
+        buttons_x + button_w + button_gap,
         472,
-        ACTION_BTN_W,
+        button_w,
         ACTION_BTN_H,
         st.hfont,
     );
+}
+
+unsafe fn pair_qr_change_server(hwnd: HWND) {
+    if !pair_qr_state(hwnd).editing_server {
+        pair_qr_state(hwnd).editing_server = true;
+        pair_qr_state(hwnd).ready = false;
+        let parent = pair_qr_state(hwnd).parent;
+        // Changing servers immediately retires the old request. Bump the
+        // generation so its eventual cancellation result cannot close this
+        // editor while the user is typing.
+        cancel_pairing_from_popup(parent);
+        if !parent.0.is_null() && IsWindow(parent).as_bool() {
+            let parent_state = stmut(parent);
+            parent_state.pair_id = parent_state.pair_id.wrapping_add(1);
+            parent_state.pair_cancel = None;
+        }
+        let edit = GetDlgItem(hwnd, IDC_PAIR_QR_SERVER_EDIT as i32);
+        let current = pair_qr_state(hwnd).api_base.clone();
+        let _ = SetWindowTextW(edit, &hstring(&current));
+        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_LINK as i32), SW_HIDE);
+        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_CODE as i32), SW_HIDE);
+        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_EXPIRY as i32), SW_HIDE);
+        ShowWindow(edit, SW_SHOW);
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_PAIR_QR_TITLE as i32),
+            &hstring("Change control plane server"),
+        );
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_PAIR_QR_STATUS as i32),
+            &hstring("Enter the control plane URL, then restart pairing."),
+        );
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_PAIR_QR_CHANGE_SERVER as i32),
+            &hstring("Restart Pairing"),
+        );
+        let _ = SetFocus(Some(edit));
+        SendMessageW(edit, EM_SETSEL, WPARAM(0), LPARAM(-1));
+        InvalidateRect(hwnd, None, TRUE);
+        return;
+    }
+
+    let raw = gettext(hwnd, IDC_PAIR_QR_SERVER_EDIT);
+    let normalized = match crate::config::normalize_pair_api_base(&raw) {
+        Ok(value) => value,
+        Err(err) => {
+            let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_PAIR_QR_STATUS as i32), &hstring(&err));
+            return;
+        }
+    };
+    let parent = pair_qr_state(hwnd).parent;
+    if parent.0.is_null() || !IsWindow(parent).as_bool() {
+        return;
+    }
+
+    {
+        let parent_state = stmut(parent);
+        parent_state.config.pair_api_base = normalized.clone();
+        parent_state
+            .app
+            .send(crate::app::AppCommand::SetPairApiBase(normalized.clone()))
+            .ok();
+        let _ = SetWindowTextW(
+            GetDlgItem(parent, IDC_PAIR_API_BASE as i32),
+            &hstring(&normalized),
+        );
+        if let Err(err) = crate::config::save(&parent_state.config) {
+            let _ = SetWindowTextW(
+                GetDlgItem(hwnd, IDC_PAIR_QR_STATUS as i32),
+                &hstring(&format!("Could not save server: {err}")),
+            );
+            return;
+        }
+    }
+    logs::append(&format!("Control plane URL set: {normalized}"));
+    cancel_pairing_from_popup(parent);
+    DestroyWindow(hwnd).ok();
+    PostMessageW(
+        parent,
+        WM_COMMAND,
+        WPARAM(IDC_PAIR_DEVICE as usize),
+        LPARAM(0),
+    )
+    .ok();
 }
 
 unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
@@ -303,7 +421,12 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
         SetTextColor(hdc, COLORREF(C_LABEL));
         SetBkMode(hdc, TRANSPARENT);
         SelectObject(hdc, st.hfont_b);
-        let mut text: Vec<u16> = "Generating QR code...".encode_utf16().collect();
+        let placeholder = if st.editing_server {
+            "The previous pairing request was cancelled"
+        } else {
+            "Generating QR code..."
+        };
+        let mut text: Vec<u16> = placeholder.encode_utf16().collect();
         DrawTextW(
             hdc,
             &mut text,

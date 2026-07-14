@@ -381,6 +381,18 @@ unsafe fn ensure_or_prompt_watch_folder(hwnd: HWND) -> bool {
     }
 }
 
+fn transfer_events_for_window(raw: isize) -> crate::sync::TransferEventFn {
+    Arc::new(move |event| unsafe {
+        PostMessageW(
+            HWND(raw as *mut _),
+            WM_APP_TRANSFER_EVENT,
+            WPARAM(0),
+            LPARAM(Box::into_raw(Box::new(event)) as isize),
+        )
+        .ok();
+    })
+}
+
 /// Stop any running engine and start a new one when credentials and folders are set.
 unsafe fn do_retry_failed_uploads(hwnd: HWND) {
     read_ctrls(hwnd, stmut(hwnd));
@@ -451,6 +463,7 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
         )
         .ok();
     });
+    let events = transfer_events_for_window(raw);
 
     std::thread::spawn(move || {
         activity(crate::sync::ActivityInfo {
@@ -460,8 +473,15 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
             failed: 0,
             failed_paths: Vec::new(),
         });
-        let batch =
-            crate::sync::retry_uploads(&cfg, transport, &paths, &log, &activity, &auth_failed);
+        let batch = crate::sync::retry_uploads_with_events(
+            &cfg,
+            transport,
+            &paths,
+            &log,
+            &activity,
+            &auth_failed,
+            events,
+        );
         activity(crate::sync::ActivityInfo {
             state: crate::sync::ActivityState::Idle,
             completed: batch.succeeded,
@@ -557,9 +577,10 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
         )
         .ok();
     });
+    let events = transfer_events_for_window(raw);
 
     std::thread::spawn(move || {
-        let result = crate::sync::restore_customer_backup(
+        let result = crate::sync::restore_customer_backup_with_events(
             &cfg,
             transport,
             Path::new(&destination_parent),
@@ -567,6 +588,7 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
             &log,
             &activity,
             &auth_failed,
+            events,
         );
         match result {
             Ok(path) => log(format!("Restore saved to {}", path.display())),
@@ -648,8 +670,16 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
         )
         .ok();
     });
+    let events = transfer_events_for_window(raw);
 
-    match crate::sync::SyncEngine::start(cfg.clone(), transport, log, activity, auth_failed) {
+    match crate::sync::SyncEngine::start_with_events(
+        cfg.clone(),
+        transport,
+        log,
+        activity,
+        auth_failed,
+        events,
+    ) {
         Ok(engine) => {
             stmut(hwnd).sync_engine = Some(engine);
             let started = format!("Sync engine started for {}", cfg.watch_folder);

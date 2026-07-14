@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+static CONFIG_SAVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
@@ -194,8 +197,64 @@ pub fn load() -> Config {
 }
 
 pub fn save(cfg: &Config) -> std::io::Result<()> {
+    let _guard = CONFIG_SAVE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let data = serde_json::to_string_pretty(cfg).expect("serialise config");
-    std::fs::write(config_path(), data)
+    let path = config_path();
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, data)?;
+    if let Err(err) = replace_file(&temporary, &path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let from = HSTRING::from(temporary.as_os_str());
+    let to = HSTRING::from(destination.as_os_str());
+    unsafe {
+        MoveFileExW(
+            &from,
+            &to,
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|_| std::io::Error::last_os_error())
+    }
+}
+
+/// Protect candidate credentials and install the complete v2 config as one
+/// local transaction. Existing macOS Keychain handles remain active until the
+/// config rename succeeds; a failed save removes only candidate handles.
+pub fn save_pairing_candidate(
+    mut candidate: Config,
+    device_token: &str,
+    s3_secret: &str,
+) -> Result<Config, String> {
+    let staged = crate::secret::CandidateSecrets::stage(
+        device_token,
+        s3_secret,
+        &candidate.device_token_enc,
+        &candidate.s3_secret_enc,
+    )?;
+    candidate.device_token_enc = staged.protected().device_token_enc.clone();
+    candidate.s3_secret_enc = staged.protected().s3_secret_enc.clone();
+    candidate.schema_version = 2;
+    save(&candidate).map_err(|err| format!("Pairing succeeded but save failed: {err}"))?;
+    let _ = staged.commit();
+    Ok(candidate)
 }
 
 #[cfg(test)]

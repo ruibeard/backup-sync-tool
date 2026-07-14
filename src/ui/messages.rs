@@ -5,6 +5,82 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
     LRESULT(0)
 }
 
+unsafe fn on_app_transfer_event(hwnd: HWND, lp: LPARAM) -> LRESULT {
+    let event = Box::from_raw(lp.0 as *mut crate::sync::TransferEvent);
+    let _ = stmut(hwnd)
+        .app
+        .send(crate::app::AppCommand::Transfer((*event).clone()));
+    let direction = match event.kind {
+        crate::sync::TransferKind::Upload => "upload",
+        crate::sync::TransferKind::Download | crate::sync::TransferKind::Restore => "download",
+    };
+    let key = format!("{direction}:{}", event.relative_path);
+    {
+        let st = stmut(hwnd);
+        let row = st.transfer_bytes.iter_mut().find(|row| row.key == key);
+        if let Some(row) = row {
+            row.transferred = if event.state == crate::sync::TransferState::Started {
+                event.transferred.min(event.total)
+            } else {
+                row.transferred.max(event.transferred).min(event.total)
+            };
+            row.total = event.total;
+        } else {
+            st.transfer_bytes.push(TransferByteState {
+                key,
+                transferred: event.transferred.min(event.total),
+                total: event.total,
+            });
+            if st.transfer_bytes.len() > crate::app::MAX_CURRENT_RUN_ACTIVITY {
+                st.transfer_bytes.remove(0);
+            }
+        }
+    }
+
+    let percent = if event.total > 0 {
+        ((event.transferred.min(event.total) * 100) / event.total).min(100) as u8
+    } else {
+        0
+    };
+    let message = match event.state {
+        crate::sync::TransferState::Started => {
+            if direction == "upload" {
+                format!("Uploading: {}", event.relative_path)
+            } else {
+                format!("Downloading: {}", event.relative_path)
+            }
+        }
+        crate::sync::TransferState::Progress => {
+            if direction == "upload" {
+                format!("Upload progress: {}|{percent}", event.relative_path)
+            } else {
+                format!("Download progress: {}|{percent}", event.relative_path)
+            }
+        }
+        crate::sync::TransferState::Completed => {
+            if direction == "upload" {
+                format!("Uploaded: {}", event.relative_path)
+            } else {
+                format!("Downloaded: {}", event.relative_path)
+            }
+        }
+        crate::sync::TransferState::Failed => {
+            let detail = event.error.as_deref().unwrap_or("Transfer failed");
+            if direction == "upload" {
+                format!("Upload failed {}: {detail}", event.relative_path)
+            } else {
+                format!("! Restore failed {}: {detail}", event.relative_path)
+            }
+        }
+        crate::sync::TransferState::Cancelled => {
+            format!("! Transfer cancelled: {}", event.relative_path)
+        }
+    };
+    apply_activity_log(hwnd, &message);
+    invalidate_bridge(hwnd);
+    LRESULT(0)
+}
+
 unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let progress = if lp.0 != 0 {
         *Box::from_raw(lp.0 as *mut (usize, usize, usize, Vec<String>))
@@ -29,6 +105,14 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let was_syncing = st.sync_status_state == crate::sync::ActivityState::Syncing as usize;
     let is_syncing = wp.0 == crate::sync::ActivityState::Syncing as usize;
     let is_busy = wp.0 == crate::sync::ActivityState::Checking as usize || is_syncing;
+    if is_busy && !was_busy {
+        st.transfer_bytes.clear();
+    }
+    let _ = st.app.send(if is_busy {
+        crate::app::AppCommand::ScanStarted
+    } else {
+        crate::app::AppCommand::ScanFinished
+    });
     st.sync_status_state = wp.0;
     st.sync_progress_done = progress.0;
     st.sync_progress_total = progress.1;
@@ -159,6 +243,9 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
 
 unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
     let st = stmut(hwnd);
+    let _ = st.app.send(crate::app::AppCommand::AuthFailed(
+        "S3 credentials or policy were rejected.".into(),
+    ));
     if st.auth_failure_notified {
         return LRESULT(0);
     }
@@ -192,10 +279,25 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         }
         restore_pair_idle_controls(hwnd);
         if err.message.is_empty() {
+            stmut(hwnd).app.send(crate::app::AppCommand::CancelPairing).ok();
             restore_server_status_after_pair_cancel(hwnd);
             return LRESULT(0);
         }
+        if err.approval_received && is_paired(&stmut(hwnd).config) {
+            logs::append(&format!(
+                "Approved reconnect could not be activated: {}",
+                err.message
+            ));
+            return on_app_auth_failed(hwnd);
+        }
         set_status_strip_text(hwnd, "Pair failed");
+        stmut(hwnd)
+            .app
+            .send(crate::app::AppCommand::PairFailed {
+                message: err.message.clone(),
+                retryable: true,
+            })
+            .ok();
         notify_user_status(hwnd, "Pair failed", C_RED, &err.message);
         let _ = SetForegroundWindow(hwnd);
         return LRESULT(0);
@@ -205,7 +307,9 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if pair.pair_id != stmut(hwnd).pair_id {
         return LRESULT(0);
     }
+    stmut(hwnd).app.send(crate::app::AppCommand::PairApproved).ok();
     let prior_config = stmut(hwnd).config.clone();
+    let prior_was_paired = is_paired(&prior_config);
     {
         let st = stmut(hwnd);
         st.pair_cancel = None;
@@ -230,18 +334,6 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let mut candidate_config = stmut(hwnd).config.clone();
     stmut(hwnd).config = prior_config;
 
-    candidate_config.device_token_enc = match secret::encrypt(&pair.device_token) {
-        Ok(enc) => enc,
-        Err(e) => {
-            notify_user_status(
-                hwnd,
-                "Pair failed",
-                C_RED,
-                &format!("Device token encrypt error: {e}"),
-            );
-            return LRESULT(0);
-        }
-    };
     candidate_config.schema_version = 2;
     candidate_config.device_uuid = pair.device_uuid.clone();
     candidate_config.transport = "s3".to_string();
@@ -256,18 +348,6 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     candidate_config.s3_path_style = pair.s3_path_style;
     candidate_config.s3_prefix = pair.s3_prefix.clone();
     candidate_config.parallel_uploads = 2;
-    candidate_config.s3_secret_enc = match secret::encrypt(&pair.s3_secret_key) {
-        Ok(enc) => enc,
-        Err(e) => {
-            notify_user_status(
-                hwnd,
-                "Pair failed",
-                C_RED,
-                &format!("S3 secret encrypt error: {e}"),
-            );
-            return LRESULT(0);
-        }
-    };
     let candidate_s3_secret_plain = pair.s3_secret_key.clone();
 
     candidate_config.remote_folder = pair.remote_folder.clone();
@@ -275,21 +355,30 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     candidate_config.credential_profile_id = pair.credential_profile_id;
     candidate_config.credential_version = pair.credential_version;
 
-    if let Err(e) = crate::config::save(&candidate_config) {
-        notify_user_status(
-            hwnd,
-            "Save failed",
-            C_RED,
-            &format!("Pairing succeeded but save failed: {e}"),
-        );
-        return LRESULT(0);
-    }
+    let candidate_config = match crate::config::save_pairing_candidate(
+        candidate_config,
+        &pair.device_token,
+        &pair.s3_secret_key,
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            logs::append(&format!("Approved reconnect save failed: {e}"));
+            if prior_was_paired {
+                return on_app_auth_failed(hwnd);
+            }
+            notify_user_status(hwnd, "Save failed", C_RED, &e);
+            return LRESULT(0);
+        }
+    };
     {
         let st = stmut(hwnd);
         st.config = candidate_config;
         st.s3_secret_plain = candidate_s3_secret_plain;
         st.remote_folder_from_xd = false;
         st.auth_failure_notified = false;
+        st.app
+            .send(crate::app::AppCommand::ConnectionValidated)
+            .ok();
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
             &hstring(&pair.remote_folder),
@@ -354,6 +443,15 @@ unsafe fn on_app_pair_started(hwnd: HWND, lp: LPARAM) -> LRESULT {
     if started.pair_id != stmut(hwnd).pair_id {
         return LRESULT(0);
     }
+    let api_base = stmut(hwnd).config.pair_api_base.clone();
+    stmut(hwnd)
+        .app
+        .send(crate::app::AppCommand::PairStarted {
+            code: started.code.clone(),
+            approve_url: started.approve_url.clone(),
+            api_base,
+        })
+        .ok();
     update_pair_qr_window(hwnd, &started.code, &started.approve_url);
     LRESULT(0)
 }

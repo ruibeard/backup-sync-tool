@@ -6,6 +6,7 @@
 // `src/ui` (Windows-only), so macOS release builds would spam dead_code noise.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+mod app;
 mod config;
 mod logs;
 mod pairing;
@@ -38,7 +39,9 @@ fn main() {
         FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
     };
 
-    let start_minimized = !std::env::args().any(|arg| arg == "--show");
+    // Manual launches show the full status window. Only an explicit startup
+    // launch requests background mode; `--show` remains accepted implicitly.
+    let start_minimized = std::env::args().any(|arg| arg == "--background");
     unsafe {
         if OpenMutexW(MUTEX_ALL_ACCESS, false, w!("BackupSyncToolSingleton")).is_ok() {
             let hwnd = FindWindowW(ui::CLASS_NAME, None).unwrap_or_default();

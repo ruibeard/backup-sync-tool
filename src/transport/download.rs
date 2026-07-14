@@ -1,6 +1,6 @@
 // Shared streamed download: write to destination.part, then atomically rename.
 
-use crate::transport::TransportError;
+use crate::transport::{TransferControl, TransportError};
 use std::fs::{self, File, FileTimes};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,9 +9,23 @@ use std::time::{Duration, UNIX_EPOCH};
 const STREAM_BUF: usize = 64 * 1024;
 
 pub fn stream_to_atomic_file<R: Read>(
+    reader: R,
+    destination: &Path,
+    expected_size: Option<u64>,
+) -> Result<u64, TransportError> {
+    stream_to_atomic_file_with_control(
+        reader,
+        destination,
+        expected_size,
+        &TransferControl::default(),
+    )
+}
+
+pub fn stream_to_atomic_file_with_control<R: Read>(
     mut reader: R,
     destination: &Path,
     expected_size: Option<u64>,
+    control: &TransferControl,
 ) -> Result<u64, TransportError> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|e| TransportError::Other(e.to_string()))?;
@@ -23,8 +37,12 @@ pub fn stream_to_atomic_file<R: Read>(
             File::create(&temp_path).map_err(|e| TransportError::Other(e.to_string()))?;
         let mut buf = vec![0u8; STREAM_BUF];
         let mut written = 0u64;
+        let total = expected_size.unwrap_or(0);
+        control.check_cancelled()?;
+        control.report(0, total);
 
         loop {
+            control.check_cancelled()?;
             let n = reader
                 .read(&mut buf)
                 .map_err(|e| TransportError::Other(e.to_string()))?;
@@ -34,6 +52,7 @@ pub fn stream_to_atomic_file<R: Read>(
             file.write_all(&buf[..n])
                 .map_err(|e| TransportError::Other(e.to_string()))?;
             written += n as u64;
+            control.report(written, expected_size.unwrap_or(written));
         }
 
         file.flush()
@@ -49,6 +68,7 @@ pub fn stream_to_atomic_file<R: Read>(
         }
 
         replace_file(&temp_path, destination).map_err(|e| TransportError::Other(e.to_string()))?;
+        control.report(written, expected_size.unwrap_or(written));
         Ok(written)
     })();
 
@@ -108,4 +128,61 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(source, destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::sync::{atomic::AtomicBool, Arc};
+
+    struct CancelAfterFirstRead {
+        cancel: Arc<AtomicBool>,
+        sent: bool,
+    }
+
+    impl Read for CancelAfterFirstRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.sent {
+                return Ok(0);
+            }
+            self.sent = true;
+            buffer[..4].copy_from_slice(b"data");
+            self.cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(4)
+        }
+    }
+
+    #[test]
+    fn cancellation_removes_partial_download() {
+        let root = std::env::temp_dir().join(format!(
+            "bst-download-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("restored.bin");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let control = TransferControl::new(cancel.clone(), Arc::new(|_| {}));
+
+        let error = stream_to_atomic_file_with_control(
+            CancelAfterFirstRead {
+                cancel,
+                sent: false,
+            },
+            &destination,
+            Some(8),
+            &control,
+        )
+        .unwrap_err();
+
+        assert!(error.is_cancelled());
+        assert!(!destination.exists());
+        assert!(!part_path(&destination).exists());
+        let _ = fs::remove_dir_all(root);
+    }
 }

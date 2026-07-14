@@ -3,8 +3,10 @@
 mod multipart;
 
 use crate::config::Config;
-use crate::transport::download::{apply_mtime, stream_to_atomic_file};
-use crate::transport::{BackupTransport, FileMetadata, ObjectHead, RemoteFile, TransportError};
+use crate::transport::download::{apply_mtime, stream_to_atomic_file_with_control};
+use crate::transport::{
+    BackupTransport, FileMetadata, ObjectHead, RemoteFile, TransferControl, TransportError,
+};
 use multipart::{
     build_complete_xml, choose_part_size, complete_response_error, decide_after_lost_complete,
     decide_verified_receipt, delete_state, ensure_state_dir, expected_part_size, is_no_such_upload,
@@ -20,11 +22,48 @@ use quick_xml::Reader;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{self, Cursor, Read};
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 const EMPTY_PAYLOAD_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const META_MTIME: &str = "x-amz-meta-backup-mtime";
+
+struct ProgressReader<'a, R> {
+    inner: R,
+    control: &'a TransferControl,
+    base: u64,
+    transferred: u64,
+    total: u64,
+}
+
+impl<'a, R> ProgressReader<'a, R> {
+    fn new(inner: R, control: &'a TransferControl, base: u64, total: u64) -> Self {
+        Self {
+            inner,
+            control,
+            base,
+            transferred: 0,
+            total,
+        }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.control.is_cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "transfer cancelled",
+            ));
+        }
+        let read = self.inner.read(buffer)?;
+        self.transferred = self.transferred.saturating_add(read as u64);
+        self.control
+            .report(self.base.saturating_add(self.transferred), self.total);
+        Ok(read)
+    }
+}
 
 pub struct S3Transport {
     endpoint: String,
@@ -252,6 +291,7 @@ impl S3Transport {
         local_path: &Path,
         metadata: &FileMetadata,
         size: u64,
+        control: &TransferControl,
     ) -> Result<(), TransportError> {
         let file = fs::File::open(local_path).map_err(|e| TransportError::Other(e.to_string()))?;
         let key = self.object_key(relative_path);
@@ -265,12 +305,16 @@ impl S3Transport {
         for (name, value) in &extra_headers {
             request = request.set(name, value);
         }
-        let resp = match request.send(file) {
+        control.check_cancelled()?;
+        control.report(0, size);
+        let reader = ProgressReader::new(file, control, 0, size);
+        let resp = match request.send(reader) {
             Ok(response) => response,
             Err(ureq::Error::Status(status, response)) => {
                 let body = response.into_string().unwrap_or_default();
                 return Err(classify_s3_error(status, &body));
             }
+            Err(_error) if control.is_cancelled() => return Err(TransportError::Cancelled),
             Err(error) => return Err(TransportError::Other(error.to_string())),
         };
         if resp.status() >= 400 {
@@ -278,7 +322,11 @@ impl S3Transport {
         }
 
         match self.head_file(relative_path)? {
-            Some(head) if head.size == size => Ok(()),
+            Some(head) if head.size == size => {
+                control.check_cancelled()?;
+                control.report(size, size);
+                Ok(())
+            }
             Some(head) => Err(TransportError::Other(format!(
                 "HeadObject size mismatch after PutObject: got {}, expected {size}",
                 head.size
@@ -295,6 +343,7 @@ impl S3Transport {
         local_path: &Path,
         _metadata: &FileMetadata,
         _initial_size: u64,
+        control: &TransferControl,
     ) -> Result<(), TransportError> {
         let key = self.object_key(relative_path);
         let identity = storage_identity(&self.endpoint, &self.bucket, &key);
@@ -323,6 +372,7 @@ impl S3Transport {
                 mtime_ns,
                 header_mtime,
                 &state_path,
+                control,
             ) {
                 Ok(()) => return Ok(()),
                 Err(TransportError::SourceChanged) => return Err(TransportError::SourceChanged),
@@ -344,7 +394,9 @@ impl S3Transport {
         mtime_ns: u64,
         header_mtime: u64,
         state_path: &Path,
+        control: &TransferControl,
     ) -> Result<(), TransportError> {
+        control.check_cancelled()?;
         let part_size = choose_part_size(size, self.configured_part_mib)?;
         let mut state = match self.load_or_create_state(
             key,
@@ -355,7 +407,10 @@ impl S3Transport {
             part_size,
             state_path,
         )? {
-            LoadOrCreate::VerifiedReuse => return Ok(()),
+            LoadOrCreate::VerifiedReuse => {
+                control.report(size, size);
+                return Ok(());
+            }
             LoadOrCreate::State(s) => s,
         };
 
@@ -368,25 +423,43 @@ impl S3Transport {
             Err(err) => return Err(err),
         }
 
+        // ListParts verifies server ETag/size. Re-hash every retained local part
+        // before crediting resumed bytes so progress never claims stale content.
+        let reconciled_count = state.completed_parts.len();
+        let mut locally_verified = Vec::with_capacity(reconciled_count);
+        for retained in std::mem::take(&mut state.completed_parts) {
+            control.check_cancelled()?;
+            let expected = expected_part_size(retained.number, state.local_size, state.part_size);
+            let offset = part_offset(retained.number, state.part_size);
+            let buf = read_part_buffer(local_path, offset, expected)?;
+            let digest = sha256_hex(&buf);
+            if retained_part_digest_ok(&retained, state.local_size, state.part_size, &digest) {
+                locally_verified.push(retained);
+            }
+        }
+        state.completed_parts = locally_verified;
+        if state.completed_parts.len() != reconciled_count {
+            save_state_atomic(state_path, &state)?;
+        }
+
+        let verified_bytes = state
+            .completed_parts
+            .iter()
+            .map(|part| part.size)
+            .sum::<u64>()
+            .min(state.local_size);
+        control.report(verified_bytes, state.local_size);
+
         let total = part_count(state.local_size, state.part_size);
 
         for part_number in 1..=total {
-            if let Some(idx) = state
+            control.check_cancelled()?;
+            if state
                 .completed_parts
                 .iter()
-                .position(|p| p.number == part_number)
+                .any(|part| part.number == part_number)
             {
-                let retained = state.completed_parts[idx].clone();
-                let expected = expected_part_size(part_number, state.local_size, state.part_size);
-                let offset = part_offset(part_number, state.part_size);
-                let buf = read_part_buffer(local_path, offset, expected)?;
-                let digest = sha256_hex(&buf);
-                if retained_part_digest_ok(&retained, state.local_size, state.part_size, &digest) {
-                    continue;
-                }
-                // Same-size content change (or missing digest) — drop and reupload.
-                state.completed_parts.remove(idx);
-                save_state_atomic(state_path, &state)?;
+                continue;
             }
 
             let (cur_size, cur_mtime_ns) = stat_source(local_path)?;
@@ -406,8 +479,20 @@ impl S3Transport {
                 delete_state(state_path)?;
                 return Err(TransportError::SourceChanged);
             }
-            let etag = match self.upload_part_with_retries(key, &state.upload_id, part_number, &buf)
-            {
+            let completed_before = state
+                .completed_parts
+                .iter()
+                .map(|part| part.size)
+                .sum::<u64>();
+            let etag = match self.upload_part_with_retries(
+                key,
+                &state.upload_id,
+                part_number,
+                &buf,
+                completed_before,
+                state.local_size,
+                control,
+            ) {
                 Ok(etag) => etag,
                 Err(err) if is_no_such_upload(&err) => {
                     return self.recover_no_such_upload(&state, state_path, state.local_size);
@@ -424,6 +509,10 @@ impl S3Transport {
             state.completed_parts.sort_by_key(|p| p.number);
             state.phase = MultipartPhase::Uploading;
             save_state_atomic(state_path, &state)?;
+            control.report(
+                state.completed_parts.iter().map(|part| part.size).sum(),
+                state.local_size,
+            );
         }
 
         let (cur_size, cur_mtime_ns) = stat_source(local_path)?;
@@ -648,12 +737,28 @@ impl S3Transport {
         upload_id: &str,
         part_number: u32,
         body: &[u8],
+        completed_before: u64,
+        total: u64,
+        control: &TransferControl,
     ) -> Result<String, TransportError> {
         let mut last_err = None;
         for attempt in 0..RETRY_ATTEMPTS {
-            match self.upload_part(key, upload_id, part_number, body) {
+            control.check_cancelled()?;
+            match self.upload_part(
+                key,
+                upload_id,
+                part_number,
+                body,
+                completed_before,
+                total,
+                control,
+            ) {
                 Ok(etag) => return Ok(etag),
-                Err(err) if err.is_auth_failed() || is_no_such_upload(&err) => return Err(err),
+                Err(err)
+                    if err.is_auth_failed() || err.is_cancelled() || is_no_such_upload(&err) =>
+                {
+                    return Err(err)
+                }
                 Err(err) if is_transient(&err) && attempt + 1 < RETRY_ATTEMPTS => {
                     last_err = Some(err);
                     sleep_backoff(attempt);
@@ -670,22 +775,30 @@ impl S3Transport {
         upload_id: &str,
         part_number: u32,
         body: &[u8],
+        completed_before: u64,
+        total: u64,
+        control: &TransferControl,
     ) -> Result<String, TransportError> {
-        let payload_hash = hex::encode(Sha256::digest(body));
         let query = vec![
             ("partNumber".into(), part_number.to_string()),
             ("uploadId".into(), upload_id.to_string()),
         ];
         let extra = vec![("content-length", body.len().to_string())];
-        let resp = self.request(
-            &self.transfer_agent,
-            "PUT",
-            key,
-            &query,
-            &extra,
-            Some(body),
-            &payload_hash,
-        )?;
+        let url = self.signed_url("PUT", key, &query, &extra)?;
+        let mut request = self.transfer_agent.put(&url);
+        for (name, value) in &extra {
+            request = request.set(name, value);
+        }
+        let reader = ProgressReader::new(Cursor::new(body), control, completed_before, total);
+        let resp = match request.send(reader) {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                return Err(classify_s3_error(status, &body));
+            }
+            Err(_) if control.is_cancelled() => return Err(TransportError::Cancelled),
+            Err(error) => return Err(TransportError::Other(error.to_string())),
+        };
         if resp.status() >= 400 {
             return Err(TransportError::Http(resp.status(), "UploadPart".into()));
         }
@@ -807,6 +920,7 @@ impl S3Transport {
                     &err,
                     TransportError::Http(..)
                         | TransportError::AuthFailed(_)
+                        | TransportError::Cancelled
                         | TransportError::NotFound
                         | TransportError::TooLarge { .. }
                         | TransportError::SourceChanged
@@ -942,15 +1056,37 @@ impl BackupTransport for S3Transport {
         local_path: &Path,
         metadata: &FileMetadata,
     ) -> Result<(), TransportError> {
+        self.upload_file_with(
+            relative_path,
+            local_path,
+            metadata,
+            &TransferControl::default(),
+        )
+    }
+
+    fn upload_file_with(
+        &self,
+        relative_path: &str,
+        local_path: &Path,
+        metadata: &FileMetadata,
+        control: &TransferControl,
+    ) -> Result<(), TransportError> {
+        control.check_cancelled()?;
         let key = self.object_key(relative_path);
         let identity = storage_identity(&self.endpoint, &self.bucket, &key);
-        let _identity_lock = IdentityUploadGuard::acquire(&identity);
+        let _identity_lock = loop {
+            if let Some(guard) = IdentityUploadGuard::try_acquire(&identity) {
+                break guard;
+            }
+            control.check_cancelled()?;
+            std::thread::sleep(Duration::from_millis(50));
+        };
         let meta = fs::metadata(local_path).map_err(|e| TransportError::Other(e.to_string()))?;
         let size = meta.len();
         if size <= self.small_file_limit {
-            self.put_object_small(relative_path, local_path, metadata, size)
+            self.put_object_small(relative_path, local_path, metadata, size, control)
         } else {
-            self.upload_multipart(relative_path, local_path, metadata, size)
+            self.upload_multipart(relative_path, local_path, metadata, size, control)
         }
     }
 
@@ -959,6 +1095,16 @@ impl BackupTransport for S3Transport {
         relative_path: &str,
         destination_path: &Path,
     ) -> Result<FileMetadata, TransportError> {
+        self.download_file_with(relative_path, destination_path, &TransferControl::default())
+    }
+
+    fn download_file_with(
+        &self,
+        relative_path: &str,
+        destination_path: &Path,
+        control: &TransferControl,
+    ) -> Result<FileMetadata, TransportError> {
+        control.check_cancelled()?;
         let key = self.object_key(relative_path);
         let head = self.head_file(relative_path)?;
         let resp = self.request(
@@ -974,7 +1120,12 @@ impl BackupTransport for S3Transport {
             return Err(TransportError::Http(resp.status(), "GetObject".into()));
         }
         let expected = head.as_ref().map(|h| h.size);
-        let size = stream_to_atomic_file(resp.into_reader(), destination_path, expected)?;
+        let size = stream_to_atomic_file_with_control(
+            resp.into_reader(),
+            destination_path,
+            expected,
+            control,
+        )?;
         let mtime = head.and_then(|h| h.mtime).unwrap_or(0);
         if mtime > 0 {
             let _ = apply_mtime(destination_path, mtime);
@@ -1104,6 +1255,7 @@ fn parse_list_objects_v2(xml: &str) -> Result<ListPage, TransportError> {
     let mut current: Option<ListedObject> = None;
     let mut text_target = String::new();
     let mut in_contents = false;
+    let mut url_encoded_keys = false;
 
     loop {
         match reader.read_event() {
@@ -1114,7 +1266,7 @@ fn parse_list_objects_v2(xml: &str) -> Result<ListPage, TransportError> {
                         in_contents = true;
                         current = Some(ListedObject::default());
                     }
-                    "Key" | "Size" | "IsTruncated" | "NextContinuationToken" => {
+                    "Key" | "Size" | "IsTruncated" | "NextContinuationToken" | "EncodingType" => {
                         text_target = tag;
                     }
                     _ => {}
@@ -1138,6 +1290,9 @@ fn parse_list_objects_v2(xml: &str) -> Result<ListPage, TransportError> {
                     }
                     "NextContinuationToken" => {
                         page.next_continuation_token = Some(text);
+                    }
+                    "EncodingType" => {
+                        url_encoded_keys = text.eq_ignore_ascii_case("url");
                     }
                     _ => {}
                 }
@@ -1165,7 +1320,50 @@ fn parse_list_objects_v2(xml: &str) -> Result<ListPage, TransportError> {
             _ => {}
         }
     }
+    if url_encoded_keys {
+        for object in &mut page.objects {
+            object.key = percent_decode_s3_key(&object.key)?;
+        }
+    }
     Ok(page)
+}
+
+fn percent_decode_s3_key(encoded: &str) -> Result<String, TransportError> {
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err(TransportError::Other(
+                    "ListObjectsV2 returned an invalid percent-encoded key".into(),
+                ));
+            }
+            let high = hex_nibble(bytes[index + 1]);
+            let low = hex_nibble(bytes[index + 2]);
+            let (Some(high), Some(low)) = (high, low) else {
+                return Err(TransportError::Other(
+                    "ListObjectsV2 returned an invalid percent-encoded key".into(),
+                ));
+            };
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| TransportError::Other("ListObjectsV2 returned a non-UTF-8 key".into()))
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn classify_s3_error(status: u16, body: &str) -> TransportError {
@@ -1326,6 +1524,29 @@ mod tests {
         assert_eq!(page.objects.len(), 2);
         assert_eq!(page.objects[0].key, "cust/dev/folder/file.txt");
         assert_eq!(page.objects[0].size, 12);
+    }
+
+    #[test]
+    fn parse_list_objects_decodes_url_encoded_keys() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <EncodingType>url</EncodingType>
+  <IsTruncated>false</IsTruncated>
+  <Contents>
+    <Key>folder%2Fhello%20%E2%80%94%20100%25.png</Key>
+    <Size>42</Size>
+  </Contents>
+</ListBucketResult>"#;
+        let page = parse_list_objects_v2(xml).unwrap();
+        assert_eq!(page.objects[0].key, "folder/hello — 100%.png");
+        assert_eq!(page.objects[0].size, 42);
+    }
+
+    #[test]
+    fn parse_list_objects_preserves_literal_percent_without_url_encoding() {
+        let xml = r#"<ListBucketResult><Contents><Key>100%25.txt</Key><Size>1</Size></Contents></ListBucketResult>"#;
+        let page = parse_list_objects_v2(xml).unwrap();
+        assert_eq!(page.objects[0].key, "100%25.txt");
     }
 
     #[test]

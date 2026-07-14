@@ -356,11 +356,29 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
     let all_synced = st.bridge_sync_head == "All synced";
 
     let (head, pct, bar_color, detail, eta) = if syncing {
-        let done = st.sync_progress_done.min(st.sync_progress_total);
-        let total = st.sync_progress_total;
-        let pct = if total > 0 { (done * 100) / total } else { 0 };
-        let detail = if total > 0 {
-            format!("{done} of {total} files")
+        let byte_done = st
+            .transfer_bytes
+            .iter()
+            .map(|row| row.transferred.min(row.total))
+            .sum::<u64>();
+        let byte_total = st.transfer_bytes.iter().map(|row| row.total).sum::<u64>();
+        let file_done = st.sync_progress_done.min(st.sync_progress_total);
+        let file_total = st.sync_progress_total;
+        let pct = if byte_total > 0 {
+            (byte_done.saturating_mul(100) / byte_total).min(100)
+        } else if file_total > 0 {
+            ((file_done * 100) / file_total) as u64
+        } else {
+            0
+        };
+        let detail = if byte_total > 0 {
+            format!(
+                "{} of {}",
+                format_transfer_bytes(byte_done),
+                format_transfer_bytes(byte_total)
+            )
+        } else if file_total > 0 {
+            format!("{file_done} of {file_total} files")
         } else {
             String::new()
         };
@@ -473,6 +491,21 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
             draw_text_w(hdc, &row2, &eta, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
         }
         SelectObject(hdc, of_d);
+    }
+}
+
+fn format_transfer_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 

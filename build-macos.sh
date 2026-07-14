@@ -26,6 +26,16 @@ cp -f "$OUT/backupsynctool" "$APP/Contents/MacOS/backupsynctool"
 chmod +x "$OUT/backupsynctool" "$APP/Contents/MacOS/backupsynctool"
 [[ -f assets/AppIcon.icns ]] && cp -f assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
+# Runtime files under Contents/MacOS invalidate the sealed app signature. Move
+# logs created by older builds to the macOS state directory before signing.
+LEGACY_LOGS="$APP/Contents/MacOS/logs"
+STATE_LOGS="$HOME/Library/Application Support/BackupSyncTool/logs"
+if [[ -d "$LEGACY_LOGS" ]]; then
+  mkdir -p "$STATE_LOGS"
+  cp -p "$LEGACY_LOGS"/*.log "$STATE_LOGS"/ 2>/dev/null || true
+  rm -rf "$LEGACY_LOGS"
+fi
+
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -118,6 +118,33 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
             },
         ));
     }
+    if let Some(rest) = message.strip_prefix("Download progress: ") {
+        let (path, pct) = rest.split_once('|')?;
+        let name = display_activity_name(path);
+        let pct: u8 = pct.parse().ok()?;
+        let key = download_replace_key(name);
+        let done = pct >= 100;
+        return Some((
+            Some(key.clone()),
+            ActivityRow {
+                label: if done {
+                    format!("Downloaded {name}")
+                } else {
+                    format!("Downloading {name}")
+                },
+                kind: if done {
+                    ActivityKind::Done
+                } else {
+                    ActivityKind::Downloading
+                },
+                pct: if done { None } else { Some(pct) },
+                detail: None,
+                relative_path: None,
+                replace_key: Some(key),
+                time_label: None,
+            },
+        ));
+    }
     if let Some(path) = message.strip_prefix("Uploading: ") {
         let name = display_activity_name(path);
         let key = upload_replace_key(name);

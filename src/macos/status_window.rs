@@ -34,7 +34,8 @@ pub enum StatusAction {
     OpenWatch,
     ChooseWatch,
     Pair,
-    Restore,
+    RetryFailed,
+    CancelRestore,
     ToggleLogin,
     ToggleAutoUpdate,
     Update,
@@ -45,6 +46,7 @@ pub enum StatusAction {
 #[derive(Clone, Default)]
 pub struct StatusSnapshot {
     pub watch_folder: String,
+    pub remote_folder: String,
     pub connected: bool,
     pub server_status: String,
     pub start_at_login: bool,
@@ -52,19 +54,12 @@ pub struct StatusSnapshot {
     pub activity_lines: Vec<String>,
     pub syncing: bool,
     pub sync_status: String,
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+    pub failed: usize,
+    pub restoring: bool,
     pub version: String,
     pub update_available: bool,
-}
-
-/// Physical tray icon rect is NOT used anymore — `TrayAnchor` holds the
-/// status-item button window frame in Cocoa screen coords (bottom-left origin).
-#[derive(Clone, Copy, Default)]
-pub struct TrayAnchor {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub scale: f64,
 }
 
 type ActionFn = Arc<dyn Fn(StatusAction) + Send + Sync>;
@@ -78,7 +73,8 @@ struct Widgets {
     server_title: Retained<NSTextField>,
     server_detail: Retained<NSTextField>,
     pair: Retained<NSButton>,
-    restore: Retained<NSButton>,
+    retry: Retained<NSButton>,
+    cancel_restore: Retained<NSButton>,
     sync_spinner: Retained<NSProgressIndicator>,
     act_body: Retained<NSTextField>,
     act_sub: Retained<NSTextField>,
@@ -123,9 +119,13 @@ define_class!(
         fn act_pair(&self, _: Option<&AnyObject>) {
             fire(StatusAction::Pair);
         }
-        #[unsafe(method(actRestore:))]
-        fn act_restore(&self, _: Option<&AnyObject>) {
-            fire(StatusAction::Restore);
+        #[unsafe(method(actRetryFailed:))]
+        fn act_retry_failed(&self, _: Option<&AnyObject>) {
+            fire(StatusAction::RetryFailed);
+        }
+        #[unsafe(method(actCancelRestore:))]
+        fn act_cancel_restore(&self, _: Option<&AnyObject>) {
+            fire(StatusAction::CancelRestore);
         }
         #[unsafe(method(actLogin:))]
         fn act_login(&self, _: Option<&AnyObject>) {
@@ -159,18 +159,21 @@ define_class!(
                 }
             });
             OPEN.store(false, Ordering::SeqCst);
-            if let Some(mtm) = MainThreadMarker::new() {
-                NSApplication::sharedApplication(mtm)
-                    .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-            }
+            // Changing activation policy can synchronously close windows. Wait
+            // until AppKit has returned from this delegate callback.
+            Queue::main().exec_async(crate::macos::notify::restore_accessory_policy);
             false
         }
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _: &NSNotification) {
-            LIVE.with(|c| {
-                if let Ok(mut slot) = c.try_borrow_mut() {
-                    *slot = None;
-                }
+            // Releasing the retained NSWindow inside this callback aborts in
+            // _finishClosingWindow. Clear it on the next main-queue turn.
+            Queue::main().exec_async(|| {
+                LIVE.with(|cell| {
+                    if let Ok(mut live) = cell.try_borrow_mut() {
+                        *live = None;
+                    }
+                });
             });
             OPEN.store(false, Ordering::SeqCst);
         }
@@ -188,6 +191,20 @@ pub fn is_open() -> bool {
     OPEN.load(Ordering::SeqCst)
 }
 
+/// Actual AppKit visibility, used before changing the app activation policy.
+/// If LIVE is currently borrowed, conservatively report visible.
+pub fn is_visible() -> bool {
+    if MainThreadMarker::new().is_none() {
+        return OPEN.load(Ordering::SeqCst);
+    }
+    LIVE.with(|c| {
+        c.try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|live| live.widgets.window.isVisible()))
+            .unwrap_or(true)
+    })
+}
+
 pub fn close() {
     let run = || {
         LIVE.with(|c| {
@@ -196,25 +213,7 @@ pub fn close() {
             }
         });
         OPEN.store(false, Ordering::SeqCst);
-        if let Some(mtm) = MainThreadMarker::new() {
-            NSApplication::sharedApplication(mtm)
-                .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        }
-    };
-    if MainThreadMarker::new().is_some() {
-        run();
-    } else {
-        Queue::main().exec_async(run);
-    }
-}
-
-pub fn toggle(snapshot: StatusSnapshot, on_action: ActionFn, anchor: Option<TrayAnchor>) {
-    let run = move || {
-        if OPEN.load(Ordering::SeqCst) {
-            close();
-        } else {
-            show_main(snapshot, on_action, anchor);
-        }
+        Queue::main().exec_async(crate::macos::notify::restore_accessory_policy);
     };
     if MainThreadMarker::new().is_some() {
         run();
@@ -224,11 +223,7 @@ pub fn toggle(snapshot: StatusSnapshot, on_action: ActionFn, anchor: Option<Tray
 }
 
 pub fn show(snapshot: StatusSnapshot, on_action: ActionFn) {
-    show_anchored(snapshot, on_action, None);
-}
-
-pub fn show_anchored(snapshot: StatusSnapshot, on_action: ActionFn, anchor: Option<TrayAnchor>) {
-    let run = move || show_main(snapshot, on_action, anchor);
+    let run = move || show_main(snapshot, on_action);
     if MainThreadMarker::new().is_some() {
         run();
     } else {
@@ -260,12 +255,14 @@ pub fn open_url(url: &str) {
     });
 }
 
-fn show_main(snapshot: StatusSnapshot, on_action: ActionFn, _anchor: Option<TrayAnchor>) {
+fn show_main(snapshot: StatusSnapshot, on_action: ActionFn) {
     let mtm = MainThreadMarker::new().expect("status window on main");
     let app = NSApplication::sharedApplication(mtm);
     // Regular while window visible so it can take focus like a real Mac app.
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    app.activate();
+    // `activate` is macOS 14+ but this app supports macOS 12.
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
 
     let focused = LIVE.with(|c| {
         let mut slot = c.borrow_mut();
@@ -300,11 +297,16 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     };
     ui.watch.setStringValue(&NSString::from_str(watch));
 
+    let connected_title = if s.remote_folder.trim().is_empty() {
+        "Connected"
+    } else {
+        s.remote_folder.as_str()
+    };
     let (sym, tint, title, detail) = if s.connected {
         (
             "checkmark.shield.fill",
             crate::macos::brand::green(),
-            "Server",
+            connected_title,
             if s.syncing {
                 if s.sync_status.is_empty() {
                     "Uploading…"
@@ -319,8 +321,11 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         (
             "exclamationmark.shield.fill",
             NSColor::systemRedColor(),
-            "Server",
-            if s.server_status.contains("pair") || s.server_status.contains("Re-pair") {
+            "Not connected",
+            if s.server_status.to_ascii_lowercase().contains("pair")
+                || s.server_status.to_ascii_lowercase().contains("reconnect")
+                || s.server_status.to_ascii_lowercase().contains("connecting")
+            {
                 s.server_status.as_str()
             } else {
                 "Not connected"
@@ -342,12 +347,10 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         ui.pair.setTitle(&NSString::from_str("Reconnect Server"));
         ui.pair.setKeyEquivalent(&NSString::from_str(""));
         ui.pair.setBezelColor(Some(&crate::macos::brand::green()));
-        ui.restore.setHidden(false);
     } else {
         ui.pair.setTitle(&NSString::from_str("Connect Server"));
         ui.pair.setKeyEquivalent(&NSString::from_str("\r"));
         ui.pair.setBezelColor(Some(&crate::macos::brand::green()));
-        ui.restore.setHidden(true);
     }
 
     let syncing = s.syncing;
@@ -363,8 +366,19 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     }
 
     let n = s.activity_lines.len();
+    ui.retry.setHidden(s.failed == 0 || s.restoring);
+    ui.cancel_restore.setHidden(!s.restoring);
+    ui.act_sub.setHidden(s.failed > 0 || s.restoring);
     ui.act_sub
-        .setStringValue(&NSString::from_str(&format!("Showing last {n} events")));
+        .setStringValue(&NSString::from_str(&if s.total_bytes > 0 {
+            format!(
+                "{} / {} MB",
+                s.transferred_bytes / (1024 * 1024),
+                s.total_bytes / (1024 * 1024)
+            )
+        } else {
+            format!("{n} current-run events")
+        }));
     let preview = if s.activity_lines.is_empty() {
         "No recent activity".to_string()
     } else {
@@ -399,12 +413,15 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
 }
 
 fn build(mtm: MainThreadMarker) -> Widgets {
-    let target: Retained<StatusTarget> =
-        unsafe { msg_send![super(StatusTarget::alloc(mtm).set_ivars(StatusTargetIvars)), init] };
+    let target: Retained<StatusTarget> = unsafe {
+        msg_send![
+            super(StatusTarget::alloc(mtm).set_ivars(StatusTargetIvars)),
+            init
+        ]
+    };
 
-    let style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable;
+    let style =
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Miniaturizable;
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -497,7 +514,12 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     let server_title = label(
         mtm,
         "Server",
-        rect(PAD + col_w + COL_GAP + 44.0, icon_y + 18.0, col_w - 44.0, 16.0),
+        rect(
+            PAD + col_w + COL_GAP + 44.0,
+            icon_y + 18.0,
+            col_w - 44.0,
+            16.0,
+        ),
         12.0,
         true,
     );
@@ -507,7 +529,12 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     let server_detail = label(
         mtm,
         "Not connected",
-        rect(PAD + col_w + COL_GAP + 44.0, icon_y + 1.0, col_w - 64.0, 16.0),
+        rect(
+            PAD + col_w + COL_GAP + 44.0,
+            icon_y + 1.0,
+            col_w - 64.0,
+            16.0,
+        ),
         12.0,
         false,
     );
@@ -556,23 +583,12 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     pair.setBezelColor(Some(&crate::macos::brand::green()));
     root.addSubview(&pair);
 
-    y -= 28.0;
-    let restore = button(
-        mtm,
-        &target,
-        "Restore Backup…",
-        sel!(actRestore:),
-        rect(PAD + col_w + COL_GAP, y, col_w, BTN_H),
-    );
-    restore.setHidden(true);
-    root.addSubview(&restore);
-
     // —— Activity ——
     y -= 20.0;
     add_sep(&root, mtm, rect(PAD, y, inner, 1.0));
 
     y -= 24.0;
-    fx_caption(&root, mtm, "Recent Activity", rect(PAD, y, 160.0, 16.0));
+    fx_caption(&root, mtm, "Current Activity", rect(PAD, y, 160.0, 16.0));
     let act_sub = label(
         mtm,
         "Showing last 0 events",
@@ -583,6 +599,24 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     act_sub.setAlignment(NSTextAlignment::Right);
     act_sub.setTextColor(Some(&crate::macos::brand::caption()));
     root.addSubview(&act_sub);
+    let retry = button(
+        mtm,
+        &target,
+        "Retry Failed",
+        sel!(actRetryFailed:),
+        rect(W - PAD - 92.0, y - 5.0, 92.0, BTN_H),
+    );
+    retry.setHidden(true);
+    root.addSubview(&retry);
+    let cancel_restore = button(
+        mtm,
+        &target,
+        "Cancel Restore",
+        sel!(actCancelRestore:),
+        rect(W - PAD - 104.0, y - 5.0, 104.0, BTN_H),
+    );
+    cancel_restore.setHidden(true);
+    root.addSubview(&cancel_restore);
 
     y -= ACT_H + 8.0;
     let scroll = NSScrollView::new(mtm);
@@ -677,7 +711,8 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         server_title,
         server_detail,
         pair,
-        restore,
+        retry,
+        cancel_restore,
         sync_spinner,
         act_body,
         act_sub,
@@ -712,7 +747,13 @@ fn fx_caption(parent: &NSView, mtm: MainThreadMarker, s: &str, frame: NSRect) {
     parent.addSubview(&t);
 }
 
-fn label(mtm: MainThreadMarker, s: &str, frame: NSRect, size: f64, bold: bool) -> Retained<NSTextField> {
+fn label(
+    mtm: MainThreadMarker,
+    s: &str,
+    frame: NSRect,
+    size: f64,
+    bold: bool,
+) -> Retained<NSTextField> {
     let f = NSTextField::new(mtm);
     f.setStringValue(&NSString::from_str(s));
     f.setEditable(false);

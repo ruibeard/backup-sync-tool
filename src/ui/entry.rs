@@ -1,6 +1,10 @@
 // ── Entry point ───────────────────────────────────────────────────────────────
 pub fn run(hinstance: HINSTANCE, start_minimized: bool) {
     unsafe {
+        // A normal user launch opens the main window. Only the explicit startup
+        // mode is silent; main.rs still passes its legacy default here.
+        let background = std::env::args().any(|arg| arg == "--background");
+        let start_minimized = start_minimized && background;
         let icex = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
             dwICC: ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES,
@@ -223,6 +227,7 @@ unsafe extern "system" fn wnd_proc(
             );
             LRESULT(0)
         }
+        WM_APP_TRANSFER_EVENT => on_app_transfer_event(hwnd, lparam),
         WM_TIMER => on_timer(hwnd, wparam),
 
         WM_CLOSE => {
@@ -232,6 +237,7 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             let st = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WndState;
             if !st.is_null() {
+                (*st).app.send(crate::app::AppCommand::Shutdown).ok();
                 tray::remove_tray_icon(hwnd);
                 DeleteObject((*st).br_win);
                 DeleteObject((*st).br_path_box);

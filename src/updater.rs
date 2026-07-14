@@ -90,9 +90,10 @@ fn find_asset_for_platform(assets: &[GhAsset]) -> Option<&GhAsset> {
                 return Some(a);
             }
         }
-        if let Some(a) = assets.iter().find(|a| {
-            a.name.starts_with("backupsynctool-macos-") && a.name.ends_with(".tar.gz")
-        }) {
+        if let Some(a) = assets
+            .iter()
+            .find(|a| a.name.starts_with("backupsynctool-macos-") && a.name.ends_with(".tar.gz"))
+        {
             return Some(a);
         }
         return assets.iter().find(|a| a.name == "backupsynctool");
@@ -212,10 +213,7 @@ fn looks_like_gzip(buf: &[u8]) -> bool {
 
 #[cfg(target_os = "macos")]
 fn extract_via_system_tar(buf: &[u8]) -> Result<Vec<u8>, String> {
-    let dir = std::env::temp_dir().join(format!(
-        "backupsynctool-update-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("backupsynctool-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let tgz = dir.join("update.tar.gz");

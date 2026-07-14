@@ -39,6 +39,11 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         x if x == tray::ID_TRAY_LOGS as u16 => {
             do_open_logs(hwnd);
         }
+        x if x == tray::ID_TRAY_RESTORE as u16 => {
+            ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+            do_refresh_remote_changes(hwnd);
+        }
         x if x == tray::ID_TRAY_EXIT as u16 => {
             DestroyWindow(hwnd).ok();
         }
@@ -64,11 +69,7 @@ unsafe fn apply_pairing_folder_hint(hwnd: HWND, watch_folder: &str) {
     let use_xd = crate::xd::is_xd_default_watch_folder(watch_folder);
     let (folder, customer, from_xd) = if use_xd {
         if let Some(detected) = crate::xd::detect_customer_hint() {
-            (
-                detected.folder,
-                non_empty(detected.customer),
-                true,
-            )
+            (detected.folder, non_empty(detected.customer), true)
         } else if let Some(hint) = crate::xd::build_host_folder_hint(watch_folder) {
             (hint, None, false)
         } else {
@@ -142,6 +143,12 @@ unsafe fn browse_local(hwnd: HWND, persist_after_select: bool) -> bool {
         if s != previous_folder {
             let _ = SetWindowTextW(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), &hstring(&s));
             read_ctrls(hwnd, stmut(hwnd));
+            stmut(hwnd)
+                .app
+                .send(crate::app::AppCommand::SetWatchFolder(std::path::PathBuf::from(
+                    &s,
+                )))
+                .ok();
             update_pair_button_enabled(hwnd);
             apply_pairing_folder_hint(hwnd, &s);
             layout_main(hwnd);
@@ -263,6 +270,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
         return;
     }
     let st = stmut(hwnd);
+    st.app.send(crate::app::AppCommand::Connect).ok();
     let api_base = st.config.pair_api_base.clone();
     let watch_folder = st.config.watch_folder.clone();
     // XD name only while watch is still C:\XDSoftware\backups.
@@ -296,6 +304,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
         update_server_tooltip(hwnd);
     }
     let cancel = Arc::new(AtomicBool::new(false));
+    let candidate_config_base = st.config.clone();
     st.pair_id = st.pair_id.wrapping_add(1);
     let pair_id = st.pair_id;
     st.pair_cancel = Some(cancel.clone());
@@ -304,17 +313,15 @@ unsafe fn do_pair_device(hwnd: HWND) {
     ShowWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), SW_HIDE);
     show_pair_qr_window(hwnd);
     set_status_dot_color(hwnd, C_AMBER);
-    set_status_strip_text(
-        hwnd,
-        &format!("Pairing \u{00B7} {api_base}"),
-    );
+    set_status_strip_text(hwnd, &format!("Pairing \u{00B7} {api_base}"));
     logs::append(&format!("Pairing with control plane: {api_base}"));
 
     std::thread::spawn(move || {
+        let mut approval_received = false;
         let machine = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_string());
         let windows_user = std::env::var("USERNAME").unwrap_or_default();
         let version = env!("CARGO_PKG_VERSION");
-        let result = match crate::pairing::start_pairing(
+        let result = match crate::pairing::start_pairing_cancellable(
             &api_base,
             &machine,
             &windows_user,
@@ -324,8 +331,9 @@ unsafe fn do_pair_device(hwnd: HWND) {
             xd.as_ref().map(|detected| detected.number.clone()),
             xd.as_ref().map(|detected| detected.customer.clone()),
             detected_folder,
+            &cancel,
         ) {
-            Some(start) => {
+            Ok(start) => {
                 unsafe {
                     let started = Box::new(PairStarted {
                         pair_id,
@@ -343,11 +351,12 @@ unsafe fn do_pair_device(hwnd: HWND) {
 
                 let started = std::time::Instant::now();
                 let sleep_ms = start.poll_interval_ms.clamp(1000, 10_000);
+                let mut poll_error_logged = false;
                 loop {
                     if cancel.load(Ordering::Relaxed) {
                         break Err(String::new());
                     }
-                    if started.elapsed() > std::time::Duration::from_secs(300) {
+                    if started.elapsed() > std::time::Duration::from_secs(600) {
                         break Err(format!(
                             "Pairing timed out.\nCode: {}\nApprove URL: {}",
                             start.code, start.approve_url
@@ -357,10 +366,16 @@ unsafe fn do_pair_device(hwnd: HWND) {
                     if cancel.load(Ordering::Relaxed) {
                         break Err(String::new());
                     }
-                    if let Some(status) = crate::pairing::poll_pairing(&api_base, &start.poll_token)
-                    {
-                        match status.status.as_str() {
+                    match crate::pairing::poll_pairing_cancellable(
+                        &api_base,
+                        &start.poll_token,
+                        &cancel,
+                    ) {
+                        Ok(status) => {
+                            poll_error_logged = false;
+                            match status.status.as_str() {
                             "approved" => {
+                                approval_received = true;
                                 if !crate::pairing::is_s3_approval(&status) {
                                     break Err(
                                         "Pairing approved without S3 credentials. Pair again after the server enables S3."
@@ -393,13 +408,15 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                         Ok(value) => value,
                                         Err(err) => break Err(err),
                                     };
-                                let remote_raw = status
-                                    .remote_folder
-                                    .as_deref()
-                                    .filter(|v| !v.trim().is_empty())
-                                    .unwrap_or(s3_bucket.as_str());
+                                let remote_raw = match required_pair_field(
+                                    status.remote_folder,
+                                    "customer destination",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
                                 let remote_folder =
-                                    match crate::pairing::validate_destination_name(remote_raw) {
+                                    match crate::pairing::validate_destination_name(&remote_raw) {
                                         Ok(folder) => folder,
                                         Err(err) => break Err(err),
                                     };
@@ -418,11 +435,17 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     Err(err) => break Err(err),
                                 };
                                 let s3_prefix = status.s3_prefix.unwrap_or_default();
-                                break Ok(PairResult {
+                                let device_uuid = match required_pair_field(
+                                    status.device_uuid,
+                                    "device UUID",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let pair = PairResult {
                                     pair_id,
-                                    device_uuid: status.device_uuid.unwrap_or_default(),
+                                    device_uuid,
                                     device_token,
-                                    transport: "s3".to_string(),
                                     remote_folder,
                                     credential_profile_id: status.credential_profile_id,
                                     credential_version: status.credential_version,
@@ -435,25 +458,55 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     s3_secret_key,
                                     s3_path_style: status.s3_path_style.unwrap_or(true),
                                     s3_prefix,
-                                });
+                                };
+                                if let Err(err) = validate_candidate_connection(
+                                    &candidate_config_base,
+                                    &pair,
+                                ) {
+                                    break Err(err);
+                                }
+                                break Ok(pair);
                             }
                             "rejected" => break Err("Pairing was rejected.".to_string()),
                             "expired" => break Err("Pairing request expired. Start pairing again.".to_string()),
-                            "consumed" => break Err("Pairing payload was already consumed. Start pairing again.".to_string()),
+                            "consumed" => {
+                                approval_received = true;
+                                break Err("Pairing payload was already consumed. Start pairing again.".to_string());
+                            }
                             "failed" => break Err("Pairing was approved but the server payload is missing. Start pairing again.".to_string()),
                             _ => {}
                         }
+                        }
+                        Err(err) if err.kind == crate::pairing::PairingErrorKind::Cancelled => {
+                            break Err(String::new());
+                        }
+                        Err(err) if err.is_transient() => {
+                            if !poll_error_logged {
+                                logs::append(&format!(
+                                    "Pair poll temporarily failed; retrying: {err}"
+                                ));
+                                poll_error_logged = true;
+                            }
+                        }
+                        Err(err) => break Err(err.to_string()),
                     }
                 }
             }
-            None => Err(format!("Could not start pairing at {api_base}.")),
+            Err(err) if err.kind == crate::pairing::PairingErrorKind::Cancelled => {
+                Err(String::new())
+            }
+            Err(err) => Err(err.to_string()),
         };
 
         let (ok, payload): (usize, isize) = match result {
             Ok(pair) => (1, Box::into_raw(Box::new(pair)) as isize),
             Err(message) => (
                 0,
-                Box::into_raw(Box::new(PairError { pair_id, message })) as isize,
+                Box::into_raw(Box::new(PairError {
+                    pair_id,
+                    message,
+                    approval_received,
+                })) as isize,
             ),
         };
         unsafe {
@@ -466,6 +519,23 @@ unsafe fn do_pair_device(hwnd: HWND) {
             .ok();
         }
     });
+}
+
+fn validate_candidate_connection(
+    base: &Config,
+    pair: &PairResult,
+) -> std::result::Result<(), String> {
+    let mut candidate = base.clone();
+    candidate.schema_version = 2;
+    candidate.transport = "s3".to_string();
+    candidate.s3_endpoint = pair.s3_endpoint.clone();
+    candidate.s3_region = pair.s3_region.clone();
+    candidate.s3_bucket = pair.s3_bucket.clone();
+    candidate.s3_access_key = pair.s3_access_key.clone();
+    candidate.s3_path_style = pair.s3_path_style;
+    candidate.s3_prefix = pair.s3_prefix.clone();
+    candidate.remote_folder = pair.remote_folder.clone();
+    crate::transport::validate_candidate(&candidate, &pair.s3_secret_key)
 }
 
 unsafe fn persist_pair_api_base_on_blur(hwnd: HWND) {
@@ -599,7 +669,10 @@ unsafe fn persist_settings(hwnd: HWND, notify_ok: bool) {
             }
         }
         None => {
-            notify_user(hwnd, "Not paired for S3. Pair again to get storage credentials.");
+            notify_user(
+                hwnd,
+                "Not paired for S3. Pair again to get storage credentials.",
+            );
             return;
         }
     }
@@ -728,7 +801,7 @@ fn required_client_height(st: &WndState) -> i32 {
     let bridge_h = bridge_section_total_h(st);
     let activity_h =
         HDR_H + PAD + MIN_ACTIVITY_LIST_H + st.post_list_gap + st.sync_row_h + st.post_sync_sect;
-    CONTENT_TOP_PAD + bridge_h + PAIR_API_SECTION_H + activity_h + st.bottom_bar_h
+    CONTENT_TOP_PAD + bridge_h + activity_h + st.bottom_bar_h
 }
 
 /// Grow the window when content (e.g. idle progress block) needs more height.
@@ -793,29 +866,6 @@ unsafe fn layout_main(hwnd: HWND) {
         y,
         (*st).hfont_bridge,
     );
-
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_PAIR_API_LABEL as i32),
-        None,
-        M,
-        y,
-        (*st).inner_w,
-        HDR_H,
-        SWP_NOZORDER,
-    )
-    .ok();
-    y += HDR_H + 4;
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32),
-        None,
-        M,
-        y,
-        (*st).inner_w,
-        INP_H,
-        SWP_NOZORDER,
-    )
-    .ok();
-    y += INP_H + SECT;
 
     let sub_w = 180;
     SetWindowPos(
@@ -895,9 +945,6 @@ unsafe fn layout_main(hwnd: HWND) {
         SWP_NOZORDER,
     )
     .ok();
-    y += (*st).sync_row_h;
-    y += (*st).post_sync_sect;
-
     y = footer_top;
     (*st).footer_panel_rect = RECT {
         left: 0,

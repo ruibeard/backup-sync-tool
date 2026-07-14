@@ -47,7 +47,7 @@ use windows::Win32::Graphics::Gdi as gdi;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::Shell::{
     DefSubclassProc, ILFree, SHBrowseForFolderW, SHGetPathFromIDListW, SetWindowSubclass,
     BFFM_INITIALIZED, BFFM_SETSELECTIONW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW,
@@ -321,6 +321,7 @@ const WM_APP_PAIR_RESULT: u32 = WM_APP + 17;
 const WM_APP_PAIR_STARTED: u32 = WM_APP + 18;
 const WM_APP_AUTH_FAILED: u32 = WM_APP + 19;
 const WM_APP_RESTORE_DONE: u32 = WM_APP + 20;
+const WM_APP_TRANSFER_EVENT: u32 = WM_APP + 21;
 const IDT_SYNC_ANIM: usize = 1;
 const SYNC_ANIM_MS: u32 = 120;
 
@@ -340,6 +341,9 @@ const IDC_PAIR_QR_CODE: u16 = 302;
 const IDC_PAIR_QR_LINK: u16 = 303;
 const IDC_PAIR_QR_CANCEL: u16 = 304;
 const IDC_PAIR_QR_SERVER: u16 = 305;
+const IDC_PAIR_QR_CHANGE_SERVER: u16 = 306;
+const IDC_PAIR_QR_SERVER_EDIT: u16 = 307;
+const IDC_PAIR_QR_EXPIRY: u16 = 308;
 
 // ── Layout — 8/12/20 rhythm ──────────────────────────────────────────────────
 const WIN_W: i32 = 520;
@@ -356,8 +360,6 @@ const ACTION_BTN_H: i32 = INP_H;
 const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
 const META_ICON_GAP: i32 = 5; // gap between version link and GitHub icon
 const CONTENT_TOP_PAD: i32 = 20;
-/// Label + edit + section gap for the control-plane URL field.
-const PAIR_API_SECTION_H: i32 = HDR_H + 4 + INP_H + SECT;
 const BRIDGE_PAD_Y: i32 = 0;
 const BRIDGE_NODE_GAP: i32 = 24;
 const BRIDGE_ICO: i32 = 40;
@@ -367,8 +369,6 @@ const BRIDGE_HEADER_H: i32 = BRIDGE_ICO_TILE + 5 + BRIDGE_NAME_H + 2 + BRIDGE_PA
 const BRIDGE_OPEN_BTN_W: i32 = 58;
 const BRIDGE_BROWSE_BTN_W: i32 = 82;
 const BRIDGE_PAIR_BTN_W: i32 = 150;
-const BRIDGE_RECONNECT_BTN_W: i32 = 132;
-const BRIDGE_REFRESH_BTN_W: i32 = 78;
 const BRIDGE_DIVIDER_VPAD: i32 = 12;
 const BRIDGE_NAME_H: i32 = 20;
 const BRIDGE_CONN_LABEL_H: i32 = 18;
@@ -399,8 +399,6 @@ struct BridgeLayout {
     browse_btn_w: i32,
     pair_btn_x: i32,
     pair_btn_w: i32,
-    refresh_btn_x: i32,
-    refresh_btn_w: i32,
     left_tile: RECT,
     right_tile: RECT,
     left_ico: RECT,
@@ -449,7 +447,6 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
     let btn_y = header_top + BRIDGE_HEADER_H + BRIDGE_DIVIDER_VPAD;
     let divider_y = btn_y + BRIDGE_BTN_H + BRIDGE_DIVIDER_VPAD;
     let local_btns_w = BRIDGE_OPEN_BTN_W + PAD + BRIDGE_BROWSE_BTN_W;
-    let server_btns_w = BRIDGE_REFRESH_BTN_W + PAD + BRIDGE_RECONNECT_BTN_W;
     BridgeLayout {
         height: BRIDGE_H,
         divider_y,
@@ -461,8 +458,6 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
         browse_btn_w: BRIDGE_BROWSE_BTN_W,
         pair_btn_x: right_node_x + (node_w - BRIDGE_PAIR_BTN_W) / 2,
         pair_btn_w: BRIDGE_PAIR_BTN_W,
-        refresh_btn_x: right_node_x + (node_w - server_btns_w) / 2,
-        refresh_btn_w: BRIDGE_REFRESH_BTN_W,
         left_tile,
         right_tile,
         left_ico,
@@ -545,8 +540,16 @@ struct ActivityRow {
     time_label: Option<String>,
 }
 
+#[derive(Clone)]
+struct TransferByteState {
+    key: String,
+    transferred: u64,
+    total: u64,
+}
+
 // ── Window state ──────────────────────────────────────────────────────────────
 struct WndState {
+    app: crate::app::AppHandle,
     config: Config,
     s3_secret_plain: String,
     sync_engine: Option<crate::sync::SyncEngine>,
@@ -556,6 +559,7 @@ struct WndState {
     sync_status_state: usize,
     sync_progress_done: usize,
     sync_progress_total: usize,
+    transfer_bytes: Vec<TransferByteState>,
     sync_last_failed: usize,
     sync_started_at: Option<std::time::Instant>,
     sync_anim_frame: usize,
@@ -650,14 +654,13 @@ fn bridge_section_total_h(st: &WndState) -> i32 {
 }
 
 fn activity_subhdr_text() -> String {
-    format!("Showing last {MAX_ACTIVITY_ROWS} events")
+    format!("This run · up to {MAX_ACTIVITY_ROWS}")
 }
 
 struct PairResult {
     pair_id: u64,
     device_uuid: String,
     device_token: String,
-    transport: String,
     remote_folder: String,
     credential_profile_id: Option<u64>,
     credential_version: Option<u64>,
@@ -679,6 +682,7 @@ struct PairStarted {
 struct PairError {
     pair_id: u64,
     message: String,
+    approval_received: bool,
 }
 
 struct PairQrState {
@@ -687,6 +691,7 @@ struct PairQrState {
     code: String,
     approve_url: String,
     ready: bool,
+    editing_server: bool,
     hfont: HFONT,
     hfont_b: HFONT,
     hfont_code: HFONT,
