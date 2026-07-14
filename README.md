@@ -1,6 +1,15 @@
 # Backup Sync Tool
 
-Native clients that upload a local backup folder directly to Garage S3 after an administrator approves the device in Laravel.
+Native Win/Mac clients that upload a local backup folder directly to Garage S3 after an administrator approves the device in Laravel.
+
+**Control plane URL** (`pair_api_base`) = which Laravel to pair with. Must match that install’s `APP_URL`. Default `https://backup.rui.cam`; editable + persisted. Storage (`s3_*`) comes from approve only — this app does not pick the storage provider.
+
+## YOU DO — operator smoke
+
+1. Set Laravel `APP_URL` to the public control-plane URL.
+2. **Windows:** `./build-windows.sh` → run `dist/windows/backupsynctool.exe` → set **CONTROL PLANE URL** to that `APP_URL` (saves on blur and on pair) → pair → QR/status shows that server → approve → upload. Report failures.
+3. **Mac:** `./build-macos.sh` → tray **Control plane URL…** → same `APP_URL` → pair → confirm. Report failures.
+4. Log line `control_plane_url mismatch` means desktop URL and Laravel `APP_URL` disagree — fix one.
 
 ## Build
 
@@ -15,8 +24,6 @@ Three scripts (clean tree for Windows/release):
 
 Mac flags: `--install` `/Applications`, `--no-launch`, `--identity=…` (default ad-hoc). Windows details: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md).
 
-**Smoke:** set Control plane URL to Laravel `APP_URL`, pair, confirm status. Report failures.
-
 | Platform | UI | Secrets |
 | --- | --- | --- |
 | Windows 7–11 | Win32 tray app | DPAPI |
@@ -25,10 +32,10 @@ Mac flags: `--install` `/Applications`, `--no-launch`, `--identity=…` (default
 ## Workflow
 
 1. **Windows:** optional XD paths under `C:\XDSoftware\…` as pairing hints. **macOS:** user always chooses the watch folder (no XD).
-2. Pairing talks to the control plane (`pair_api_base`, default `https://backup.rui.cam` — editable + persisted).
+2. Set **Control plane URL** / `pair_api_base` to the Laravel `APP_URL` (shown during pair).
 3. An authenticated admin assigns a customer.
 4. Laravel returns a one-time Garage key scoped to that customer bucket (approve only).
-5. The app uploads directly to `s3.rui.cam`; Laravel never handles backup bytes.
+5. The app uploads directly to the approve `s3_endpoint`; Laravel never handles backup bytes.
 
 Uploads are one-way and local deletions are not propagated. **Restore** downloads the complete approved customer bucket into a new, non-overwriting restore directory.
 

@@ -6,13 +6,22 @@ Docs: `SPEC.md` = technical contract + platform checklists. `README.md` = short 
 
 | System | Where |
 | --- | --- |
-| Control plane | Laravel `box-rui-cam` — default `https://backup.rui.cam`, editable via `pair_api_base` |
+| Control plane | Laravel `box-rui-cam` — public `APP_URL`. Desktop `pair_api_base` must match (default `https://backup.rui.cam`; editable + persisted) |
 | Sync app | this repo |
-| Object storage | Garage → `https://s3.rui.cam` |
+| Object storage | Garage — `s3_*` from pair approve only (Rui: `https://s3.rui.cam`) |
 
-Do not conflate pairing (control plane / `pair_api_base`) with object storage (`s3.rui.cam`). Desktop is not locked to `backup.rui.cam` only.
+Do not conflate pairing (`pair_api_base`) with object storage. Desktop does **not** pick the storage provider. Not locked to `backup.rui.cam` only.
 
 **Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy.
+
+## YOU DO — operator smoke
+
+After builds, operator (not agent) smokes Control plane URL:
+
+1. Laravel `APP_URL` = public control-plane base.
+2. Windows: `./build-windows.sh` → **CONTROL PLANE URL** = that `APP_URL` (blur + pair persist) → pair → confirm.
+3. Mac: `./build-macos.sh` → tray **Control plane URL…** → same → pair → confirm.
+4. Report failures; fix any `control_plane_url mismatch` in logs.
 
 ## Build & Launch Rules
 
@@ -49,7 +58,7 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 - Local manifest lives under `%LOCALAPPDATA%\BackupSyncTool` and updates only after successful upload verification.
 - S3: PutObject ≤ `s3_part_size_mib`; larger = persistent multipart. File concurrency capped at 2.
 - Pair start sends `supported_transports: ["s3"]`. Non-`s3` `transport` → re-pair.
-- Default `pair_api_base` = `https://backup.rui.cam`; must be editable + persisted (Windows UI field, macOS menu). Laravel may return `control_plane_url` on pair/start for confirmation; `s3_*` still from approve only.
+- Default `pair_api_base` = `https://backup.rui.cam`; editable + persisted (Windows **CONTROL PLANE URL** on blur + pair; macOS tray **Control plane URL…**). Shown during pair. Optional Laravel `control_plane_url` on pair/start → mismatch log if different. `s3_*` from approve only.
 - Logs always on under `logs/` next to exe.
 
 ## Storage Errors

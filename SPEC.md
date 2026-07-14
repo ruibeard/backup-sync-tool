@@ -9,8 +9,8 @@
 | S3 request construction | `rusty_s3` Sans-I/O actions | same |
 | Watcher | `notify` | `notify` (FSEvents) |
 | Secrets | Windows DPAPI | Keychain (`cam.rui.backupsynctool`) |
-| Control plane | Default `https://backup.rui.cam` — editable + persisted (`pair_api_base`) | same (macOS menu) |
-| Object storage | Garage at `https://s3.rui.cam` (from pair approve only) | same |
+| Control plane | `pair_api_base` (default `https://backup.rui.cam`; editable + persisted) | same |
+| Object storage | Garage `s3_*` from pair **approve** only — desktop never picks provider | same |
 
 Windows client: Windows 7 SP1 x64 through Windows 11.  
 macOS client: Apple Silicon / Intel Darwin; local `./build-macos.sh` uses **ad-hoc** codesign by default (no Keychain password prompts). Pass `--identity=…` or `MACOS_SIGN_IDENTITY=…` only when you want a real cert (e.g. package/release). Not notarized in v1.
@@ -21,7 +21,16 @@ Neither client uses WebDAV, async runtime, AWS SDK, Electron/webview, or data-mi
 
 `backupsynctool.json` sits next to the executable. Only `schema_version: 2` with `transport: "s3"` is accepted as paired configuration. Everything else starts unpaired.
 
-`pair_api_base` defaults to `https://backup.rui.cam` but **must** be editable and persisted (Windows UI field; macOS menu). The client is not locked to that host. Laravel may echo `control_plane_url` on pair/start for confirmation; Garage `s3_*` credentials and endpoint still come only from pair approve.
+### Control plane URL (`pair_api_base`)
+
+Must match the Laravel install’s public `APP_URL` (no trailing slash). Default `https://backup.rui.cam`; not locked to that host.
+
+| Platform | How to set | Persist |
+| --- | --- | --- |
+| Windows | Main UI **CONTROL PLANE URL** field | On blur and when starting pair |
+| macOS | Tray menu **Control plane URL…** | Immediately via `set_pair_api_base` |
+
+During pair, the UI shows which control plane is in use. `POST /api/pair/start` may return optional `control_plane_url`; if present and it differs from configured `pair_api_base`, the client logs `control_plane_url mismatch: configured=… echoed=…`. Garage `s3_*` credentials and endpoint still come **only** from pair approve — desktop does not choose storage.
 
 On macOS, `s3_secret_enc` / `device_token_enc` store Keychain handles (`kc1:<account>`), not DPAPI blobs. `start_with_windows` means **start at login** (LaunchAgent → `backupsynctool --daemon`).
 
@@ -85,9 +94,18 @@ XD detection is optional and checks only:
 
 The app decrypts `Number` and `ClientComercialName` and sends them separately with the detected install/backup paths and suggested customer label. A manually chosen folder does not pretend to be an XD installation. Pairing remains available when detection fails.
 
-The QR popup is a dedicated pairing window (~380×500): title “Scan to pair…”, large QR of the approve URL, status “Waiting for admin approval…”, pairing code, expiry note, and approve link. Windows uses Win32 (`pair_qr.rs`); macOS uses a modeless `NSPanel` with the same layout. The client polls until approved/rejected/expired. An approved response must contain `device_uuid`, device token, S3 endpoint/region/bucket/access key/secret, and the admin-approved customer name. Approval is persisted with DPAPI (Windows) or Keychain (macOS) and immediately starts the upload engine. macOS never sends XD detection fields.
+The QR popup is a dedicated pairing window (~380×500): title “Scan to pair…”, large QR of the approve URL, status “Waiting for admin approval…”, pairing code, expiry note, approve link, and the active control-plane base. Windows uses Win32 (`pair_qr.rs`); macOS uses a modeless `NSPanel` with the same layout. The client polls until approved/rejected/expired. An approved response must contain `device_uuid`, device token, S3 endpoint/region/bucket/access key/secret, and the admin-approved customer name. Approval is persisted with DPAPI (Windows) or Keychain (macOS) and immediately starts the upload engine. macOS never sends XD detection fields.
 
 Wire contract: `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`.
+
+## YOU DO — operator smoke (Control plane URL)
+
+Agent does not run Windows VM / interactive GUI smoke. Operator:
+
+1. Confirm Laravel `APP_URL` is the public control-plane URL you intend to pair with.
+2. **Windows:** `./build-windows.sh` from Mac → run `dist/windows/backupsynctool.exe` → set **CONTROL PLANE URL** to that `APP_URL` → pair → QR/status shows that server → admin approve → upload. Report failures.
+3. **Mac:** `./build-macos.sh` → tray **Control plane URL…** → same `APP_URL` → pair → confirm. Report failures.
+4. Mismatch log `control_plane_url mismatch` → fix desktop URL or Laravel `APP_URL` until they match.
 
 ## Upload engine
 
