@@ -42,11 +42,11 @@ Do **not** add signing-identity helper scripts or `security add-trusted-cert` to
 {
   "schema_version": 2,
   "watch_folder": "C:\\XDSoftware\\backups",
-  "remote_folder": "Palmeira Minimercado",
+  "remote_folder": "XDPT.59655-Palmeira-Minimercado",
   "transport": "s3",
   "s3_endpoint": "https://s3.rui.cam",
   "s3_region": "garage",
-  "s3_bucket": "backup-01abc...",
+  "s3_bucket": "XDPT.59655-Palmeira-Minimercado",
   "s3_access_key": "GK...",
   "s3_secret_enc": "DPAPI...",
   "s3_path_style": true,
@@ -61,6 +61,8 @@ Do **not** add signing-identity helper scripts or `security add-trusted-cert` to
   "s3_part_size_mib": 32
 }
 ```
+
+`s3_bucket` is the Garage bucket alias (uploads). `remote_folder` is the admin-approved customer label (XD style when detected). Newly provisioned destinations use the same string for both; case is preserved.
 
 Local sync state:
 
@@ -145,15 +147,17 @@ python3 assets/render-icons.py   # cairosvg, Pillow, ImageMagick, iconutil
 
 | Action | How |
 | --- | --- |
-| Main window | Menu → **Open Backup Sync Tool…** → `status_window.rs` (Windows-parity controls: watch folder, pair, restore, login toggle, auto-update, update, links) |
-| Logs | **Open Logs** |
-| Quit | **Quit Backup Sync** |
+| Main window | **Left-click** menubar shield → glance popover **under the status icon** (Cocoa `NSStatusItem` button window frame; status + **Recent uploads** after ~1s + **Open Window…** only). Full titled `NSWindow` via Open Window…. ⌘Q quits |
+| Tray menu | Secondary click (or menu) → **Open Backup Sync Tool…** / **Open Logs** / **Quit Backup Sync**. Left click does **not** show the menu (`set_show_menu_on_left_click(false)`). |
+| Shortcuts | Minimal `NSApp` main menu: **⌘Q** Quit · **⌘W** Close frontmost (status hides to menubar; pair QR closes; popover dismisses) |
+| Logs | Tray menu **Open Logs** |
+| Quit | Tray menu **Quit Backup Sync** (also ⌘Q) |
 | Daemon only | `backupsynctool --daemon` |
 
-Menubar holds status icon + the three items above only. Pairing QR remains a separate `NSPanel` (`notify.rs`). Routine notices use `notify_user()` / tray tips — not `NSAlert` action sheets for primary workflow.
+Menubar: left click → popover under icon; tray menu keeps Open / Logs / Quit. Pairing QR remains a separate `NSPanel` (`notify.rs`). Routine notices use `notify_user()` / tray tips — not `NSAlert` action sheets for primary workflow.
 
 Config/state: `~/Library/Application Support/BackupSyncTool/` · Secrets: Keychain `cam.rui.backupsynctool` (see Keychain table above).
 
-Checklist: menubar icon · **Open Backup Sync Tool…** status window · watch folder · pair QR window → sync · drop file uploads · quit/relaunch **no Keychain password prompt** (ad-hoc + `-A`) · restore · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
+Checklist: menubar icon · click → glance popover (uploads after 1s) · Open Window full UI · watch folder · pair QR → sync · drop file uploads · quit/relaunch **no Keychain password prompt** (ad-hoc + `-A`) · restore · login toggle → `~/Library/LaunchAgents/` · daemon when configured · second instance takeover · idle RSS ≤ 20 MB (`ps -o rss= -p $(pgrep -n backupsynctool)`).
 
 Limits: not notarized; release assets `backupsynctool.exe` + `backupsynctool-macos-*.tar.gz` on GitHub Releases.

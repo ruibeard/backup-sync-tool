@@ -1289,6 +1289,20 @@ fn local_name(name: &[u8]) -> String {
         .to_string()
 }
 
+/// AWS SigV4 URI encode (path-style / query): unreserved stay, else %XX.
+pub(crate) fn uri_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 3);
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

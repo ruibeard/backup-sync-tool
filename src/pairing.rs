@@ -105,6 +105,35 @@ pub fn is_s3_approval(status: &PairStatusResponse) -> bool {
         .is_some_and(|v| !v.trim().is_empty())
 }
 
+/// Validate admin-approved destination / bucket alias.
+/// Preserves XD labels like `XDPT.59655-Palmeira-Minimercado` (case kept).
+/// Rejects path traversal and empty names — does **not** rewrite the string.
+pub fn validate_destination_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() || name == "/" || name == "\\" {
+        return Err(
+            "Pairing approved without a customer destination. Re-pair after Laravel approves a concrete customer folder."
+                .into(),
+        );
+    }
+    if name.starts_with('/')
+        || name.starts_with('\\')
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.chars().any(char::is_control)
+    {
+        return Err(
+            "Pairing approved with an invalid destination folder. Re-pair after Laravel approves a concrete customer folder."
+                .into(),
+        );
+    }
+    if name.len() > 63 {
+        return Err("Destination name must be at most 63 characters.".into());
+    }
+    Ok(name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,12 +163,12 @@ mod tests {
             device_token: Some("t".into()),
             device_uuid: Some("device-uuid".into()),
             transport: Some("s3".into()),
-            remote_folder: Some("Cust".into()),
+            remote_folder: Some("XDPT.59655-Palmeira-Minimercado".into()),
             credential_profile_id: None,
             credential_version: None,
             s3_endpoint: Some("https://s3.rui.cam".into()),
             s3_region: None,
-            s3_bucket: Some("device-1".into()),
+            s3_bucket: Some("XDPT.59655-Palmeira-Minimercado".into()),
             s3_access_key: None,
             s3_secret_key: None,
             s3_path_style: None,
@@ -154,5 +183,16 @@ mod tests {
             ..s3
         };
         assert!(!is_s3_approval(&not_s3));
+    }
+
+    #[test]
+    fn validate_destination_preserves_xd_case() {
+        assert_eq!(
+            validate_destination_name("XDPT.59655-Palmeira-Minimercado").unwrap(),
+            "XDPT.59655-Palmeira-Minimercado"
+        );
+        assert!(validate_destination_name("../nope").is_err());
+        assert!(validate_destination_name("").is_err());
+        assert!(validate_destination_name("a/b").is_err());
     }
 }

@@ -256,26 +256,7 @@ fn approved_remote_folder(remote_folder: Option<&str>) -> std::result::Result<St
     let Some(remote_folder) = remote_folder else {
         return Err("Pairing approved but no destination folder was returned.".to_string());
     };
-    let raw = remote_folder.trim();
-    if raw.is_empty() || raw == "/" || raw == "\\" {
-        return Err(
-            "Pairing approved without a customer destination folder. Re-pair after Laravel approves a concrete customer folder."
-                .to_string(),
-        );
-    }
-    if raw.starts_with('/')
-        || raw.starts_with('\\')
-        || raw.contains('/')
-        || raw.contains('\\')
-        || raw.contains("..")
-        || raw.chars().any(char::is_control)
-    {
-        return Err(
-            "Pairing approved with an invalid destination folder. Re-pair after Laravel approves a concrete customer folder."
-                .to_string(),
-        );
-    }
-    Ok(raw.to_string())
+    crate::pairing::validate_destination_name(remote_folder)
 }
 
 unsafe fn apply_server_readonly(hwnd: HWND) {

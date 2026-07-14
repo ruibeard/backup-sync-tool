@@ -69,6 +69,8 @@ objc2-foundation = { version = "0.3", features = [
     "NSGeometry",
     "NSValue",
     "NSArray",
+    "NSDictionary",
+    "NSAttributedString",
 ] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
@@ -93,12 +95,17 @@ objc2-app-kit = { version = "0.3", features = [
     "NSScrollView",
     "NSClipView",
     "NSScroller",
-    "NSStackView",
-    "NSLayoutConstraint",
-    "NSLayoutAnchor",
-    "NSUserInterfaceLayout",
     "NSProgressIndicator",
     "NSParagraphStyle",
+    "NSVisualEffectView",
+    "NSScreen",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSAttributedString",
+    "objc2-quartz-core",
 ] }
 dispatch = "0.2"
 

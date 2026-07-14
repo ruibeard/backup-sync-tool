@@ -1,9 +1,11 @@
 //! macOS entry — menubar (default) or `--daemon` for LaunchAgent.
 
+mod brand;
 mod instance;
 mod launchd;
 mod menubar;
 pub(crate) mod notify;
+mod popover;
 mod status_window;
 
 use crate::host::SyncHost;

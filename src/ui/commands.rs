@@ -338,11 +338,6 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                         Ok(value) => value,
                                         Err(err) => break Err(err),
                                     };
-                                let remote_folder =
-                                    match approved_remote_folder(status.remote_folder.as_deref()) {
-                                        Ok(folder) => folder,
-                                        Err(err) => break Err(err),
-                                    };
                                 let s3_endpoint =
                                     match required_pair_field(status.s3_endpoint, "S3 endpoint") {
                                         Ok(value) => value,
@@ -353,9 +348,25 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                         "Pairing approved with invalid S3 endpoint: {err}"
                                     ));
                                 }
-                                let s3_bucket =
+                                let s3_bucket_raw =
                                     match required_pair_field(status.s3_bucket, "S3 bucket") {
                                         Ok(value) => value,
+                                        Err(err) => break Err(err),
+                                    };
+                                let s3_bucket =
+                                    match crate::pairing::validate_destination_name(&s3_bucket_raw)
+                                    {
+                                        Ok(value) => value,
+                                        Err(err) => break Err(err),
+                                    };
+                                let remote_raw = status
+                                    .remote_folder
+                                    .as_deref()
+                                    .filter(|v| !v.trim().is_empty())
+                                    .unwrap_or(s3_bucket.as_str());
+                                let remote_folder =
+                                    match crate::pairing::validate_destination_name(remote_raw) {
+                                        Ok(folder) => folder,
                                         Err(err) => break Err(err),
                                     };
                                 let s3_access_key = match required_pair_field(

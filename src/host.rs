@@ -179,9 +179,16 @@ impl SyncHost {
             );
         }
         let device_token = required_field(status.device_token, "device token")?;
-        let remote_folder = approved_remote_folder(status.remote_folder.as_deref())?;
         let s3_endpoint = required_field(status.s3_endpoint, "S3 endpoint")?;
-        let s3_bucket = required_field(status.s3_bucket, "S3 bucket")?;
+        let s3_bucket =
+            pairing::validate_destination_name(&required_field(status.s3_bucket, "S3 bucket")?)?;
+        let remote_folder = pairing::validate_destination_name(
+            status
+                .remote_folder
+                .as_deref()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(s3_bucket.as_str()),
+        )?;
         let s3_access_key = required_field(status.s3_access_key, "S3 access key")?;
         let s3_secret_key = required_field(status.s3_secret_key, "S3 secret key")?;
 
@@ -266,14 +273,6 @@ fn required_field(value: Option<String>, label: &str) -> Result<String, String> 
     } else {
         Ok(value)
     }
-}
-
-fn approved_remote_folder(value: Option<&str>) -> Result<String, String> {
-    let folder = value.unwrap_or("").trim();
-    if folder.is_empty() {
-        return Err("Pairing approved without a destination folder.".into());
-    }
-    Ok(folder.to_string())
 }
 
 fn approval_timestamp_now() -> String {

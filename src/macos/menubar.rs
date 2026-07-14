@@ -5,18 +5,133 @@ use crate::host::SyncHost;
 use crate::logs;
 use crate::macos::launchd;
 use crate::macos::notify;
-use crate::macos::status_window::{self, StatusAction, StatusSnapshot};
+use crate::macos::popover::{self, PopoverAction};
+use crate::macos::status_window::{self, StatusAction, StatusSnapshot, TrayAnchor};
 use crate::updater::{self, CheckResult};
 use dispatch::Queue;
-use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusItem,
+};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem as TrayMenuItem, PredefinedMenuItem};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+
+#[derive(Default)]
+struct MenuTargetIvars;
+
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BstMenuTarget"]
+    #[ivars = MenuTargetIvars]
+    struct MenuTarget;
+
+    unsafe impl NSObjectProtocol for MenuTarget {}
+
+    impl MenuTarget {
+        /// ⌘W — dismiss popover / close pair panel / hide status window.
+        #[unsafe(method(bstCloseFront:))]
+        fn bst_close_front(&self, _: Option<&AnyObject>) {
+            close_frontmost_window();
+        }
+    }
+);
+
+fn close_frontmost_window() {
+    if popover::is_open() {
+        popover::close();
+        return;
+    }
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if let Some(key) = app.keyWindow() {
+        if notify::is_pair_panel_window(&key) {
+            notify::close_pair_panel();
+        } else {
+            // Status window: windowShouldClose → orderOut (hide to menubar).
+            key.performClose(None);
+        }
+        return;
+    }
+    if status_window::is_open() {
+        status_window::close();
+    } else if notify::pair_panel_is_open() {
+        notify::close_pair_panel();
+    }
+}
+
+/// Minimal main menu so ⌘Q / ⌘W work (LSUIElement has no default menu).
+fn install_main_menu(mtm: MainThreadMarker) {
+    let app = NSApplication::sharedApplication(mtm);
+    let target: Retained<MenuTarget> =
+        unsafe { msg_send![super(MenuTarget::alloc(mtm).set_ivars(MenuTargetIvars)), init] };
+
+    let main_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("MainMenu"));
+
+    // App menu (title becomes process name in the menu bar).
+    let app_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("App"));
+    let quit = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Quit Backup Sync Tool"),
+            Some(sel!(terminate:)),
+            &NSString::from_str("q"),
+        )
+    };
+    unsafe {
+        quit.setTarget(Some(&*app));
+    }
+    app_menu.addItem(&quit);
+    let app_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("App"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    app_item.setSubmenu(Some(&app_menu));
+    main_menu.addItem(&app_item);
+
+    // File → Close (⌘W)
+    let file_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("File"));
+    let close = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Close"),
+            Some(sel!(bstCloseFront:)),
+            &NSString::from_str("w"),
+        )
+    };
+    unsafe {
+        close.setTarget(Some(&*target));
+    }
+    file_menu.addItem(&close);
+    let file_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("File"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    file_item.setSubmenu(Some(&file_menu));
+    main_menu.addItem(&file_item);
+
+    app.setMainMenu(Some(&main_menu));
+    // Keep menu target alive for the process lifetime.
+    std::mem::forget(target);
+}
 
 const ICON_IDLE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -55,6 +170,7 @@ struct Shared {
     tray: Arc<Mutex<MainTray>>,
     icons: Arc<TrayIcons>,
     busy: Arc<AtomicBool>,
+    update_available: Arc<AtomicBool>,
 }
 
 /// Run accessory menu-bar app (icon in the macOS status bar). Blocks until Quit.
@@ -62,6 +178,7 @@ pub fn run() {
     let mtm = MainThreadMarker::new().expect("menubar must run on main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    install_main_menu(mtm);
 
     let host = Arc::new(Mutex::new(SyncHost::load()));
     let _ = logs::ensure_logs_dir();
@@ -75,20 +192,13 @@ pub fn run() {
         }
     }
 
-    if host.lock().expect("host").config.auto_update {
-        thread::spawn(|| {
-            let line = updater::check_status_line(env!("CARGO_PKG_VERSION"));
-            logs::append(&line);
-        });
-    }
-
     let icon_idle = png_to_icon(ICON_IDLE).expect("menubar idle icon");
     let icon_syncing = png_to_icon(ICON_SYNCING).expect("menubar syncing icon");
     let icon_complete = png_to_icon(ICON_COMPLETE).expect("menubar complete icon");
 
-    let open_window = MenuItem::new("Open Backup Sync Tool…", true, None);
-    let open_logs = MenuItem::new("Open Logs", true, None);
-    let quit = MenuItem::new("Quit Backup Sync", true, None);
+    let open_window = TrayMenuItem::new("Open Backup Sync Tool…", true, None);
+    let open_logs = TrayMenuItem::new("Open Logs", true, None);
+    let quit = TrayMenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
         open_window: open_window.id().as_ref().to_string(),
@@ -105,11 +215,12 @@ pub fn run() {
     let tray = TrayIconBuilder::new()
         .with_tooltip("Backup Sync Tool")
         .with_icon(icon_idle.clone())
-        // Template → system paints white/black for menu bar (usual macOS look).
         .with_icon_as_template(true)
         .with_menu(Box::new(menu))
         .build()
         .expect("create menubar status item");
+    // Primary click → popover; menu stays for secondary click.
+    tray.set_show_menu_on_left_click(false);
 
     let tray = Arc::new(Mutex::new(MainTray(tray)));
     let icons = Arc::new(TrayIcons {
@@ -118,13 +229,46 @@ pub fn run() {
         complete: icon_complete,
     });
     let busy = Arc::new(AtomicBool::new(false));
+    let update_available = Arc::new(AtomicBool::new(false));
     let shared = Shared {
         host: host.clone(),
         tray: tray.clone(),
         icons: icons.clone(),
         busy: busy.clone(),
+        update_available: update_available.clone(),
     };
     apply_status(&shared);
+
+    // Always check once so Update link can appear when needed (Windows parity).
+    {
+        let shared_up = shared.clone();
+        let auto = host.lock().expect("host").config.auto_update;
+        thread::spawn(move || match updater::check(env!("CARGO_PKG_VERSION")) {
+            CheckResult::UpdateAvailable(info) => {
+                logs::append(&format!("Update available: v{}", info.version));
+                shared_up
+                    .update_available
+                    .store(true, Ordering::SeqCst);
+                refresh_status_window(&shared_up);
+                if auto {
+                    tip(&shared_up.tray, &format!("Downloading v{}…", info.version));
+                    if let Err(err) = updater::download_and_replace(&info.url, |_| {}) {
+                        tip(&shared_up.tray, &format!("Update failed: {err}"));
+                    }
+                }
+            }
+            CheckResult::UpToDate => {
+                logs::append("updater: up to date");
+                shared_up
+                    .update_available
+                    .store(false, Ordering::SeqCst);
+                refresh_status_window(&shared_up);
+            }
+            CheckResult::Error(e) => {
+                logs::append(&format!("Update check error: {e}"));
+            }
+        });
+    }
 
     let running = Arc::new(AtomicBool::new(true));
     let shared_ev = shared.clone();
@@ -148,6 +292,28 @@ pub fn run() {
         }
     }));
 
+    let shared_tray = shared.clone();
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            // Always resolve NSStatusItem frame on main (Cocoa bottom-left).
+            // Never use tray-icon event.rect (physical / flipped Y → mid-screen).
+            let shared = shared_tray.clone();
+            Queue::main().exec_async(move || {
+                let anchor = cocoa_status_item_anchor(&shared);
+                logs::append(&format!(
+                    "menubar: primary click → popover anchor={:?}",
+                    anchor.map(|a| (a.x, a.y, a.w, a.h))
+                ));
+                open_popover(&shared, anchor);
+            });
+        }
+    }));
+
     let shared_tick = shared.clone();
     let running_tick = running.clone();
     thread::spawn(move || {
@@ -165,7 +331,25 @@ pub fn run() {
     app.run();
 }
 
-fn snapshot_from(host: &SyncHost) -> StatusSnapshot {
+/// Cocoa screen frame of the status-item button (bottom-left origin).
+fn cocoa_status_item_anchor(shared: &Shared) -> Option<TrayAnchor> {
+    let mtm = MainThreadMarker::new()?;
+    let tray = shared.tray.lock().ok()?;
+    let item: Retained<NSStatusItem> = tray.0.ns_status_item()?;
+    let button = item.button(mtm)?;
+    let window = button.window()?;
+    // Button bounds → screen (same space as NSWindow.setFrame).
+    let f = window.convertRectToScreen(button.frame());
+    Some(TrayAnchor {
+        x: f.origin.x,
+        y: f.origin.y,
+        w: f.size.width,
+        h: f.size.height,
+        scale: 1.0,
+    })
+}
+
+fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
     let paired = host.is_paired();
     let connected = paired && !host.auth_failed();
     let server_status = if host.auth_failed() {
@@ -189,80 +373,118 @@ fn snapshot_from(host: &SyncHost) -> StatusSnapshot {
         server_status,
         start_at_login: host.config.start_with_windows,
         auto_update: host.config.auto_update,
-        activity_lines: crate::logs::recent_lines(200),
+        activity_lines: Vec::new(),
         syncing,
         sync_status,
         version: env!("CARGO_PKG_VERSION").into(),
+        update_available,
     }
+}
+
+/// Glance open/refresh: status only. Upload list fills ~1s later inside popover
+/// (see `popover::schedule_upload_fill`) so open does not read logs.
+fn glance_snapshot(shared: &Shared, host: &SyncHost) -> StatusSnapshot {
+    let mut s = snapshot_from(host, shared.update_available.load(Ordering::SeqCst));
+    s.activity_lines = Vec::new();
+    s
+}
+
+fn window_snapshot(shared: &Shared, host: &SyncHost) -> StatusSnapshot {
+    let mut s = snapshot_from(host, shared.update_available.load(Ordering::SeqCst));
+    // Filtered UI feed (no Upload progress spam) — raw lines stay on disk.
+    s.activity_lines = crate::logs::recent_activity_for_ui(60);
+    s
+}
+
+fn open_popover(shared: &Shared, anchor: Option<TrayAnchor>) {
+    let snap = shared
+        .host
+        .lock()
+        .map(|h| glance_snapshot(shared, &h))
+        .unwrap_or_default();
+    let shared_cb = shared.clone();
+    let on_action = Arc::new(move |action| match action {
+        PopoverAction::OpenWindow => {
+            popover::close();
+            open_main_window(&shared_cb);
+        }
+    });
+    popover::toggle(snap, on_action, anchor);
 }
 
 fn open_main_window(shared: &Shared) {
     let snap = shared
         .host
         .lock()
-        .map(|h| snapshot_from(&h))
+        .map(|h| window_snapshot(shared, &h))
         .unwrap_or_default();
     let shared_cb = shared.clone();
-    status_window::show(
-        snap,
-        Arc::new(move |action| match action {
-            StatusAction::OpenWatch => {
-                if let Ok(h) = shared_cb.host.lock() {
-                    let path = h.config.watch_folder.clone();
-                    if !path.trim().is_empty() {
-                        let _ = std::process::Command::new("open").arg(&path).status();
-                    } else {
-                        tip(&shared_cb.tray, "No watch folder set");
-                    }
+    let on_action = Arc::new(move |action| match action {
+        StatusAction::OpenWatch => {
+            do_open_finder(&shared_cb);
+        }
+        StatusAction::ChooseWatch => start_set_watch(&shared_cb),
+        StatusAction::Pair => start_pair(&shared_cb),
+        StatusAction::Restore => start_restore(&shared_cb),
+        StatusAction::ToggleLogin => {
+            do_toggle_login(&shared_cb);
+            refresh_status_window(&shared_cb);
+        }
+        StatusAction::ToggleAutoUpdate => {
+            if let Ok(mut h) = shared_cb.host.lock() {
+                h.config.auto_update = !h.config.auto_update;
+                let on = h.config.auto_update;
+                if let Err(err) = config::save(&h.config) {
+                    tip(&shared_cb.tray, &format!("Save failed: {err}"));
+                } else {
+                    tip(
+                        &shared_cb.tray,
+                        if on {
+                            "Auto-update ON"
+                        } else {
+                            "Auto-update OFF"
+                        },
+                    );
                 }
             }
-            StatusAction::ChooseWatch => start_set_watch(&shared_cb),
-            StatusAction::Pair => start_pair(&shared_cb),
-            StatusAction::Restore => start_restore(&shared_cb),
-            StatusAction::ToggleLogin => {
-                do_toggle_login(&shared_cb);
-                refresh_status_window(&shared_cb);
-            }
-            StatusAction::ToggleAutoUpdate => {
-                if let Ok(mut h) = shared_cb.host.lock() {
-                    h.config.auto_update = !h.config.auto_update;
-                    let on = h.config.auto_update;
-                    if let Err(err) = config::save(&h.config) {
-                        tip(&shared_cb.tray, &format!("Save failed: {err}"));
-                    } else {
-                        tip(
-                            &shared_cb.tray,
-                            if on {
-                                "Auto-update ON"
-                            } else {
-                                "Auto-update OFF"
-                            },
-                        );
-                    }
-                }
-                refresh_status_window(&shared_cb);
-            }
-            StatusAction::Update => start_update(&shared_cb),
-            StatusAction::OpenGithub => {
-                status_window::open_url("https://github.com/ruibeard/backup-sync-tool")
-            }
-            StatusAction::OpenAuthor => status_window::open_url("https://rui.cam"),
-        }),
-    );
+            refresh_status_window(&shared_cb);
+        }
+        StatusAction::Update => start_update(&shared_cb),
+        StatusAction::OpenGithub => {
+            status_window::open_url("https://github.com/ruibeard/backup-sync-tool")
+        }
+        StatusAction::OpenAuthor => status_window::open_url("https://rui.cam"),
+    });
+    status_window::show(snap, on_action);
 }
 
 fn refresh_status_window(shared: &Shared) {
-    if !status_window::is_open() {
-        return;
+    if status_window::is_open() {
+        if let Ok(h) = shared.host.lock() {
+            status_window::refresh(window_snapshot(shared, &h));
+        }
     }
-    if let Ok(h) = shared.host.lock() {
-        status_window::refresh(snapshot_from(&h));
+    if popover::is_open() {
+        if let Ok(h) = shared.host.lock() {
+            popover::refresh(glance_snapshot(shared, &h));
+        }
     }
 }
 
 fn do_open_logs() {
     let dir = logs::ensure_logs_dir();
     let _ = std::process::Command::new("open").arg(&dir).status();
+}
+
+fn do_open_finder(shared: &Shared) {
+    if let Ok(h) = shared.host.lock() {
+        let path = h.config.watch_folder.clone();
+        if !path.trim().is_empty() {
+            let _ = std::process::Command::new("open").arg(&path).status();
+        } else {
+            tip(&shared.tray, "No watch folder set");
+        }
+    }
 }
 
 fn do_toggle_login(shared: &Shared) {
@@ -438,18 +660,24 @@ fn start_restore(shared: &Shared) {
 }
 
 fn start_update(shared: &Shared) {
-    let tray = shared.tray.clone();
+    let shared = shared.clone();
     thread::spawn(move || {
-        tip(&tray, "Checking for update…");
+        tip(&shared.tray, "Checking for update…");
         match updater::check(env!("CARGO_PKG_VERSION")) {
             CheckResult::UpdateAvailable(info) => {
-                tip(&tray, &format!("Downloading v{}…", info.version));
+                shared.update_available.store(true, Ordering::SeqCst);
+                refresh_status_window(&shared);
+                tip(&shared.tray, &format!("Downloading v{}…", info.version));
                 if let Err(err) = updater::download_and_replace(&info.url, |_| {}) {
-                    tip(&tray, &format!("Update failed: {err}"));
+                    tip(&shared.tray, &format!("Update failed: {err}"));
                 }
             }
-            CheckResult::UpToDate => tip(&tray, "Up to date"),
-            CheckResult::Error(e) => tip(&tray, &format!("Update: {e}")),
+            CheckResult::UpToDate => {
+                shared.update_available.store(false, Ordering::SeqCst);
+                refresh_status_window(&shared);
+                tip(&shared.tray, "Up to date");
+            }
+            CheckResult::Error(e) => tip(&shared.tray, &format!("Update: {e}")),
         }
     });
 }
@@ -523,6 +751,7 @@ fn apply_status(shared: &Shared) {
     };
     set_icon(&shared.tray, &shared.icons, kind);
     tip(&shared.tray, &tip_text);
+    refresh_status_window(shared);
 }
 
 fn pick_folder(prompt: &str) -> Option<PathBuf> {

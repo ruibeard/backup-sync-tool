@@ -2,23 +2,56 @@
 
 use dispatch::Queue;
 use objc2::rc::Retained;
-use objc2::{AnyThread, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont, NSImage,
-    NSImageView, NSImageScaling, NSPanel, NSTextAlignment, NSTextField, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSButton,
+    NSFont, NSImage, NSImageView, NSImageScaling, NSPanel, NSTextAlignment, NSTextField, NSWindow,
+    NSWindowStyleMask, NSWorkspace,
 };
-use objc2_foundation::{NSData, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSData, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
+};
 use qrcodegen::{QrCode, QrCodeEcc};
+use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 /// NSPanel is !Send; only touch on main queue.
-struct PairPanel(Retained<NSPanel>);
+struct PairPanel {
+    panel: Retained<NSPanel>,
+    #[allow(dead_code)]
+    link_target: Retained<PairLinkTarget>,
+}
 unsafe impl Send for PairPanel {}
 unsafe impl Sync for PairPanel {}
 
 static PAIR_PANEL: Mutex<Option<PairPanel>> = Mutex::new(None);
+
+struct PairLinkIvars {
+    url: RefCell<String>,
+}
+
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BstPairLinkTarget"]
+    #[ivars = PairLinkIvars]
+    struct PairLinkTarget;
+
+    unsafe impl NSObjectProtocol for PairLinkTarget {}
+
+    impl PairLinkTarget {
+        #[unsafe(method(actOpenLink:))]
+        fn act_open_link(&self, _: Option<&AnyObject>) {
+            let url = self.ivars().url.borrow().clone();
+            if let Some(nsurl) = NSURL::URLWithString(&NSString::from_str(&url)) {
+                let _ = NSWorkspace::sharedWorkspace().openURL(&nsurl);
+            }
+        }
+    }
+);
 
 fn pbcopy(text: &str) {
     if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() {
@@ -201,20 +234,32 @@ fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
         false,
     ));
 
-    let link = label(
-        mtm,
-        approve_url,
-        NSRect {
-            origin: NSPoint { x: 18.0, y: 48.0 },
-            size: NSSize {
-                width: width - 36.0,
-                height: 36.0,
-            },
+    let link_target: Retained<PairLinkTarget> = unsafe {
+        msg_send![
+            super(PairLinkTarget::alloc(mtm).set_ivars(PairLinkIvars {
+                url: RefCell::new(approve_url.to_string()),
+            })),
+            init
+        ]
+    };
+    let link = NSButton::new(mtm);
+    link.setTitle(&NSString::from_str(approve_url));
+    link.setBezelStyle(NSBezelStyle::AccessoryBar);
+    link.setBordered(false);
+    link.setFrame(NSRect {
+        origin: NSPoint { x: 18.0, y: 40.0 },
+        size: NSSize {
+            width: width - 36.0,
+            height: 40.0,
         },
-        10.0,
-        false,
-    );
-    link.setTextColor(Some(&NSColor::linkColor()));
+    });
+    let font = NSFont::systemFontOfSize(10.0);
+    link.setFont(Some(&font));
+    link.setContentTintColor(Some(&crate::macos::brand::green()));
+    unsafe {
+        link.setTarget(Some(&*( &*link_target as *const PairLinkTarget as *const AnyObject)));
+        link.setAction(Some(sel!(actOpenLink:)));
+    }
     content.addSubview(&link);
 
     panel.center();
@@ -223,7 +268,10 @@ fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
     crate::logs::append("pair panel showing (Windows-style)");
 
     if let Ok(mut guard) = PAIR_PANEL.lock() {
-        *guard = Some(PairPanel(panel));
+        *guard = Some(PairPanel {
+            panel,
+            link_target,
+        });
     }
 }
 
@@ -234,12 +282,44 @@ pub fn pair_finished() {
     });
 }
 
-fn close_pair_panel_inner() {
-    if let Ok(mut guard) = PAIR_PANEL.lock() {
-        if let Some(PairPanel(panel)) = guard.take() {
-            panel.orderOut(None);
-            panel.close();
+/// Close pair QR panel if showing (Cmd+W / finish).
+pub fn close_pair_panel() {
+    let run = || close_pair_panel_inner();
+    if MainThreadMarker::new().is_some() {
+        run();
+    } else {
+        Queue::main().exec_async(run);
+    }
+}
+
+pub fn pair_panel_is_open() -> bool {
+    PAIR_PANEL
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
+}
+
+pub fn is_pair_panel_window(window: &NSWindow) -> bool {
+    let Ok(guard) = PAIR_PANEL.lock() else {
+        return false;
+    };
+    match guard.as_ref() {
+        Some(PairPanel { panel, .. }) => {
+            // NSPanel is NSWindow; compare object identity.
+            std::ptr::eq(
+                Retained::as_ptr(panel) as *const NSWindow,
+                window as *const NSWindow,
+            )
         }
+        None => false,
+    }
+}
+
+fn close_pair_panel_inner() {
+    let taken = PAIR_PANEL.lock().ok().and_then(|mut guard| guard.take());
+    if let Some(PairPanel { panel, .. }) = taken {
+        panel.orderOut(None);
+        panel.close();
     }
 }
 
