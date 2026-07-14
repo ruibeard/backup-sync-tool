@@ -143,6 +143,29 @@ fn default_pair_api_base() -> String {
     "https://backup.rui.cam".to_string()
 }
 
+/// Normalize Laravel control-plane base URL (no `/api` suffix).
+pub fn normalize_pair_api_base(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Control plane URL is required.".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("Control plane URL must start with http:// or https://.".into());
+    }
+    let without_trail = trimmed.trim_end_matches('/');
+    let path_start = without_trail
+        .find("://")
+        .and_then(|i| without_trail[i + 3..].find('/').map(|j| i + 3 + j));
+    if let Some(idx) = path_start {
+        let path = &without_trail[idx..];
+        if path.eq_ignore_ascii_case("/api") || path.to_ascii_lowercase().starts_with("/api/") {
+            return Err("Use the site root (e.g. https://backup.example.com), not /api.".into());
+        }
+    }
+    Ok(without_trail.to_string())
+}
+
 fn default_s3_region() -> String {
     "garage".to_string()
 }
@@ -154,8 +177,13 @@ fn default_s3_part_size_mib() -> u64 {
 pub fn load() -> Config {
     let path = config_path();
     if let Ok(data) = std::fs::read_to_string(&path) {
-        let parsed: Config = serde_json::from_str(&data).unwrap_or_default();
+        let mut parsed: Config = serde_json::from_str(&data).unwrap_or_default();
         if parsed.schema_version == 2 {
+            if parsed.pair_api_base.trim().is_empty() {
+                parsed.pair_api_base = default_pair_api_base();
+            } else if let Ok(normalized) = normalize_pair_api_base(&parsed.pair_api_base) {
+                parsed.pair_api_base = normalized;
+            }
             parsed
         } else {
             Config::default()
@@ -239,6 +267,18 @@ mod tests {
 
         cfg.parallel_uploads = 0;
         assert_eq!(effective_parallel_uploads(&cfg), 1);
+    }
+
+    #[test]
+    fn normalize_pair_api_base_strips_slash_and_rejects_api_path() {
+        assert_eq!(
+            normalize_pair_api_base(" https://backup.example.com/ ").unwrap(),
+            "https://backup.example.com"
+        );
+        assert!(normalize_pair_api_base("").is_err());
+        assert!(normalize_pair_api_base("backup.example.com").is_err());
+        assert!(normalize_pair_api_base("https://backup.example.com/api").is_err());
+        assert!(normalize_pair_api_base("https://backup.example.com/api/pair").is_err());
     }
 
     #[test]

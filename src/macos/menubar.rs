@@ -154,6 +154,7 @@ unsafe impl Sync for MainTray {}
 struct Ids {
     open_window: String,
     open_logs: String,
+    set_control_plane: String,
     quit: String,
 }
 
@@ -198,17 +199,20 @@ pub fn run() {
 
     let open_window = TrayMenuItem::new("Open Backup Sync Tool…", true, None);
     let open_logs = TrayMenuItem::new("Open Logs", true, None);
+    let set_control_plane = TrayMenuItem::new("Control plane URL…", true, None);
     let quit = TrayMenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
         open_window: open_window.id().as_ref().to_string(),
         open_logs: open_logs.id().as_ref().to_string(),
+        set_control_plane: set_control_plane.id().as_ref().to_string(),
         quit: quit.id().as_ref().to_string(),
     };
 
     let menu = Menu::new();
     let _ = menu.append(&open_window);
     let _ = menu.append(&open_logs);
+    let _ = menu.append(&set_control_plane);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
@@ -289,6 +293,10 @@ pub fn run() {
         }
         if id == ids.open_logs {
             do_open_logs();
+            return;
+        }
+        if id == ids.set_control_plane {
+            start_set_control_plane(&shared_ev);
         }
     }));
 
@@ -381,8 +389,7 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
     }
 }
 
-/// Glance open/refresh: status only. Upload list fills ~1s later inside popover
-/// (see `popover::schedule_upload_fill`) so open does not read logs.
+/// Glance open/refresh: status fields only. Popover reads upload basenames itself on open.
 fn glance_snapshot(shared: &Shared, host: &SyncHost) -> StatusSnapshot {
     let mut s = snapshot_from(host, shared.update_available.load(Ordering::SeqCst));
     s.activity_lines = Vec::new();
@@ -525,6 +532,43 @@ fn start_set_watch(shared: &Shared) {
     });
 }
 
+fn start_set_control_plane(shared: &Shared) {
+    let shared = shared.clone();
+    thread::spawn(move || {
+        let current = shared
+            .host
+            .lock()
+            .map(|h| {
+                let base = h.config.pair_api_base.trim();
+                if base.is_empty() {
+                    "https://backup.rui.cam".into()
+                } else {
+                    h.config.pair_api_base.clone()
+                }
+            })
+            .unwrap_or_else(|_| "https://backup.rui.cam".into());
+        let Some(raw) = notify::prompt_url(
+            "Control plane URL",
+            "Laravel site root used for pairing (not /api).",
+            &current,
+        ) else {
+            return;
+        };
+        match shared.host.lock().expect("host").set_pair_api_base(&raw) {
+            Ok(()) => {
+                let url = shared
+                    .host
+                    .lock()
+                    .map(|h| h.config.pair_api_base.clone())
+                    .unwrap_or(raw);
+                tip(&shared.tray, &format!("Control plane: {url}"));
+                logs::append(&format!("menubar: control plane URL → {url}"));
+            }
+            Err(err) => tip(&shared.tray, &format!("Control plane: {err}")),
+        }
+    });
+}
+
 fn start_pair(shared: &Shared) {
     if shared.busy.swap(true, Ordering::SeqCst) {
         tip(&shared.tray, "Already busy…");
@@ -549,7 +593,14 @@ fn start_pair(shared: &Shared) {
                     return;
                 }
             };
-            let api_base = h.config.pair_api_base.clone();
+            let api_base = {
+                let base = h.config.pair_api_base.trim();
+                if base.is_empty() {
+                    "https://backup.rui.cam".into()
+                } else {
+                    h.config.pair_api_base.clone()
+                }
+            };
             (h.pair_start_request(), api_base)
         }; // host lock dropped before network/UI
 
@@ -569,10 +620,11 @@ fn start_pair(shared: &Shared) {
         };
 
         eprintln!("Pairing code: {}", start.code);
+        eprintln!("Control plane: {api_base}");
         eprintln!("Approve URL:  {}", start.approve_url);
-        let waiting = format!("Pairing… code {} — waiting for approval", start.code);
+        let waiting = format!("Pairing… code {} — {api_base}", start.code);
         tip(&shared.tray, &waiting);
-        notify::pair_started(&start.code, &start.approve_url);
+        notify::pair_started(&start.code, &start.approve_url, &api_base);
 
         let sleep_ms = start.poll_interval_ms.clamp(1000, 10_000);
         let deadline = std::time::Instant::now() + Duration::from_secs(300);

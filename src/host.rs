@@ -77,6 +77,14 @@ impl SyncHost {
         Ok(())
     }
 
+    pub fn set_pair_api_base(&mut self, raw: &str) -> Result<(), String> {
+        let normalized = config::normalize_pair_api_base(raw)?;
+        self.config.pair_api_base = normalized.clone();
+        config::save(&self.config).map_err(|e| format!("save config: {e}"))?;
+        logs::append(&format!("Control plane URL set: {normalized}"));
+        Ok(())
+    }
+
     pub fn stop_sync(&mut self) {
         self.engine = None;
     }

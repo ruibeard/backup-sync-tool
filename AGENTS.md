@@ -6,11 +6,11 @@ Docs: `SPEC.md` = technical contract + platform checklists. `README.md` = short 
 
 | System | Where |
 | --- | --- |
-| Control plane | Laravel `box-rui-cam` → `https://backup.rui.cam` |
+| Control plane | Laravel `box-rui-cam` — default `https://backup.rui.cam`, editable via `pair_api_base` |
 | Sync app | this repo |
 | Object storage | Garage → `https://s3.rui.cam` |
 
-Do not conflate pairing (`backup.rui.cam`) with object storage (`s3.rui.cam`).
+Do not conflate pairing (control plane / `pair_api_base`) with object storage (`s3.rui.cam`). Desktop is not locked to `backup.rui.cam` only.
 
 **Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy.
 
@@ -66,7 +66,7 @@ Script builds, codesigns, kills old process, launches `.app`, checks pid. Confir
 - Local manifest lives under `%LOCALAPPDATA%\BackupSyncTool` and updates only after successful upload verification.
 - S3: PutObject ≤ `s3_part_size_mib`; larger = persistent multipart. File concurrency capped at 2.
 - Pair start sends `supported_transports: ["s3"]`. Non-`s3` `transport` → re-pair.
-- Default `pair_api_base` = `https://backup.rui.cam`.
+- Default `pair_api_base` = `https://backup.rui.cam`; must be editable + persisted (Windows UI field, macOS menu). Laravel may return `control_plane_url` on pair/start for confirmation; `s3_*` still from approve only.
 - Logs always on under `logs/` next to exe.
 
 ## Storage Errors

@@ -9,8 +9,10 @@ unsafe fn show_pair_qr_window(parent: HWND) {
     let hfont = mkfont_px("Segoe UI", FONT_BODY_PX, FW_NORMAL.0 as i32);
     let hfont_b = mkfont_px("Segoe UI", FONT_EMPHASIS_PX, FW_SEMIBOLD.0 as i32);
     let hfont_code = mkfont_px("Segoe UI", 20, FW_SEMIBOLD.0 as i32);
+    let api_base = st.config.pair_api_base.clone();
     let state = Box::new(PairQrState {
         parent,
+        api_base,
         code: String::new(),
         approve_url: String::new(),
         ready: false,
@@ -74,16 +76,21 @@ unsafe fn update_pair_qr_window(parent: HWND, code: &str, approve_url: &str) {
         return;
     }
 
-    {
+    let plane = {
         let st = pair_qr_state(hwnd);
         st.code = code.to_string();
         st.approve_url = approve_url.to_string();
         st.ready = true;
-    }
+        st.api_base.clone()
+    };
 
     let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_PAIR_QR_TITLE as i32),
         &hstring("Scan to pair with the server"),
+    );
+    let _ = SetWindowTextW(
+        GetDlgItem(hwnd, IDC_PAIR_QR_SERVER as i32),
+        &hstring(&plane),
     );
     let _ = SetWindowTextW(
         GetDlgItem(hwnd, IDC_PAIR_QR_STATUS as i32),
@@ -133,6 +140,8 @@ unsafe extern "system" fn pair_qr_wnd_proc(
                 hdc,
                 COLORREF(if id == IDC_PAIR_QR_LINK {
                     C_BLUE
+                } else if id == IDC_PAIR_QR_SERVER {
+                    0x00777777
                 } else {
                     C_LABEL
                 }),
@@ -188,10 +197,22 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         IDC_PAIR_QR_TITLE,
         "Preparing pairing request...",
         margin,
-        18,
+        14,
         PAIR_QR_CLIENT_W - margin * 2,
-        24,
+        22,
         st.hfont_b,
+        SS_CENTER,
+    );
+    mkstatic_align(
+        hwnd,
+        hi,
+        IDC_PAIR_QR_SERVER,
+        &st.api_base,
+        margin,
+        38,
+        PAIR_QR_CLIENT_W - margin * 2,
+        20,
+        st.hfont,
         SS_CENTER,
     );
     mkstatic_align(
@@ -200,7 +221,7 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         IDC_PAIR_QR_STATUS,
         "Contacting server...",
         margin,
-        332,
+        352,
         PAIR_QR_CLIENT_W - margin * 2,
         22,
         st.hfont_b,
@@ -212,7 +233,7 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         IDC_PAIR_QR_CODE,
         "Code: pending",
         margin,
-        360,
+        380,
         PAIR_QR_CLIENT_W - margin * 2,
         28,
         st.hfont_code,
@@ -224,7 +245,7 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         0,
         "This code expires in 5 minutes",
         margin,
-        392,
+        412,
         PAIR_QR_CLIENT_W - margin * 2,
         20,
         st.hfont,
@@ -236,7 +257,7 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         IDC_PAIR_QR_LINK,
         "",
         margin,
-        418,
+        438,
         PAIR_QR_CLIENT_W - margin * 2,
         20,
         st.hfont,
@@ -248,7 +269,7 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         IDC_PAIR_QR_CANCEL,
         "Cancel",
         (PAIR_QR_CLIENT_W - ACTION_BTN_W) / 2,
-        452,
+        472,
         ACTION_BTN_W,
         ACTION_BTN_H,
         st.hfont,
@@ -267,17 +288,17 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
         let br_white = CreateSolidBrush(COLORREF(0x00FFFFFF));
         let outer = RECT {
             left: 52,
-            top: 52,
+            top: 64,
             right: PAIR_QR_CLIENT_W - 52,
-            bottom: 318,
+            bottom: 336,
         };
         FillRect(hdc, &outer, br_white);
         DeleteObject(br_white);
         let mut text_rc = RECT {
             left: 78,
-            top: 164,
+            top: 178,
             right: PAIR_QR_CLIENT_W - 78,
-            bottom: 210,
+            bottom: 224,
         };
         SetTextColor(hdc, COLORREF(C_LABEL));
         SetBkMode(hdc, TRANSPARENT);
@@ -301,7 +322,7 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
     let scale = (qr_px / modules).max(1);
     let drawn = modules * scale;
     let left = (PAIR_QR_CLIENT_W - drawn) / 2;
-    let top = 58;
+    let top = 72;
 
     let quiet = 8;
     let br_white = CreateSolidBrush(COLORREF(0x00FFFFFF));

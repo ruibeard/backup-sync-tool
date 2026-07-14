@@ -5,9 +5,9 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSButton,
-    NSFont, NSImage, NSImageView, NSImageScaling, NSPanel, NSTextAlignment, NSTextField, NSWindow,
-    NSWindowStyleMask, NSWorkspace,
+    NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
+    NSBezelStyle, NSButton, NSFont, NSImage, NSImageView, NSImageScaling, NSPanel, NSTextAlignment,
+    NSTextField, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
     NSData, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL,
@@ -112,20 +112,21 @@ fn label(mtm: MainThreadMarker, text: &str, frame: NSRect, size: f64, bold: bool
     field
 }
 
-pub fn pair_started(code: &str, approve_url: &str) {
-    crate::logs::append(&format!("pair_started code={code}"));
+pub fn pair_started(code: &str, approve_url: &str, api_base: &str) {
+    crate::logs::append(&format!("pair_started code={code} api_base={api_base}"));
     pbcopy(code);
 
     let code = code.to_string();
     let url = approve_url.to_string();
+    let api_base = api_base.to_string();
     let png = write_qr_png(approve_url).ok();
 
     Queue::main().exec_async(move || {
-        show_pair_panel(&code, &url, png.as_deref());
+        show_pair_panel(&code, &url, &api_base, png.as_deref());
     });
 }
 
-fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
+fn show_pair_panel(code: &str, approve_url: &str, api_base: &str, png: Option<&[u8]>) {
     let mtm = MainThreadMarker::new().expect("pair panel on main thread");
     let app = NSApplication::sharedApplication(mtm);
 
@@ -210,7 +211,7 @@ fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
         mtm,
         &format!("Code: {code}"),
         NSRect {
-            origin: NSPoint { x: 18.0, y: 118.0 },
+            origin: NSPoint { x: 18.0, y: 128.0 },
             size: NSSize {
                 width: width - 36.0,
                 height: 28.0,
@@ -222,9 +223,23 @@ fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
 
     content.addSubview(&label(
         mtm,
+        &format!("Server: {api_base}"),
+        NSRect {
+            origin: NSPoint { x: 18.0, y: 106.0 },
+            size: NSSize {
+                width: width - 36.0,
+                height: 18.0,
+            },
+        },
+        11.0,
+        false,
+    ));
+
+    content.addSubview(&label(
+        mtm,
         "This code expires in 5 minutes · copied to clipboard",
         NSRect {
-            origin: NSPoint { x: 18.0, y: 92.0 },
+            origin: NSPoint { x: 18.0, y: 84.0 },
             size: NSSize {
                 width: width - 36.0,
                 height: 20.0,
@@ -247,7 +262,7 @@ fn show_pair_panel(code: &str, approve_url: &str, png: Option<&[u8]>) {
     link.setBezelStyle(NSBezelStyle::AccessoryBar);
     link.setBordered(false);
     link.setFrame(NSRect {
-        origin: NSPoint { x: 18.0, y: 40.0 },
+        origin: NSPoint { x: 18.0, y: 32.0 },
         size: NSSize {
             width: width - 36.0,
             height: 40.0,
@@ -339,6 +354,77 @@ pub fn alert(title: &str, message: &str) {
         alert_inner(&title, &message);
     } else {
         Queue::main().exec_async(move || alert_inner(&title, &message));
+    }
+}
+
+/// Modal text prompt (NSAlert + NSTextField). Safe from a background thread via channel.
+pub fn prompt_url(title: &str, message: &str, default: &str) -> Option<String> {
+    let title = title.to_string();
+    let message = message.to_string();
+    let default = default.to_string();
+    if MainThreadMarker::new().is_some() {
+        return prompt_url_inner(&title, &message, &default);
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    Queue::main().exec_async(move || {
+        let _ = tx.send(prompt_url_inner(&title, &message, &default));
+    });
+    rx.recv().ok().flatten()
+}
+
+fn prompt_url_inner(title: &str, message: &str, default: &str) -> Option<String> {
+    let mtm = MainThreadMarker::new().expect("prompt on main");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(title));
+    alert.setInformativeText(&NSString::from_str(message));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+
+    let field = NSTextField::new(mtm);
+    field.setFrame(NSRect {
+        origin: NSPoint { x: 0.0, y: 0.0 },
+        size: NSSize {
+            width: 320.0,
+            height: 24.0,
+        },
+    });
+    field.setEditable(true);
+    field.setBezeled(true);
+    field.setDrawsBackground(true);
+    field.setStringValue(&NSString::from_str(default));
+    unsafe {
+        field.selectText(None);
+    }
+    alert.setAccessoryView(Some(&*field as &NSView));
+
+    let window = alert.window();
+    window.center();
+    window.makeKeyAndOrderFront(None);
+    window.orderFrontRegardless();
+    let response = alert.runModal();
+
+    let keep = PAIR_PANEL
+        .lock()
+        .ok()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    if !keep {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
+
+    if response != NSAlertFirstButtonReturn {
+        return None;
+    }
+    let value = field.stringValue().to_string();
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
     }
 }
 

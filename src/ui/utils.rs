@@ -665,6 +665,16 @@ unsafe fn read_ctrls(hwnd: HWND, st: &mut WndState) {
     st.config.start_with_windows = checked(hwnd, IDC_START_WINDOWS);
     st.config.sync_remote_changes = false;
     st.config.auto_update = checked(hwnd, IDC_AUTO_UPDATE);
+    let raw_plane = gettext(hwnd, IDC_PAIR_API_BASE);
+    if !raw_plane.trim().is_empty() {
+        if let Ok(normalized) = crate::config::normalize_pair_api_base(&raw_plane) {
+            st.config.pair_api_base = normalized;
+            let _ = SetWindowTextW(
+                GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32),
+                &hstring(&st.config.pair_api_base),
+            );
+        }
+    }
 }
 
 unsafe fn gettext(hwnd: HWND, id: u16) -> String {

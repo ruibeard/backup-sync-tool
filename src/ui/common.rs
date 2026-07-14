@@ -309,6 +309,8 @@ const IDC_SERVER_URL_LABEL: u16 = 218;
 const IDC_SYNC_ETA: u16 = 219;
 const IDC_RETRY_FAILED: u16 = 220;
 const IDC_REFRESH_REMOTE: u16 = 221;
+const IDC_PAIR_API_BASE: u16 = 222;
+const IDC_PAIR_API_LABEL: u16 = 223;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -331,12 +333,13 @@ const REPO_URL: &str = "https://github.com/ruibeard/backup-sync-tool";
 const AUTHOR_URL: &str = "https://ruialmeida.me";
 const PAIR_QR_CLASS_NAME: PCWSTR = w!("BackupSyncToolPairQrWnd");
 const PAIR_QR_CLIENT_W: i32 = 380;
-const PAIR_QR_CLIENT_H: i32 = 500;
+const PAIR_QR_CLIENT_H: i32 = 524;
 const IDC_PAIR_QR_TITLE: u16 = 300;
 const IDC_PAIR_QR_STATUS: u16 = 301;
 const IDC_PAIR_QR_CODE: u16 = 302;
 const IDC_PAIR_QR_LINK: u16 = 303;
 const IDC_PAIR_QR_CANCEL: u16 = 304;
+const IDC_PAIR_QR_SERVER: u16 = 305;
 
 // ── Layout — 8/12/20 rhythm ──────────────────────────────────────────────────
 const WIN_W: i32 = 520;
@@ -353,6 +356,8 @@ const ACTION_BTN_H: i32 = INP_H;
 const GITHUB_BTN_SIZE: i32 = ACTION_BTN_H; // square icon hit target in footer
 const META_ICON_GAP: i32 = 5; // gap between version link and GitHub icon
 const CONTENT_TOP_PAD: i32 = 20;
+/// Label + edit + section gap for the control-plane URL field.
+const PAIR_API_SECTION_H: i32 = HDR_H + 4 + INP_H + SECT;
 const BRIDGE_PAD_Y: i32 = 0;
 const BRIDGE_NODE_GAP: i32 = 24;
 const BRIDGE_ICO: i32 = 40;
@@ -678,6 +683,7 @@ struct PairError {
 
 struct PairQrState {
     parent: HWND,
+    api_base: String,
     code: String,
     approve_url: String,
     ready: bool,

@@ -22,6 +22,9 @@ pub struct PairStartRequest {
 pub struct PairStartResponse {
     pub code: String,
     pub approve_url: String,
+    /// Laravel APP_URL for this install (optional for older servers).
+    #[serde(default)]
+    pub control_plane_url: Option<String>,
     pub poll_token: String,
     pub poll_interval_ms: u64,
 }
@@ -81,7 +84,22 @@ pub fn start_pairing(
         .send_string(&serde_json::to_string(&req).ok()?)
         .ok()?;
     let body = res.into_string().ok()?;
-    serde_json::from_str(&body).ok()
+    let start: PairStartResponse = serde_json::from_str(&body).ok()?;
+    log_control_plane_mismatch(api_base, &start);
+    Some(start)
+}
+
+fn log_control_plane_mismatch(api_base: &str, start: &PairStartResponse) {
+    let Some(echoed) = start.control_plane_url.as_deref() else {
+        return;
+    };
+    let configured = api_base.trim_end_matches('/');
+    let echoed = echoed.trim_end_matches('/');
+    if !echoed.eq_ignore_ascii_case(configured) {
+        crate::logs::append(&format!(
+            "control_plane_url mismatch: configured={configured} echoed={echoed}"
+        ));
+    }
 }
 
 pub fn poll_pairing(api_base: &str, poll_token: &str) -> Option<PairStatusResponse> {
@@ -194,5 +212,30 @@ mod tests {
         assert!(validate_destination_name("../nope").is_err());
         assert!(validate_destination_name("").is_err());
         assert!(validate_destination_name("a/b").is_err());
+    }
+
+    #[test]
+    fn pair_start_response_control_plane_url_optional() {
+        let with_url = r#"{
+            "code": "ABC123",
+            "approve_url": "https://backup.rui.cam/pair/ABC123",
+            "control_plane_url": "https://backup.rui.cam",
+            "poll_token": "tok",
+            "poll_interval_ms": 2000
+        }"#;
+        let parsed: PairStartResponse = serde_json::from_str(with_url).unwrap();
+        assert_eq!(
+            parsed.control_plane_url.as_deref(),
+            Some("https://backup.rui.cam")
+        );
+
+        let without_url = r#"{
+            "code": "ABC123",
+            "approve_url": "https://backup.rui.cam/pair/ABC123",
+            "poll_token": "tok",
+            "poll_interval_ms": 2000
+        }"#;
+        let parsed: PairStartResponse = serde_json::from_str(without_url).unwrap();
+        assert_eq!(parsed.control_plane_url, None);
     }
 }

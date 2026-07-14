@@ -9,8 +9,8 @@
 | S3 request construction | `rusty_s3` Sans-I/O actions | same |
 | Watcher | `notify` | `notify` (FSEvents) |
 | Secrets | Windows DPAPI | Keychain (`cam.rui.backupsynctool`) |
-| Control plane | `https://backup.rui.cam` | same |
-| Object storage | Garage at `https://s3.rui.cam` | same |
+| Control plane | Default `https://backup.rui.cam` — editable + persisted (`pair_api_base`) | same (macOS menu) |
+| Object storage | Garage at `https://s3.rui.cam` (from pair approve only) | same |
 
 Windows client: Windows 7 SP1 x64 through Windows 11.  
 macOS client: Apple Silicon / Intel Darwin; local `./build-macos.sh` uses **ad-hoc** codesign by default (no Keychain password prompts). Pass `--identity=…` or `MACOS_SIGN_IDENTITY=…` only when you want a real cert (e.g. package/release). Not notarized in v1.
@@ -20,6 +20,8 @@ Neither client uses WebDAV, async runtime, AWS SDK, Electron/webview, or data-mi
 ## Configuration
 
 `backupsynctool.json` sits next to the executable. Only `schema_version: 2` with `transport: "s3"` is accepted as paired configuration. Everything else starts unpaired.
+
+`pair_api_base` defaults to `https://backup.rui.cam` but **must** be editable and persisted (Windows UI field; macOS menu). The client is not locked to that host. Laravel may echo `control_plane_url` on pair/start for confirmation; Garage `s3_*` credentials and endpoint still come only from pair approve.
 
 On macOS, `s3_secret_enc` / `device_token_enc` store Keychain handles (`kc1:<account>`), not DPAPI blobs. `start_with_windows` means **start at login** (LaunchAgent → `backupsynctool --daemon`).
 
@@ -41,6 +43,7 @@ Do **not** add signing-identity helper scripts or `security add-trusted-cert` to
 ```json
 {
   "schema_version": 2,
+  "pair_api_base": "https://backup.rui.cam",
   "watch_folder": "C:\\XDSoftware\\backups",
   "remote_folder": "XDPT.59655-Palmeira-Minimercado",
   "transport": "s3",

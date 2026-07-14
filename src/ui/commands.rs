@@ -26,6 +26,11 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         }
     }
 
+    if notif == EN_KILLFOCUS as u16 && id == IDC_PAIR_API_BASE {
+        persist_pair_api_base_on_blur(hwnd);
+        return LRESULT(0);
+    }
+
     match id {
         x if x == tray::ID_TRAY_OPEN as u16 => {
             ShowWindow(hwnd, SW_SHOW);
@@ -221,6 +226,31 @@ unsafe extern "system" fn browse_local_init_cb(
 
 unsafe fn do_pair_device(hwnd: HWND) {
     read_ctrls(hwnd, stmut(hwnd));
+    {
+        let st = stmut(hwnd);
+        match crate::config::normalize_pair_api_base(&st.config.pair_api_base) {
+            Ok(normalized) => {
+                st.config.pair_api_base = normalized;
+                let _ = SetWindowTextW(
+                    GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32),
+                    &hstring(&st.config.pair_api_base),
+                );
+                if let Err(e) = crate::config::save(&st.config) {
+                    notify_user_status(
+                        hwnd,
+                        "Could not save control plane URL",
+                        C_RED,
+                        &format!("{e}"),
+                    );
+                    return;
+                }
+            }
+            Err(err) => {
+                notify_user_status(hwnd, "Control plane URL", C_AMBER, &err);
+                return;
+            }
+        }
+    }
     if !watch_folder_is_valid(&stmut(hwnd).config.watch_folder) {
         update_pair_button_enabled(hwnd);
         notify_user_status(
@@ -274,7 +304,11 @@ unsafe fn do_pair_device(hwnd: HWND) {
     ShowWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), SW_HIDE);
     show_pair_qr_window(hwnd);
     set_status_dot_color(hwnd, C_AMBER);
-    set_status_strip_text(hwnd, "Pairing \u{00B7} waiting for approval");
+    set_status_strip_text(
+        hwnd,
+        &format!("Pairing \u{00B7} {api_base}"),
+    );
+    logs::append(&format!("Pairing with control plane: {api_base}"));
 
     std::thread::spawn(move || {
         let machine = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".to_string());
@@ -432,6 +466,51 @@ unsafe fn do_pair_device(hwnd: HWND) {
             .ok();
         }
     });
+}
+
+unsafe fn persist_pair_api_base_on_blur(hwnd: HWND) {
+    let raw = gettext(hwnd, IDC_PAIR_API_BASE);
+    let st = stmut(hwnd);
+    if raw.trim().is_empty() {
+        let _ = SetWindowTextW(
+            GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32),
+            &hstring(&st.config.pair_api_base),
+        );
+        return;
+    }
+    match crate::config::normalize_pair_api_base(&raw) {
+        Ok(normalized) => {
+            let changed = normalized != st.config.pair_api_base;
+            st.config.pair_api_base = normalized;
+            let _ = SetWindowTextW(
+                GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32),
+                &hstring(&st.config.pair_api_base),
+            );
+            if !changed {
+                return;
+            }
+            if let Err(e) = crate::config::save(&st.config) {
+                notify_user_status(
+                    hwnd,
+                    "Control plane",
+                    C_RED,
+                    &format!("Could not save Control plane URL: {e}"),
+                );
+            } else {
+                logs::append(&format!(
+                    "Control plane URL set: {}",
+                    st.config.pair_api_base
+                ));
+            }
+        }
+        Err(err) => {
+            let _ = SetWindowTextW(
+                GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32),
+                &hstring(&st.config.pair_api_base),
+            );
+            notify_user_status(hwnd, "Control plane", C_RED, &err);
+        }
+    }
 }
 
 unsafe fn persist_settings_on_toggle(hwnd: HWND, id: u16) {
@@ -649,7 +728,7 @@ fn required_client_height(st: &WndState) -> i32 {
     let bridge_h = bridge_section_total_h(st);
     let activity_h =
         HDR_H + PAD + MIN_ACTIVITY_LIST_H + st.post_list_gap + st.sync_row_h + st.post_sync_sect;
-    CONTENT_TOP_PAD + bridge_h + activity_h + st.bottom_bar_h
+    CONTENT_TOP_PAD + bridge_h + PAIR_API_SECTION_H + activity_h + st.bottom_bar_h
 }
 
 /// Grow the window when content (e.g. idle progress block) needs more height.
@@ -714,6 +793,29 @@ unsafe fn layout_main(hwnd: HWND) {
         y,
         (*st).hfont_bridge,
     );
+
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_PAIR_API_LABEL as i32),
+        None,
+        M,
+        y,
+        (*st).inner_w,
+        HDR_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += HDR_H + 4;
+    SetWindowPos(
+        GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32),
+        None,
+        M,
+        y,
+        (*st).inner_w,
+        INP_H,
+        SWP_NOZORDER,
+    )
+    .ok();
+    y += INP_H + SECT;
 
     let sub_w = 180;
     SetWindowPos(

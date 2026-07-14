@@ -320,6 +320,34 @@ unsafe fn build_ui(
         ShowWindow(GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32), SW_HIDE);
     }
 
+    // ── CONTROL PLANE (which Laravel install to pair with) ───────────────────
+    {
+        mkstatic(
+            hwnd,
+            hi,
+            IDC_PAIR_API_LABEL,
+            "CONTROL PLANE URL",
+            M,
+            y,
+            INNER_W,
+            HDR_H,
+            hf_hdr,
+        );
+        y += HDR_H + 4;
+        mkedit_cue(
+            hwnd,
+            hi,
+            IDC_PAIR_API_BASE,
+            &cfg.pair_api_base,
+            "https://backup.rui.cam",
+            M,
+            y,
+            INNER_W,
+            hf,
+        );
+        y += INP_H + SECT;
+    }
+
     // ── RECENT ACTIVITY ───────────────────────────────────────────────────────
     {
         let sub_w = 180;
