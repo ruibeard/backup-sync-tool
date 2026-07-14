@@ -80,7 +80,7 @@ Script builds, codesigns, kills old process, launches `.app`, checks pid. Confir
 
 ## Release
 
-`./build-macos.sh` / `./build-windows.sh` for local cycles. `./release.sh` (Mac) for public `vX.Y.Z` with both platform assets. Do not force-move tags unless repairing. Legacy `.\release.ps1` is Windows-only — prefer `./release.sh`.
+`./build-macos.sh` / `./build-windows.sh` for local cycles. `./release.sh` (Mac) for public `vX.Y.Z` with both platform assets. Do not force-move tags unless repairing.
 
 ## Win32 Gotchas
 

@@ -146,7 +146,7 @@ macOS does **not** load the `.ico` files. Windows does **not** load the menubar 
 python3 assets/render-icons.py   # cairosvg, Pillow, ImageMagick, iconutil
 ```
 
-**Release (Mac):** `./release.sh` on a clean tree — bump patch → commit → macOS package + Windows build → tag `vX.Y.Z` → push → upload both assets with `gh`. GitHub Actions may create notes-only release shell; assets come from `release.sh`. Prefer this over legacy `release.ps1` (Windows-only).
+**Release (Mac):** `./release.sh` on a clean tree — bump patch → commit → macOS package + Windows build → tag `vX.Y.Z` → push → upload both assets with `gh`. GitHub Actions may create notes-only release shell; assets come from `release.sh`.
 
 | Action | How |
 | --- | --- |

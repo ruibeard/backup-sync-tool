@@ -7,15 +7,13 @@ Native clients that upload a local backup folder directly to Garage S3 after an 
 From a **clean** Mac checkout of this repo (`PROXMOX_HOST` default `root@192.168.0.46`, VM **102**):
 
 ```bash
-# Preferred: push branch → build on Win10 VM → pull exe here
+# push branch → build on Win10 VM → pull exe here
 ./build-windows.sh
 # optional: ./build-windows.sh my-branch
 
 # Artifact
 ls -la dist/windows/backupsynctool.exe
 ```
-
-Build only (no fetch of exe): `./push-build-win10.sh`
 
 On the guest itself:
 
@@ -27,7 +25,7 @@ git pull
 # → root backupsynctool.exe (Win7 target x86_64-win7-windows-msvc)
 ```
 
-Details: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md). Emergency Windows-only release: `.\release.ps1` (prefer `./release.sh` from Mac).
+Details: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md).
 
 **Smoke after build:** set Control plane URL to your Laravel `APP_URL`, pair, confirm status shows that server. Report failures.
 

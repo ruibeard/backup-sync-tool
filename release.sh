@@ -20,7 +20,7 @@ fi
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 echo "==> release on branch $BRANCH @ $(git rev-parse --short HEAD)"
 
-# Bump patch in Cargo.toml (same scheme as release.ps1)
+# Bump patch in Cargo.toml
 VER_LINE="$(grep -E '^version = "[0-9]+\.[0-9]+\.[0-9]+"' Cargo.toml | head -1)"
 if [[ -z "$VER_LINE" ]]; then
   echo "error: could not parse version from Cargo.toml" >&2
