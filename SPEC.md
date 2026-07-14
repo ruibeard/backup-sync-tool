@@ -103,7 +103,7 @@ Wire contract: `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`.
 Agent does not run Windows VM / interactive GUI smoke. Operator:
 
 1. Confirm Laravel `APP_URL` is the public control-plane URL you intend to pair with.
-2. **Windows:** `./build-windows.sh` from Mac → run `dist/windows/backupsynctool.exe` → set **CONTROL PLANE URL** to that `APP_URL` → pair → QR/status shows that server → admin approve → upload. Report failures.
+2. **Windows:** `.\build-windows.ps1` → set **CONTROL PLANE URL** to that `APP_URL` → pair → QR/status shows that server → admin approve → upload. Report failures.
 3. **Mac:** `./build-macos.sh` → tray **Control plane URL…** → same `APP_URL` → pair → confirm. Report failures.
 4. Mismatch log `control_plane_url mismatch` → fix desktop URL or Laravel `APP_URL` until they match.
 
@@ -140,13 +140,13 @@ Files at or below `s3_part_size_mib` use streamed PutObject. Larger files use pe
 
 ## Build and verification
 
-Three scripts only: `./build-macos.sh` · `./build-windows.sh` · `./release.sh`.
+Three scripts only: `./build-macos.sh` · `.\build-windows.ps1` · `./release.sh`.
 
 | Script | What |
 | --- | --- |
-| `./build-macos.sh` | Release `.app` under `dist/macos/`, ad-hoc codesign by default (no Keychain prompt). Flags: `--install`, `--no-launch`, `--package` → `backupsynctool-macos-{aarch64\|x86_64}.tar.gz`, `--identity=…` / `MACOS_SIGN_IDENTITY`. Never `open` the raw binary (Taskgated SIGKILL). |
-| `./build-windows.sh` | Clean tree. Push → Proxmox VM 102 Win7 target `x86_64-win7-windows-msvc` → `dist/windows/backupsynctool.exe`. Validate on Win7 VM 100 and a modern Windows VM. |
-| `./release.sh` | Clean tree. Bump patch → both builds → tag `vX.Y.Z` → `gh` upload. GHA may create notes-only shell; assets come from this script. |
+| `./build-macos.sh` | Release `.app` under `dist/macos/`, ad-hoc codesign by default. Flags: `--install`, `--no-launch`, `--package`, `--identity=…`. Never `open` the raw binary. |
+| `.\build-windows.ps1` | Any Windows machine (Rust nightly + VS Build Tools). Target `x86_64-win7-windows-msvc` → root `backupsynctool.exe` + `dist\windows\`. `-NoLaunch` skips run. |
+| `./release.sh` | Clean tree. Requires `dist/windows/backupsynctool.exe` already built on Windows. Bump → mac package → tag `vX.Y.Z` → `gh` upload. |
 
 ### Icon assets
 

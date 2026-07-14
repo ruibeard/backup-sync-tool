@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Release: bump patch → macOS+Windows builds → tag → GitHub assets
+# Release: bump → needs macOS package + Windows exe already built → tag → GitHub
 set -euo pipefail
 cd "$(dirname "$0")"
 
 [[ -z "$(git status --porcelain)" ]] || { echo "dirty tree" >&2; exit 1; }
 command -v gh >/dev/null || { echo "need gh" >&2; exit 1; }
+
+WIN=dist/windows/backupsynctool.exe
+[[ -f "$WIN" ]] || {
+  echo "missing $WIN — on a Windows machine run: .\\build-windows.ps1 -NoLaunch" >&2
+  exit 1
+}
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 OLD="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
@@ -23,9 +29,6 @@ git commit -m "release: $TAG"
 
 MAC="$(ls dist/macos/backupsynctool-macos-*.tar.gz | head -1)"
 [[ -f "$MAC" ]] || { echo "missing mac tarball" >&2; exit 1; }
-
-./build-windows.sh "$BRANCH"
-WIN=dist/windows/backupsynctool.exe
 [[ -f "$WIN" ]] || { echo "missing $WIN" >&2; exit 1; }
 
 git tag "$TAG"

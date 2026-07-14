@@ -19,7 +19,7 @@ Do not conflate pairing (`pair_api_base`) with object storage. Desktop does **no
 After builds, operator (not agent) smokes Control plane URL:
 
 1. Laravel `APP_URL` = public control-plane base.
-2. Windows: `./build-windows.sh` → **CONTROL PLANE URL** = that `APP_URL` (blur + pair persist) → pair → confirm.
+2. Windows: `.\build-windows.ps1` → **CONTROL PLANE URL** = that `APP_URL` (blur + pair persist) → pair → confirm.
 3. Mac: `./build-macos.sh` → tray **Control plane URL…** → same → pair → confirm.
 4. Report failures; fix any `control_plane_url mismatch` in logs.
 
@@ -31,11 +31,11 @@ Three scripts only:
 
 | Script | Use |
 | --- | --- |
-| `./build-macos.sh` | Mac build + launch `.app` (`--package` / `--install` / `--no-launch` / `--identity=…`) |
-| `./build-windows.sh` | From Mac: push → VM 102 Win7 build → `dist/windows/backupsynctool.exe` |
-| `./release.sh` | Bump + both builds + tag + GitHub assets |
+| `./build-macos.sh` | Mac: build + launch `.app` (`--package` / `--install` / `--no-launch` / `--identity=…`) |
+| `.\build-windows.ps1` | Any Windows machine with Rust/VS: Win7 target → `backupsynctool.exe` + `dist\windows\` (`-NoLaunch` to skip run) |
+| `./release.sh` | Mac: needs `dist/windows/backupsynctool.exe` already present → bump + mac package + tag + GitHub |
 
-Never launch from `target/debug` or `target/release`. Confirm: 0 errors · process running (Mac) or exe in `dist/windows/` (Windows).
+Never launch from `target/debug` or `target/release`. Confirm: 0 errors · process running (or exe present with `-NoLaunch`).
 
 ## Project Rules
 
@@ -72,7 +72,7 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 
 ## Release
 
-`./build-macos.sh` / `./build-windows.sh` for cycles; `./release.sh` for `vX.Y.Z`. Do not force-move tags unless repairing.
+`./build-macos.sh` / `.\build-windows.ps1` for cycles; `./release.sh` for `vX.Y.Z` (Windows exe must already be in `dist/windows/`). Do not force-move tags unless repairing.
 
 ## Win32 Gotchas
 

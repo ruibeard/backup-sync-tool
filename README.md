@@ -7,22 +7,24 @@ Native Win/Mac clients that upload a local backup folder directly to Garage S3 a
 ## YOU DO — operator smoke
 
 1. Set Laravel `APP_URL` to the public control-plane URL.
-2. **Windows:** `./build-windows.sh` → run `dist/windows/backupsynctool.exe` → set **CONTROL PLANE URL** to that `APP_URL` (saves on blur and on pair) → pair → QR/status shows that server → approve → upload. Report failures.
+2. **Windows:** `.\build-windows.ps1` → set **CONTROL PLANE URL** to that `APP_URL` (saves on blur and on pair) → pair → QR/status shows that server → approve → upload. Report failures.
 3. **Mac:** `./build-macos.sh` → tray **Control plane URL…** → same `APP_URL` → pair → confirm. Report failures.
 4. Log line `control_plane_url mismatch` means desktop URL and Laravel `APP_URL` disagree — fix one.
 
 ## Build
 
-Three scripts (clean tree for Windows/release):
-
 ```bash
-./build-macos.sh                 # .app + launch
-./build-macos.sh --package       # updater tarball
-./build-windows.sh               # → dist/windows/backupsynctool.exe (via Proxmox VM 102)
-./release.sh                     # bump, both platforms, tag, GitHub
+./build-macos.sh              # Mac .app + launch
+./build-macos.sh --package    # updater tarball
+./release.sh                  # needs dist/windows/backupsynctool.exe already built
 ```
 
-Mac flags: `--install` `/Applications`, `--no-launch`, `--identity=…` (default ad-hoc). Windows details: [proxmox/win10-build-vm.md](proxmox/win10-build-vm.md).
+```powershell
+.\build-windows.ps1           # any Windows box with Rust + VS Build Tools
+.\build-windows.ps1 -NoLaunch
+```
+
+Mac flags: `--install`, `--no-launch`, `--identity=…` (default ad-hoc).
 
 | Platform | UI | Secrets |
 | --- | --- | --- |
