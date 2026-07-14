@@ -1,5 +1,5 @@
-// sync.rs — watch local folder and sync via BackupTransport.
-// Startup scans the local folder and fetches one remote manifest file.
+// sync.rs — watch a local folder and upload changes through BackupTransport.
+// Startup scans local files and checks the remote object listing for repair needs.
 
 use crate::config::{self, Config};
 use crate::transport::{BackupTransport, FileMetadata, TransferControl, TransportError};
@@ -445,7 +445,8 @@ fn sync_startup(
         });
         let listing_unavailable = remote_on_server.is_none();
 
-        if local_changed || listing_unavailable || missing_on_server || size_mismatch == Some(true) {
+        if local_changed || listing_unavailable || missing_on_server || size_mismatch == Some(true)
+        {
             uploads.push(local_path_for_relative(cfg, relative));
         }
     }
@@ -902,66 +903,6 @@ fn safe_restore_relative_path(value: &str) -> Option<PathBuf> {
     (!result.as_os_str().is_empty()).then_some(result)
 }
 
-fn fetch_remote_manifest(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    log: &LogFn,
-    auth_failed: &AuthFailedFn,
-) -> Option<SyncManifest> {
-    let name = remote_manifest_name(cfg);
-    let temp = std::env::temp_dir().join(format!(
-        "bst-remote-manifest-{}-{}.json",
-        std::process::id(),
-        unix_now_nanos()
-    ));
-    match transport.download_file(name, &temp) {
-        Ok(_) => {
-            let data = fs::read(&temp).ok();
-            let _ = fs::remove_file(&temp);
-            data.and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        }
-        Err(TransportError::NotFound) => {
-            let _ = fs::remove_file(&temp);
-            None
-        }
-        Err(err) => {
-            let _ = fs::remove_file(&temp);
-            handle_transport_err(&err, auth_failed);
-            log(format!("Remote manifest unavailable: {}", err));
-            None
-        }
-    }
-}
-
-fn fetch_remote_manifest_marker(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    auth_failed: &AuthFailedFn,
-) -> Option<SyncManifest> {
-    let name = remote_manifest_name(cfg);
-    let temp = std::env::temp_dir().join(format!(
-        "bst-remote-marker-{}-{}.json",
-        std::process::id(),
-        unix_now_nanos()
-    ));
-    match transport.download_file(name, &temp) {
-        Ok(_) => {
-            let data = fs::read(&temp).ok();
-            let _ = fs::remove_file(&temp);
-            data.and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        }
-        Err(TransportError::NotFound) => {
-            let _ = fs::remove_file(&temp);
-            None
-        }
-        Err(err) => {
-            let _ = fs::remove_file(&temp);
-            handle_transport_err(&err, auth_failed);
-            None
-        }
-    }
-}
-
 fn remote_file_states(
     cfg: &Config,
     transport: &Arc<dyn BackupTransport>,
@@ -992,44 +933,6 @@ fn remote_file_states(
             log(format!("Remote file listing unavailable: {}", err));
             None
         }
-    }
-}
-
-fn manifest_from_server_listing(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    log: &LogFn,
-    auth_failed: &AuthFailedFn,
-) -> Option<SyncManifest> {
-    let mut files = remote_file_states(cfg, transport, log, auth_failed)?;
-    let local = load_local_manifest(cfg);
-    let previous = fetch_remote_manifest(cfg, transport, log, auth_failed).unwrap_or_default();
-
-    for (relative, state) in &mut files {
-        state.mtime = previous
-            .files
-            .get(relative)
-            .filter(|candidate| candidate.size == state.size)
-            .or_else(|| {
-                local
-                    .files
-                    .get(relative)
-                    .filter(|candidate| candidate.size == state.size)
-            })
-            .map(|candidate| candidate.mtime)
-            .unwrap_or(state.mtime);
-    }
-    Some(SyncManifest { files })
-}
-
-fn save_remote_manifest_from_server(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    log: &LogFn,
-    auth_failed: &AuthFailedFn,
-) {
-    if let Some(manifest) = manifest_from_server_listing(cfg, transport, log, auth_failed) {
-        save_remote_manifest(cfg, transport, &manifest, log, auth_failed);
     }
 }
 
@@ -1086,83 +989,6 @@ fn heal_missing_uploads(
         cancel,
         events,
     )
-}
-
-fn fetch_remote_state(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    log: &LogFn,
-    auth_failed: &AuthFailedFn,
-) -> Option<SyncManifest> {
-    let mut manifest = fetch_remote_manifest(cfg, transport, log, auth_failed).unwrap_or_default();
-
-    if cfg.sync_remote_changes {
-        match transport.list_files() {
-            Ok(files) => {
-                let mut discovered = 0usize;
-                for file in files {
-                    if is_remote_manifest_name(cfg, &file.relative_path) {
-                        continue;
-                    }
-                    if !manifest.files.contains_key(&file.relative_path) {
-                        manifest.files.insert(
-                            file.relative_path,
-                            FileState {
-                                size: file.size,
-                                mtime: file.mtime,
-                            },
-                        );
-                        discovered += 1;
-                    }
-                }
-                if discovered > 0 {
-                    log(format!("Discovered {} server file(s)", discovered));
-                }
-            }
-            Err(err) => {
-                handle_transport_err(&err, auth_failed);
-                log(format!("Server folder scan unavailable: {}", err));
-            }
-        }
-    }
-
-    Some(manifest)
-}
-
-fn save_remote_manifest(
-    cfg: &Config,
-    transport: &Arc<dyn BackupTransport>,
-    manifest: &SyncManifest,
-    log: &LogFn,
-    auth_failed: &AuthFailedFn,
-) {
-    let data = match serde_json::to_vec_pretty(manifest) {
-        Ok(data) => data,
-        Err(err) => {
-            log(format!("Manifest serialise failed: {}", err));
-            return;
-        }
-    };
-
-    let temp = std::env::temp_dir().join(format!(
-        "bst-upload-manifest-{}-{}.json",
-        std::process::id(),
-        unix_now_nanos()
-    ));
-    if let Err(err) = fs::write(&temp, &data) {
-        log(format!("Manifest temp write failed: {}", err));
-        return;
-    }
-
-    let metadata = FileMetadata {
-        size: data.len() as u64,
-        mtime: unix_now(),
-    };
-    if let Err(err) = transport.upload_file(remote_manifest_name(cfg), &temp, &metadata) {
-        handle_transport_err(&err, auth_failed);
-        log(format!("Manifest upload failed: {}", err));
-    }
-    let _ = fs::remove_file(&temp);
 }
 
 fn handle_transport_err(err: &TransportError, auth_failed: &AuthFailedFn) {
@@ -1325,43 +1151,58 @@ fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
-fn set_local_mtime(path: &Path, mtime: u64) -> std::io::Result<()> {
-    use std::fs::{File, FileTimes};
-    let modified = UNIX_EPOCH + Duration::from_secs(mtime);
-    let file = File::options().write(true).open(path)?;
-    file.set_times(FileTimes::new().set_modified(modified))
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn unix_now_nanos() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
-fn mark_suppressed(suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>, path: &Path) {
-    if let Ok(mut guard) = suppressed.lock() {
-        guard.push((path.to_path_buf(), Instant::now() + Duration::from_secs(3)));
-        guard.retain(|(_, until)| *until > Instant::now());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        emit_transfer_terminal, is_safe_remote_relative, pause_engine_on_auth,
-        safe_restore_relative_path, upload_worker_width, TransferKind, TransferState,
+        emit_transfer_terminal, is_safe_remote_relative, local_manifest_path, pause_engine_on_auth,
+        safe_restore_relative_path, sync_startup, upload_worker_width, SyncManifest, TransferKind,
+        TransferState,
     };
-    use crate::transport::TransportError;
+    use crate::config::Config;
+    use crate::transport::{BackupTransport, FileMetadata, ObjectHead, RemoteFile, TransportError};
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingTransport {
+        uploads: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl BackupTransport for RecordingTransport {
+        fn test_connection(&self) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn upload_file(
+            &self,
+            relative_path: &str,
+            _local_path: &Path,
+            _metadata: &FileMetadata,
+        ) -> Result<(), TransportError> {
+            self.uploads.lock().unwrap().push(relative_path.to_string());
+            Ok(())
+        }
+
+        fn download_file(
+            &self,
+            _relative_path: &str,
+            _destination_path: &Path,
+        ) -> Result<FileMetadata, TransportError> {
+            Err(TransportError::NotFound)
+        }
+
+        fn list_files(&self) -> Result<Vec<RemoteFile>, TransportError> {
+            Ok(Vec::new())
+        }
+
+        fn head_file(&self, _relative_path: &str) -> Result<Option<ObjectHead>, TransportError> {
+            Ok(None)
+        }
+
+        fn delete_file(&self, _relative_path: &str) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn auth_failure_pauses_engine_and_notifies_host() {
@@ -1410,6 +1251,54 @@ mod tests {
         assert_eq!(upload_worker_width(20, 10), 2);
         assert_eq!(upload_worker_width(20, 1), 1);
         assert_eq!(upload_worker_width(20, 0), 0);
+    }
+
+    #[test]
+    fn first_backup_uploads_every_local_file() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "backupsynctool-first-backup-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("one.txt"), b"one").unwrap();
+        std::fs::write(root.join("nested/two.txt"), b"two").unwrap();
+
+        let mut cfg = Config::default();
+        cfg.watch_folder = root.display().to_string();
+        cfg.device_uuid = format!("first-backup-test-{nonce}");
+        cfg.remote_folder = "test-customer".into();
+        let uploads = Arc::new(Mutex::new(Vec::new()));
+        let transport: Arc<dyn BackupTransport> = Arc::new(RecordingTransport {
+            uploads: uploads.clone(),
+        });
+        let manifest = Arc::new(Mutex::new(SyncManifest::default()));
+        let log: super::LogFn = Arc::new(|_| {});
+        let activity: super::ActivityFn = Arc::new(|_| {});
+        let auth_failed: super::AuthFailedFn = Arc::new(|| {});
+        let events: super::TransferEventFn = Arc::new(|_| {});
+        let result = sync_startup(
+            &cfg,
+            &transport,
+            &manifest,
+            false,
+            &log,
+            &activity,
+            &auth_failed,
+            &Arc::new(AtomicBool::new(false)),
+            &events,
+        );
+
+        let mut recorded = uploads.lock().unwrap().clone();
+        recorded.sort();
+        assert_eq!(result.succeeded, 2);
+        assert_eq!(recorded, vec!["nested/two.txt", "one.txt"]);
+
+        let _ = std::fs::remove_file(local_manifest_path(&cfg));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
