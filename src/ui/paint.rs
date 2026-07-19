@@ -373,11 +373,16 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
     let (head, pct, bar_color, detail, eta) = if syncing {
         let done = st.sync_progress_done.min(st.sync_progress_total);
         let total = st.sync_progress_total;
-        let pct = if total > 0 {
-            (done * 100) / total
-        } else {
-            0
-        };
+        let pct = st
+            .sync_progress_percent
+            .map(|p| p as usize)
+            .unwrap_or_else(|| {
+                if total > 0 {
+                    (done * 100) / total
+                } else {
+                    0
+                }
+            });
         let detail = if total > 0 {
             format!("{done} of {total} files")
         } else {

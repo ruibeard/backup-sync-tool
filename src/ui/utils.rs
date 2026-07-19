@@ -446,6 +446,7 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
                     info.total,
                     info.failed,
                     info.failed_paths,
+                    info.percent,
                 ))) as isize,
             ),
         )
@@ -456,21 +457,9 @@ unsafe fn do_retry_failed_uploads(hwnd: HWND) {
     });
 
     std::thread::spawn(move || {
-        activity(crate::sync::ActivityInfo {
-            state: crate::sync::ActivityState::Syncing,
-            completed: 0,
-            total: count,
-            failed: 0,
-            failed_paths: Vec::new(),
-        });
+        activity(crate::sync::ActivityInfo::syncing(0, count));
         let batch = crate::sync::retry_uploads(&cfg, &pass, &paths, &log, &activity, &auth_failed);
-        activity(crate::sync::ActivityInfo {
-            state: crate::sync::ActivityState::Idle,
-            completed: batch.succeeded,
-            total: batch.attempted,
-            failed: batch.failed,
-            failed_paths: batch.failed_paths,
-        });
+        activity(crate::sync::ActivityInfo::idle_batch(&batch));
     });
 }
 
@@ -528,6 +517,7 @@ unsafe fn do_refresh_remote_changes(hwnd: HWND) {
                     info.total,
                     info.failed,
                     info.failed_paths,
+                    info.percent,
                 ))) as isize,
             ),
         )
@@ -563,6 +553,7 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
         st.sync_status_state = crate::sync::ActivityState::Checking as usize;
         st.sync_progress_done = 0;
         st.sync_progress_total = 0;
+        st.sync_progress_percent = None;
         st.sync_last_failed = 0;
         st.sync_started_at = None;
         st.sync_engine = None;
@@ -593,6 +584,7 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
                     info.total,
                     info.failed,
                     info.failed_paths,
+                    info.percent,
                 ))) as isize,
             ),
         )

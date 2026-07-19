@@ -45,6 +45,7 @@ unsafe fn on_create(hwnd: HWND) {
         },
         sync_progress_done: 0,
         sync_progress_total: 0,
+        sync_progress_percent: None,
         sync_last_failed: 0,
         sync_started_at: None,
         sync_anim_frame: 0,

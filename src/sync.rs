@@ -10,7 +10,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -25,6 +25,8 @@ const MANIFEST_NAME: &str = ".backupsynctool-manifest.json";
 const IGNORED_DIR_NAME: &str = ".tmp.driveupload";
 /// Files at or above this size upload one-at-a-time; smaller files keep `parallel_uploads`.
 const LARGE_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
+/// Minimum gap between mid-upload progress log/UI updates.
+const UPLOAD_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
@@ -62,6 +64,58 @@ pub struct ActivityInfo {
     pub total: usize,
     pub failed: usize,
     pub failed_paths: Vec<String>,
+    /// Byte-weighted overall percent (0–100) when known; preferred for the progress bar.
+    pub percent: Option<u8>,
+}
+
+impl ActivityInfo {
+    pub fn checking() -> Self {
+        Self {
+            state: ActivityState::Checking,
+            completed: 0,
+            total: 0,
+            failed: 0,
+            failed_paths: Vec::new(),
+            percent: None,
+        }
+    }
+
+    pub fn syncing(completed: usize, total: usize) -> Self {
+        Self {
+            state: ActivityState::Syncing,
+            completed,
+            total,
+            failed: 0,
+            failed_paths: Vec::new(),
+            percent: if total > 0 {
+                Some(((completed * 100) / total).min(100) as u8)
+            } else {
+                None
+            },
+        }
+    }
+
+    pub fn idle_batch(batch: &UploadBatchResult) -> Self {
+        Self {
+            state: ActivityState::Idle,
+            completed: batch.succeeded,
+            total: batch.attempted,
+            failed: batch.failed,
+            failed_paths: batch.failed_paths.clone(),
+            percent: None,
+        }
+    }
+
+    pub fn idle(completed: usize, total: usize) -> Self {
+        Self {
+            state: ActivityState::Idle,
+            completed,
+            total,
+            failed: 0,
+            failed_paths: Vec::new(),
+            percent: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,13 +170,7 @@ impl SyncEngine {
             let had_local_manifest = has_local_manifest(&cfg_watcher);
             let manifest = Arc::new(Mutex::new(load_local_manifest(&cfg_watcher)));
 
-            activity_clone(ActivityInfo {
-                state: ActivityState::Checking,
-                completed: 0,
-                total: 0,
-                failed: 0,
-                failed_paths: Vec::new(),
-            });
+            activity_clone(ActivityInfo::checking());
 
             let remote_manifest =
                 fetch_remote_state(&cfg_watcher, &pass_watcher, &log_clone, &auth_failed_clone);
@@ -138,13 +186,7 @@ impl SyncEngine {
                 &auth_failed_clone,
             );
 
-            activity_clone(ActivityInfo {
-                state: ActivityState::Idle,
-                completed: startup_batch.succeeded,
-                total: startup_batch.attempted,
-                failed: startup_batch.failed,
-                failed_paths: startup_batch.failed_paths,
-            });
+            activity_clone(ActivityInfo::idle_batch(&startup_batch));
 
             let mut last_remote_full_sync = Instant::now();
             let mut last_remote_marker_check = Instant::now();
@@ -176,13 +218,7 @@ impl SyncEngine {
                 };
 
                 if !due.is_empty() {
-                    activity_clone(ActivityInfo {
-                        state: ActivityState::Syncing,
-                        completed: 0,
-                        total: due.len(),
-                        failed: 0,
-                        failed_paths: Vec::new(),
-                    });
+                    activity_clone(ActivityInfo::syncing(0, due.len()));
                     let batch = upload_paths_parallel(
                         &cfg_watcher,
                         &pass_watcher,
@@ -201,13 +237,7 @@ impl SyncEngine {
                             &auth_failed_clone,
                         );
                     }
-                    activity_clone(ActivityInfo {
-                        state: ActivityState::Idle,
-                        completed: batch.succeeded,
-                        total: batch.attempted,
-                        failed: batch.failed,
-                        failed_paths: batch.failed_paths,
-                    });
+                    activity_clone(ActivityInfo::idle_batch(&batch));
                 }
 
                 if last_remote_heal.elapsed() >= REMOTE_HEAL_INTERVAL {
@@ -220,13 +250,7 @@ impl SyncEngine {
                         &auth_failed_clone,
                     );
                     if batch.attempted > 0 {
-                        activity_clone(ActivityInfo {
-                            state: ActivityState::Idle,
-                            completed: batch.succeeded,
-                            total: batch.attempted,
-                            failed: batch.failed,
-                            failed_paths: batch.failed_paths,
-                        });
+                        activity_clone(ActivityInfo::idle_batch(&batch));
                     }
                     last_remote_heal = Instant::now();
                 }
@@ -368,13 +392,7 @@ fn sync_startup(
 
             if !downloads.is_empty() {
                 log(format!("{} file(s) to download", downloads.len()));
-                activity(ActivityInfo {
-                    state: ActivityState::Syncing,
-                    completed: 0,
-                    total: downloads.len(),
-                    failed: 0,
-                    failed_paths: Vec::new(),
-                });
+                activity(ActivityInfo::syncing(0, downloads.len()));
                 download_remote_paths(
                     cfg,
                     password,
@@ -402,13 +420,7 @@ fn sync_startup(
 
         if !uploads.is_empty() {
             log(format!("{} file(s) to upload", uploads.len()));
-            activity(ActivityInfo {
-                state: ActivityState::Syncing,
-                completed: 0,
-                total: uploads.len(),
-                failed: 0,
-                failed_paths: Vec::new(),
-            });
+            activity(ActivityInfo::syncing(0, uploads.len()));
             let batch = upload_paths_parallel(
                 cfg,
                 password,
@@ -487,13 +499,7 @@ fn sync_startup(
 
     if !uploads.is_empty() {
         log(format!("{} file(s) to upload", uploads.len()));
-        activity(ActivityInfo {
-            state: ActivityState::Syncing,
-            completed: 0,
-            total: uploads.len(),
-            failed: 0,
-            failed_paths: Vec::new(),
-        });
+        activity(ActivityInfo::syncing(0, uploads.len()));
         let batch = upload_paths_parallel(
             cfg,
             password,
@@ -612,6 +618,7 @@ fn upload_path(
     manifest: &Arc<Mutex<SyncManifest>>,
     log: &LogFn,
     auth_failed: &AuthFailedFn,
+    progress: Option<&UploadProgressShared>,
 ) -> UploadOutcome {
     if !path.is_file() || should_ignore_path(&cfg.watch_folder, path) {
         return UploadOutcome::Skipped;
@@ -626,6 +633,9 @@ fn upload_path(
         Err(err) => {
             let msg = format!("Read error: {err}");
             log(format!("Upload failed {}: {}", relative, msg));
+            if let Some(shared) = progress {
+                shared.credit_bytes(file_size(path), 0);
+            }
             return UploadOutcome::Failed(relative);
         }
     };
@@ -634,6 +644,9 @@ fn upload_path(
         Err(err) => {
             let msg = format!("Read error: {err}");
             log(format!("Upload failed {}: {}", relative, msg));
+            if let Some(shared) = progress {
+                shared.credit_bytes(file_size(path), 0);
+            }
             return UploadOutcome::Failed(relative);
         }
     };
@@ -651,6 +664,9 @@ fn upload_path(
                 auth_failed();
                 let msg = err.to_string();
                 log(format!("Upload failed {}: {}", relative, msg));
+                if let Some(shared) = progress {
+                    shared.credit_bytes(size, 0);
+                }
                 return UploadOutcome::Failed(relative);
             }
             log(format!("Create folder failed {}: {}", relative, err));
@@ -659,8 +675,48 @@ fn upload_path(
 
     log(format!("Uploading: {}", relative));
     log(format!("Upload progress: {}|0", relative));
-    match webdav::put_file(cfg, password, &remote_url, file, size) {
+
+    let last_pct = std::cell::Cell::new(0u8);
+    let last_emit = std::cell::Cell::new(Instant::now() - UPLOAD_PROGRESS_MIN_INTERVAL);
+    let last_bytes = std::cell::Cell::new(0u64);
+    let relative_for_progress = relative.clone();
+    let log_for_progress = log.clone();
+
+    let mut on_progress = |sent: u64, total: u64| {
+        let pct = if total == 0 {
+            100
+        } else {
+            ((sent.saturating_mul(100)) / total).min(99) as u8
+        };
+        let now = Instant::now();
+        let prev = last_pct.get();
+        let due = pct > prev
+            && (pct == 0
+                || pct >= prev.saturating_add(1)
+                    && now.duration_since(last_emit.get()) >= UPLOAD_PROGRESS_MIN_INTERVAL);
+        if due {
+            last_pct.set(pct);
+            last_emit.set(now);
+            log_for_progress(format!("Upload progress: {}|{}", relative_for_progress, pct));
+        }
+        if let Some(shared) = progress {
+            let prev_bytes = last_bytes.get();
+            if sent > prev_bytes {
+                shared
+                    .bytes_done
+                    .fetch_add(sent - prev_bytes, Ordering::SeqCst);
+                last_bytes.set(sent);
+                shared.emit_activity();
+            }
+        }
+    };
+
+    match webdav::put_file_with_progress(cfg, password, &remote_url, file, size, &mut on_progress)
+    {
         Ok(_) => {
+            if let Some(shared) = progress {
+                shared.credit_bytes(size, last_bytes.get());
+            }
             log(format!("Upload progress: {}|100", relative));
             let mtime = file_mtime_epoch(path);
             if let Err(err) = webdav::set_sar_last_modified(cfg, password, &remote_url, mtime) {
@@ -679,6 +735,10 @@ fn upload_path(
             UploadOutcome::Success
         }
         Err(err) => {
+            if let Some(shared) = progress {
+                // Count remaining bytes so overall progress does not stall on failure.
+                shared.credit_bytes(size, last_bytes.get());
+            }
             if err.is_auth_failed() {
                 auth_failed();
             }
@@ -686,6 +746,86 @@ fn upload_path(
             log(format!("Upload failed {}: {}", relative, msg));
             UploadOutcome::Failed(relative)
         }
+    }
+}
+
+struct UploadProgressShared {
+    files_done: AtomicUsize,
+    files_total: usize,
+    bytes_done: AtomicU64,
+    bytes_total: u64,
+    last_activity_pct: AtomicUsize,
+    last_activity_at: Mutex<Instant>,
+    activity: Option<ActivityFn>,
+}
+
+impl UploadProgressShared {
+    fn new(files_total: usize, bytes_total: u64, activity: Option<&ActivityFn>) -> Arc<Self> {
+        Arc::new(Self {
+            files_done: AtomicUsize::new(0),
+            files_total,
+            bytes_done: AtomicU64::new(0),
+            bytes_total,
+            last_activity_pct: AtomicUsize::new(usize::MAX),
+            last_activity_at: Mutex::new(Instant::now() - UPLOAD_PROGRESS_MIN_INTERVAL),
+            activity: activity.cloned(),
+        })
+    }
+
+    fn percent(&self) -> u8 {
+        if self.bytes_total == 0 {
+            let done = self.files_done.load(Ordering::SeqCst);
+            if self.files_total == 0 {
+                0
+            } else {
+                ((done * 100) / self.files_total).min(100) as u8
+            }
+        } else {
+            let done = self.bytes_done.load(Ordering::SeqCst).min(self.bytes_total);
+            ((done.saturating_mul(100)) / self.bytes_total).min(100) as u8
+        }
+    }
+
+    fn emit_activity(&self) {
+        let Some(activity) = self.activity.as_ref() else {
+            return;
+        };
+        let pct = self.percent() as usize;
+        let now = Instant::now();
+        let mut last_at = self.last_activity_at.lock().unwrap();
+        let last_pct = self.last_activity_pct.load(Ordering::SeqCst);
+        if pct == last_pct {
+            return;
+        }
+        if last_pct != usize::MAX
+            && now.duration_since(*last_at) < UPLOAD_PROGRESS_MIN_INTERVAL
+            && pct < 100
+        {
+            return;
+        }
+        *last_at = now;
+        self.last_activity_pct.store(pct, Ordering::SeqCst);
+        drop(last_at);
+        activity(ActivityInfo {
+            state: ActivityState::Syncing,
+            completed: self.files_done.load(Ordering::SeqCst),
+            total: self.files_total,
+            failed: 0,
+            failed_paths: Vec::new(),
+            percent: Some(pct as u8),
+        });
+    }
+
+    fn credit_bytes(&self, size: u64, already_credited: u64) {
+        if size > already_credited {
+            self.bytes_done
+                .fetch_add(size - already_credited, Ordering::SeqCst);
+        }
+    }
+
+    fn mark_file_done(&self) {
+        self.files_done.fetch_add(1, Ordering::SeqCst);
+        self.emit_activity();
     }
 }
 
@@ -708,8 +848,11 @@ fn upload_paths_parallel(
     // single big PUT cannot starve or time out under parallel_uploads=10.
     let mut small = Vec::new();
     let mut large = Vec::new();
+    let mut bytes_total = 0u64;
     for path in paths {
-        if file_size(path) >= LARGE_UPLOAD_BYTES {
+        let size = file_size(path);
+        bytes_total = bytes_total.saturating_add(size);
+        if size >= LARGE_UPLOAD_BYTES {
             large.push(path.clone());
         } else {
             small.push(path.clone());
@@ -724,8 +867,9 @@ fn upload_paths_parallel(
         ));
     }
 
-    let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let succeeded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let progress = UploadProgressShared::new(total, bytes_total, activity);
+    progress.emit_activity();
+    let succeeded = Arc::new(AtomicUsize::new(0));
     let failed_paths = Arc::new(Mutex::new(Vec::<String>::new()));
 
     run_upload_queue(
@@ -735,10 +879,8 @@ fn upload_paths_parallel(
         manifest,
         log,
         max_parallel,
-        activity,
         auth_failed,
-        total,
-        &processed,
+        &progress,
         &succeeded,
         &failed_paths,
     );
@@ -749,16 +891,14 @@ fn upload_paths_parallel(
         manifest,
         log,
         1,
-        activity,
         auth_failed,
-        total,
-        &processed,
+        &progress,
         &succeeded,
         &failed_paths,
     );
 
     save_remote_manifest_from_server(cfg, password, log, auth_failed);
-    let ok = succeeded.load(std::sync::atomic::Ordering::SeqCst);
+    let ok = succeeded.load(Ordering::SeqCst);
     let paths_failed = failed_paths.lock().unwrap().clone();
     UploadBatchResult {
         attempted: total,
@@ -775,11 +915,9 @@ fn run_upload_queue(
     manifest: &Arc<Mutex<SyncManifest>>,
     log: &LogFn,
     max_parallel: usize,
-    activity: Option<&ActivityFn>,
     auth_failed: &AuthFailedFn,
-    total: usize,
-    processed: &Arc<std::sync::atomic::AtomicUsize>,
-    succeeded: &Arc<std::sync::atomic::AtomicUsize>,
+    progress: &Arc<UploadProgressShared>,
+    succeeded: &Arc<AtomicUsize>,
     failed_paths: &Arc<Mutex<Vec<String>>>,
 ) {
     if paths.is_empty() {
@@ -790,31 +928,35 @@ fn run_upload_queue(
     std::thread::scope(|scope| {
         for _ in 0..width {
             let queue = queue.clone();
-            let processed = processed.clone();
             let succeeded = succeeded.clone();
             let failed_paths = failed_paths.clone();
+            let progress = progress.clone();
             scope.spawn(move || loop {
                 let Some(path) = queue.lock().unwrap().pop_front() else {
                     break;
                 };
-                match upload_path(cfg, password, &path, manifest, log, auth_failed) {
+                let size = file_size(&path);
+                match upload_path(
+                    cfg,
+                    password,
+                    &path,
+                    manifest,
+                    log,
+                    auth_failed,
+                    Some(&progress),
+                ) {
                     UploadOutcome::Success => {
-                        succeeded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        succeeded.fetch_add(1, Ordering::SeqCst);
+                        progress.mark_file_done();
                     }
                     UploadOutcome::Failed(relative) => {
                         failed_paths.lock().unwrap().push(relative);
+                        progress.mark_file_done();
                     }
-                    UploadOutcome::Skipped => {}
-                }
-                let done = processed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                if let Some(activity) = activity {
-                    activity(ActivityInfo {
-                        state: ActivityState::Syncing,
-                        completed: done,
-                        total,
-                        failed: 0,
-                        failed_paths: Vec::new(),
-                    });
+                    UploadOutcome::Skipped => {
+                        progress.credit_bytes(size, 0);
+                        progress.mark_file_done();
+                    }
                 }
             });
         }
@@ -864,13 +1006,7 @@ pub fn refresh_remote_changes(
     let manifest = Arc::new(Mutex::new(load_local_manifest(&pull_cfg)));
     let suppressed: Arc<Mutex<Vec<(PathBuf, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
 
-    activity(ActivityInfo {
-        state: ActivityState::Checking,
-        completed: 0,
-        total: 0,
-        failed: 0,
-        failed_paths: Vec::new(),
-    });
+    activity(ActivityInfo::checking());
     log("Manual server refresh started".to_string());
 
     let downloaded = fetch_remote_state(&pull_cfg, password, log, auth_failed)
@@ -896,13 +1032,7 @@ pub fn refresh_remote_changes(
         ));
     }
 
-    activity(ActivityInfo {
-        state: ActivityState::Idle,
-        completed: downloaded,
-        total: downloaded,
-        failed: 0,
-        failed_paths: Vec::new(),
-    });
+    activity(ActivityInfo::idle(downloaded, downloaded));
     downloaded
 }
 
@@ -1027,13 +1157,7 @@ fn heal_missing_uploads(
         "{} file(s) missing or mismatched on server, re-uploading",
         uploads.len()
     ));
-    activity(ActivityInfo {
-        state: ActivityState::Syncing,
-        completed: 0,
-        total: uploads.len(),
-        failed: 0,
-        failed_paths: Vec::new(),
-    });
+    activity(ActivityInfo::syncing(0, uploads.len()));
     upload_paths_parallel(
         cfg,
         password,

@@ -49,12 +49,12 @@ fn activity_icon_char(kind: ActivityKind, done: bool) -> &'static str {
     }
 }
 
-fn upload_replace_key(name: &str) -> String {
-    format!("upload:{name}")
+fn upload_replace_key(relative: &str) -> String {
+    format!("upload:{relative}")
 }
 
-fn download_replace_key(name: &str) -> String {
-    format!("download:{name}")
+fn download_replace_key(relative: &str) -> String {
+    format!("download:{relative}")
 }
 
 fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> {
@@ -95,7 +95,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
         let (path, pct) = rest.split_once('|')?;
         let name = display_activity_name(path);
         let pct: u8 = pct.parse().ok()?;
-        let key = upload_replace_key(name);
+        let key = upload_replace_key(path);
         let done = pct >= 100;
         return Some((
             Some(key.clone()),
@@ -120,13 +120,13 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
     }
     if let Some(path) = message.strip_prefix("Uploading: ") {
         let name = display_activity_name(path);
-        let key = upload_replace_key(name);
+        let key = upload_replace_key(path);
         return Some((
             Some(key.clone()),
             ActivityRow {
                 label: format!("Uploading {name}"),
                 kind: ActivityKind::Uploading,
-                pct: None,
+                pct: Some(0),
                 detail: None,
                 relative_path: Some(path.to_string()),
                 replace_key: Some(key),
@@ -136,7 +136,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
     }
     if let Some(path) = message.strip_prefix("Uploaded: ") {
         let name = display_activity_name(path);
-        let key = upload_replace_key(name);
+        let key = upload_replace_key(path);
         return Some((
             Some(key.clone()),
             ActivityRow {
@@ -153,7 +153,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
     if let Some(rest) = message.strip_prefix("Upload failed ") {
         let (relative, err) = rest.split_once(": ").unwrap_or((rest, ""));
         let name = display_activity_name(relative);
-        let key = upload_replace_key(name);
+        let key = upload_replace_key(relative);
         let detail = err.trim();
         return Some((
             Some(key.clone()),
@@ -174,7 +174,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
     }
     if let Some(path) = message.strip_prefix("Downloading: ") {
         let name = display_activity_name(path);
-        let key = download_replace_key(name);
+        let key = download_replace_key(path);
         return Some((
             Some(key.clone()),
             ActivityRow {
@@ -190,7 +190,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
     }
     if let Some(path) = message.strip_prefix("Downloaded: ") {
         let name = display_activity_name(path);
-        let key = download_replace_key(name);
+        let key = download_replace_key(path);
         return Some((
             Some(key),
             ActivityRow {
@@ -283,7 +283,7 @@ unsafe fn update_retry_failed_button(hwnd: HWND) {
 
 fn failed_activity_row(relative: &str, detail: Option<String>) -> (String, ActivityRow) {
     let name = display_activity_name(relative);
-    let key = upload_replace_key(name);
+    let key = upload_replace_key(relative);
     (
         key.clone(),
         ActivityRow {

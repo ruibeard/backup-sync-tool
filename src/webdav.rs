@@ -4,8 +4,27 @@ use crate::config::Config;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::fmt;
-use std::io::Read;
+use std::io::{self, Read};
 use std::time::{Duration, UNIX_EPOCH};
+
+/// Wraps a reader and reports cumulative bytes read (approx. bytes handed to ureq for PUT).
+struct ProgressRead<R, F> {
+    inner: R,
+    total: u64,
+    sent: u64,
+    on_progress: F,
+}
+
+impl<R: Read, F: FnMut(u64, u64)> Read for ProgressRead<R, F> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            self.sent = self.sent.saturating_add(n as u64);
+            (self.on_progress)(self.sent.min(self.total), self.total);
+        }
+        Ok(n)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum WebDavError {
@@ -151,8 +170,27 @@ pub fn put_file<R: Read>(
     reader: R,
     content_length: u64,
 ) -> Result<(), WebDavError> {
+    put_file_with_progress(cfg, password, remote_url, reader, content_length, |_, _| {})
+}
+
+/// PUT with a progress callback `(bytes_sent, content_length)` as the body is read.
+pub fn put_file_with_progress<R: Read, F: FnMut(u64, u64)>(
+    cfg: &Config,
+    password: &str,
+    remote_url: &str,
+    reader: R,
+    content_length: u64,
+    mut on_progress: F,
+) -> Result<(), WebDavError> {
     validate_https(&cfg.webdav_url)?;
     let auth = basic_auth(&cfg.username, password);
+    on_progress(0, content_length);
+    let reader = ProgressRead {
+        inner: reader,
+        total: content_length,
+        sent: 0,
+        on_progress: &mut on_progress,
+    };
     agent_with_timeout(transfer_timeout(content_length))
         .request("PUT", remote_url)
         .set("Authorization", &auth)

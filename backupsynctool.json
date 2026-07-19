@@ -1,15 +1,16 @@
 {
-  "watch_folder": "C:\\Users\\rui.almeida\\Desktop\\Sync",
+  "watch_folder": "C:\\Users\\rui.almeida\\Desktop\\elabora",
   "webdav_url": "https://u561272-sub1.your-storagebox.de",
   "username": "u561272-sub1",
-  "password_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAKAtvQrn/30qyyTANxKS/4gAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAEi9IghhF+SVtS1rNsosxgI2HnZfr8iO0uUdRjYqETkpAAAAAA6AAAAAAgAAIAAAAIAbrVmDLbbLJzHl88tjULOwW48S42heqV+2lAKUF5xOIAAAAPUYprTQzbskAHLAHcC1nI4LmkurigOFmAJVJWbc/bvBQAAAAFYwmO9w9l1yFnrLQGUZ/gBIrih2SvIVlxeX55FegL8v2tu6cPUE96HQBVRbsOU973cU4D8y0C4Kj4pALBPGQ1Q=",
-  "remote_folder": "RuiW7Test",
+  "password_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAALSfeCQ2Y80qqRNgSALExcgAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAGwp7jo9X/I5/VKazwthXwpC2HuVc56SqVFnhFr0EyBiAAAAAA6AAAAAAgAAIAAAAOAVGehaHJfZVXNspRLZDBveKbABX0JDEP0H3A4/LyRLIAAAAESjYSdPzCHtMg2c0gll+3TN0IOTP3VUj9zBeauR5QzAQAAAAHsLaez6cIiG7YAS0jbfjBS6q37ISoJLlCXoq34y8h6SXyLKmX//XvvqorWThvpCS6gF4wPxwDzQIlGcOonVdK0=",
+  "remote_folder": "DrogariaGaio-Elabora",
   "pair_api_base": "https://box.rui.cam",
-  "device_token_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAKAtvQrn/30qyyTANxKS/4gAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAEmvPiWIeeM7qL7BzQ6BGly25vbV5Ea2bJDFZ/SbDrGeAAAAAA6AAAAAAgAAIAAAALDq/ZD1jqubcJNHTZ3nUbffpTGiPIn02B4BKqEY8B//UAAAAIz3FkLOesdtLiO/z0aBkn/MKTCZq1CIzToHx7AGZ0yloYfqJUEToDKuQ7vlx6mVfKw+j1/W5gdQtLhxjzjBm/UbkzTCB8bVoEIMTxpWX/lKQAAAAKReUsAYT/ckHHzWbPpLsICG6woZPW0eEBNYeFhlxCXpNO1Jh6ebDxefft6/aBwuhyH1MbNkgXLb7n8DvF7uUA0=",
+  "device_token_enc": "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAALSfeCQ2Y80qqRNgSALExcgAAAAAWAAAAdwBlAGIAZABhAHYAcwB5AG4AYwAAABBmAAAAAQAAIAAAAFGgicAR65LHyGcZMy4zBCpBYo5HWEU7ZlqLSY5sB8H+AAAAAA6AAAAAAgAAIAAAAGI1DWu8k2dvPdfg7pwrmQ2xLk3QRi8lk5pnBBR0GMLFUAAAAJZgB8/i+UD2rQtsEqmI2o2lHK+3/8wj2aY7epV2/Haq6HxZDhfVdXpwSqRBIZHH18uVw2BsAFzSlNaObukUVsrR1BT97y+wUb+EmzbMM5GNQAAAAJwQBozzP56y1iZRwCqLmUf7lIUFvq+n2iBvEctAvZ7LH34led466QDG7coagyCplF79bJNgZJZbWtvEN9hBYss=",
   "credential_profile_id": null,
   "credential_version": null,
-  "server_approved_at": "2026-07-04 17:48",
+  "server_approved_at": "2026-07-19 18:13",
   "start_with_windows": true,
   "sync_remote_changes": true,
+  "auto_update": true,
   "parallel_uploads": 10
 }

@@ -554,6 +554,8 @@ struct WndState {
     sync_status_state: usize,
     sync_progress_done: usize,
     sync_progress_total: usize,
+    /// Byte-weighted overall percent when set; preferred over done/total for the bar.
+    sync_progress_percent: Option<u8>,
     sync_last_failed: usize,
     sync_started_at: Option<std::time::Instant>,
     sync_anim_frame: usize,

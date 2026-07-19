@@ -7,11 +7,12 @@ unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
 
 unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let progress = if lp.0 != 0 {
-        *Box::from_raw(lp.0 as *mut (usize, usize, usize, Vec<String>))
+        *Box::from_raw(lp.0 as *mut (usize, usize, usize, Vec<String>, Option<u8>))
     } else {
-        (0, 0, 0, Vec::new())
+        (0, 0, 0, Vec::new(), None)
     };
     let failed_paths = progress.3.clone();
+    let byte_pct = progress.4;
     let (icon_name, mut status_text) = match wp.0 {
         x if x == crate::sync::ActivityState::Checking as usize => {
             (w!("APP_ICON_SYNCING"), "Checking...")
@@ -35,6 +36,7 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     st.sync_status_state = wp.0;
     st.sync_progress_done = progress.0;
     st.sync_progress_total = progress.1;
+    st.sync_progress_percent = byte_pct;
     st.sync_last_failed = progress.2;
     if is_busy {
         if is_syncing && !was_syncing {
@@ -42,13 +44,15 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         }
         if is_syncing && progress.1 > 0 {
             let done = progress.0.min(progress.1);
-            let pct = (done * 100) / progress.1;
-            let eta = if done > 0 {
+            let pct = byte_pct
+                .map(|p| p as usize)
+                .unwrap_or_else(|| (done * 100) / progress.1);
+            let eta = if pct > 0 {
                 st.sync_started_at.and_then(|started| {
                     let elapsed = started.elapsed().as_secs_f64();
-                    if elapsed > 0.0 {
-                        let per_item = elapsed / done as f64;
-                        let remaining = ((progress.1 - done) as f64 * per_item).ceil() as u64;
+                    if elapsed > 0.0 && pct < 100 {
+                        let remaining =
+                            ((elapsed / pct as f64) * (100 - pct) as f64).ceil() as u64;
                         Some(format_eta(remaining))
                     } else {
                         None
@@ -79,6 +83,7 @@ unsafe fn on_app_sync_activity(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         }
     } else {
         st.sync_started_at = None;
+        st.sync_progress_percent = None;
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
         let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _);
         let hicon = LoadIconW(hi, icon_name).unwrap_or_default();

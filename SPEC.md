@@ -253,6 +253,7 @@ Empty or missing watch folder before pair → `xd::default_watch_folder()` when 
 
 - Watcher: recursive `notify`, debounce, ignore `.backupsynctool-manifest.json` and `.tmp.driveupload/` trees.
 - Upload scheduling: files under 50 MB use `parallel_uploads`; files ≥ 50 MB upload one after another.
+- Upload progress: `put_file_with_progress` reports byte progress during PUT; logs `Upload progress: {relative}|{0-100}` (throttled ~250ms / 1%) so Recent Activity shows a per-file bar. Parallel uploads key rows by full relative path so same basenames do not overwrite each other. Overall sync % is byte-weighted across the batch.
 - Local manifest: updated **only after successful PUT** per path.
 - Remote manifest: rewritten from **PROPFIND** (`save_remote_manifest_from_server`), never full local scan; the small remote manifest also acts as the lightweight server-change marker.
 - Skip upload (manifest exists): local unchanged since last success **and** server file size matches (`remote_file_states`).
@@ -285,7 +286,7 @@ Auth header: `Basic base64(username:password)`.
 - No **Save** — auto-save folder choice + checkboxes.
 - Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Choose** actions below; WebDAV node with icon above the Storage Box host and approved remote folder below, plus paired server actions **Refresh** and **Reconnect Server**. If no valid local folder exists, hide Open, Refresh, and Connect/Reconnect and show one **Choose folder** action. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
 - **Sync band** (below connection card, when paired): **All synced** + 100% green bar when idle; **Syncing** + blue bar with **%** and **ETA** when uploading/downloading; **Checking…** when scanning.
-- **Recent activity**: header **RECENT ACTIVITY LOG** + **Showing last 200 events**; info rows show clock time on the right; file rows show **Done** or **%**.
+- **Recent activity**: header **RECENT ACTIVITY LOG** + **Showing last 200 events**; info rows show clock time on the right; file rows show **Done** or per-file **%** from byte progress during upload.
 - Bridge icons: baked PNGs at **120×120** (3× logical tile) in `assets/bridge-pc.png` and `assets/bridge-server.png`; SVG sources kept in `assets/svg-backups/`. Downscaled to 40×40 at draw time with HALFTONE.
 - **Typography** (Segoe UI, pixel heights): 13px body; 12px captions/paths/activity status; 12px semibold bridge names and sync head; 11px bold section headings; 13px buttons; 12px links. Muted text `#666666`.
 - Notices: `notify_user()` / `notify_user_status()` — no `MessageBox` except manual update Yes/No when auto-update is off.
