@@ -76,9 +76,20 @@ fn http_error(status: u16, action: &str) -> WebDavError {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
+    agent_with_timeout(Duration::from_secs(30))
+}
+
+/// Size-aware timeout so large PUTs/GETs are not killed by the 30s default while
+/// ten smaller uploads are also in flight.
+fn transfer_timeout(content_length: u64) -> Duration {
+    // 2 minutes base + ~15s per MiB, capped at 2 hours.
+    let mib = content_length.div_ceil(1024 * 1024);
+    let secs = 120u64.saturating_add(mib.saturating_mul(15)).min(2 * 60 * 60);
+    Duration::from_secs(secs.max(30))
+}
+
+fn agent_with_timeout(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new().timeout(timeout).build()
 }
 
 fn basic_auth(user: &str, pass: &str) -> String {
@@ -119,7 +130,8 @@ pub fn test_connection(cfg: &Config, password: &str) -> Result<(), WebDavError> 
 pub fn get_file(cfg: &Config, password: &str, remote_url: &str) -> Result<Vec<u8>, WebDavError> {
     validate_https(&cfg.webdav_url)?;
     let auth = basic_auth(&cfg.username, password);
-    let mut reader = agent()
+    // Unknown size up front — allow a generous transfer window.
+    let mut reader = agent_with_timeout(Duration::from_secs(30 * 60))
         .request("GET", remote_url)
         .set("Authorization", &auth)
         .call()
@@ -141,7 +153,7 @@ pub fn put_file<R: Read>(
 ) -> Result<(), WebDavError> {
     validate_https(&cfg.webdav_url)?;
     let auth = basic_auth(&cfg.username, password);
-    agent()
+    agent_with_timeout(transfer_timeout(content_length))
         .request("PUT", remote_url)
         .set("Authorization", &auth)
         .set("Content-Length", &content_length.to_string())

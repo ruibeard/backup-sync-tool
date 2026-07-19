@@ -106,7 +106,11 @@ Laravel = control plane only. Never proxies backup bytes.
 | `server_approved_at` | Local timestamp written when pairing approval is accepted |
 | `sync_remote_changes` | UI: **Download from server**; enables remote poll + download baseline |
 | `auto_update` | UI: **Auto-update**; default `true`; installs newer GitHub releases automatically |
-| `parallel_uploads` | Default `10` |
+| `parallel_uploads` | Default `10` for files under 50 MB. Files ≥ 50 MB upload serially (one at a time) after the small-file batch. |
+
+Scan, watcher, and upload skip everything under `.tmp.driveupload` directories (Google Drive temporary upload staging).
+
+WebDAV PUT timeout scales with file size (about 2 minutes + 15s/MiB, capped at 2 hours) so large uploads are not killed by the short default used for PROPFIND/auth.
 
 `Config::Default` must be explicit (serde ignores `default` fns on derived `Default`).
 
@@ -247,7 +251,8 @@ Empty or missing watch folder before pair → `xd::default_watch_folder()` when 
 
 ### Ongoing
 
-- Watcher: recursive `notify`, debounce, ignore `.backupsynctool-manifest.json`.
+- Watcher: recursive `notify`, debounce, ignore `.backupsynctool-manifest.json` and `.tmp.driveupload/` trees.
+- Upload scheduling: files under 50 MB use `parallel_uploads`; files ≥ 50 MB upload one after another.
 - Local manifest: updated **only after successful PUT** per path.
 - Remote manifest: rewritten from **PROPFIND** (`save_remote_manifest_from_server`), never full local scan; the small remote manifest also acts as the lightweight server-change marker.
 - Skip upload (manifest exists): local unchanged since last success **and** server file size matches (`remote_file_states`).

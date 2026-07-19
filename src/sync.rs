@@ -21,6 +21,10 @@ const REMOTE_MARKER_IDLE_INTERVAL: Duration = Duration::from_secs(30);
 const REMOTE_MARKER_FAST_WINDOW: Duration = Duration::from_secs(5 * 60);
 const REMOTE_HEAL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MANIFEST_NAME: &str = ".backupsynctool-manifest.json";
+/// Google Drive staging dirs — never scan or upload.
+const IGNORED_DIR_NAME: &str = ".tmp.driveupload";
+/// Files at or above this size upload one-at-a-time; smaller files keep `parallel_uploads`.
+const LARGE_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
@@ -699,10 +703,89 @@ fn upload_paths_parallel(
     if total == 0 {
         return UploadBatchResult::default();
     }
-    let width = max_parallel.max(1).min(total);
+
+    // Small files keep the configured fan-out; large ones go one-by-one so a
+    // single big PUT cannot starve or time out under parallel_uploads=10.
+    let mut small = Vec::new();
+    let mut large = Vec::new();
+    for path in paths {
+        if file_size(path) >= LARGE_UPLOAD_BYTES {
+            large.push(path.clone());
+        } else {
+            small.push(path.clone());
+        }
+    }
+    if !large.is_empty() {
+        log(format!(
+            "Upload schedule: {} small (up to {} parallel), {} large (>=50 MB, serial)",
+            small.len(),
+            max_parallel.max(1),
+            large.len()
+        ));
+    }
+
     let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let succeeded = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let failed_paths = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    run_upload_queue(
+        cfg,
+        password,
+        &small,
+        manifest,
+        log,
+        max_parallel,
+        activity,
+        auth_failed,
+        total,
+        &processed,
+        &succeeded,
+        &failed_paths,
+    );
+    run_upload_queue(
+        cfg,
+        password,
+        &large,
+        manifest,
+        log,
+        1,
+        activity,
+        auth_failed,
+        total,
+        &processed,
+        &succeeded,
+        &failed_paths,
+    );
+
+    save_remote_manifest_from_server(cfg, password, log, auth_failed);
+    let ok = succeeded.load(std::sync::atomic::Ordering::SeqCst);
+    let paths_failed = failed_paths.lock().unwrap().clone();
+    UploadBatchResult {
+        attempted: total,
+        succeeded: ok,
+        failed: paths_failed.len(),
+        failed_paths: paths_failed,
+    }
+}
+
+fn run_upload_queue(
+    cfg: &Config,
+    password: &str,
+    paths: &[PathBuf],
+    manifest: &Arc<Mutex<SyncManifest>>,
+    log: &LogFn,
+    max_parallel: usize,
+    activity: Option<&ActivityFn>,
+    auth_failed: &AuthFailedFn,
+    total: usize,
+    processed: &Arc<std::sync::atomic::AtomicUsize>,
+    succeeded: &Arc<std::sync::atomic::AtomicUsize>,
+    failed_paths: &Arc<Mutex<Vec<String>>>,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    let width = max_parallel.max(1).min(paths.len());
     let queue = Arc::new(Mutex::new(VecDeque::from(paths.to_vec())));
     std::thread::scope(|scope| {
         for _ in 0..width {
@@ -736,15 +819,6 @@ fn upload_paths_parallel(
             });
         }
     });
-    save_remote_manifest_from_server(cfg, password, log, auth_failed);
-    let ok = succeeded.load(std::sync::atomic::Ordering::SeqCst);
-    let paths_failed = failed_paths.lock().unwrap().clone();
-    UploadBatchResult {
-        attempted: total,
-        succeeded: ok,
-        failed: paths_failed.len(),
-        failed_paths: paths_failed,
-    }
 }
 
 /// Re-upload specific paths under `watch_folder` (relative paths as logged by sync).
@@ -1079,11 +1153,14 @@ fn collect_local_files(root: &str) -> Vec<PathBuf> {
 }
 
 fn collect_local_files_recursive(path: PathBuf, files: &mut Vec<PathBuf>) {
+    if is_ignored_dir_name(path.file_name()) {
+        return;
+    }
     let Ok(meta) = fs::metadata(&path) else {
         return;
     };
     if meta.is_file() {
-        if !is_manifest_path(&path) {
+        if !is_manifest_path(&path) && !path_contains_ignored_dir(&path) {
             files.push(path);
         }
         return;
@@ -1193,10 +1270,33 @@ fn ensure_remote_dirs(
 }
 
 fn should_ignore_path(watch_folder: &str, path: &Path) -> bool {
-    is_manifest_path(path)
-        || relative_path_for_watch(watch_folder, path)
-            .map(|relative| relative == MANIFEST_NAME)
-            .unwrap_or(false)
+    if is_manifest_path(path) || path_contains_ignored_dir(path) {
+        return true;
+    }
+    if watch_folder.is_empty() {
+        return false;
+    }
+    relative_path_for_watch(watch_folder, path)
+        .map(|relative| relative == MANIFEST_NAME || relative_contains_ignored_dir(&relative))
+        .unwrap_or(false)
+}
+
+fn path_contains_ignored_dir(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        std::path::Component::Normal(name) => is_ignored_dir_name(Some(name)),
+        _ => false,
+    })
+}
+
+fn relative_contains_ignored_dir(relative: &str) -> bool {
+    relative
+        .split(['/', '\\'])
+        .any(|segment| segment.eq_ignore_ascii_case(IGNORED_DIR_NAME))
+}
+
+fn is_ignored_dir_name(name: Option<&std::ffi::OsStr>) -> bool {
+    name.and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(IGNORED_DIR_NAME))
 }
 
 fn is_manifest_path(path: &Path) -> bool {
@@ -1233,4 +1333,27 @@ fn should_suppress(suppressed: &Arc<Mutex<Vec<(PathBuf, Instant)>>>, path: &Path
     let now = Instant::now();
     guard.retain(|(_, until)| *until > now);
     guard.iter().any(|(pending_path, _)| pending_path == path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_tmp_driveupload_paths() {
+        assert!(relative_contains_ignored_dir("foo/.tmp.driveupload/bar.bin"));
+        assert!(relative_contains_ignored_dir(".tmp.driveupload/x"));
+        assert!(path_contains_ignored_dir(Path::new(
+            r"C:\XDSoftware\backups\.tmp.driveupload\file.bin"
+        )));
+        assert!(!relative_contains_ignored_dir("foo/bar.bin"));
+        assert!(!should_ignore_path(
+            r"C:\XDSoftware\backups",
+            Path::new(r"C:\XDSoftware\backups\invoice.pdf")
+        ));
+        assert!(should_ignore_path(
+            r"C:\XDSoftware\backups",
+            Path::new(r"C:\XDSoftware\backups\.tmp.driveupload\tmp.bin")
+        ));
+    }
 }
