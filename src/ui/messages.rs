@@ -207,14 +207,23 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
 
     candidate_config.schema_version = crate::config::CONFIG_SCHEMA_VERSION;
     candidate_config.device_uuid = pair.device_uuid.clone();
-    candidate_config.syncthing_device_id = pair.syncthing_device_id.clone();
-    candidate_config.syncthing_hub_device_id = pair.syncthing_hub_device_id.clone();
-    candidate_config.syncthing_hub_addresses = pair.syncthing_hub_addresses.clone();
-    candidate_config.syncthing_folder_id = pair.syncthing_folder_id.clone();
-    candidate_config.syncthing_folder_label = pair.syncthing_folder_label.clone();
+    candidate_config.destination_uuid = pair.destination_uuid.clone();
+    candidate_config.destination_label = pair.destination_label.clone();
+    candidate_config.transport = "chunk_store".into();
+    candidate_config.chunk_endpoint = pair.chunk_endpoint.clone();
+    candidate_config.chunk_region = pair.chunk_region.clone();
+    candidate_config.chunk_bucket = pair.chunk_bucket.clone();
+    candidate_config.chunk_prefix = pair.chunk_prefix.clone();
+    candidate_config.chunk_path_style = pair.chunk_path_style;
+    candidate_config.syncthing_folder_label = pair.destination_label.clone();
     candidate_config.server_approved_at = Some(approval_timestamp_now());
 
-    let candidate_config = match crate::config::save_pairing_candidate(candidate_config, &pair.device_token) {
+    let candidate_config = match crate::config::save_pairing_candidate(
+        candidate_config,
+        &pair.device_token,
+        &pair.chunk_access_key,
+        &pair.chunk_secret_key,
+    ) {
         Ok(config) => config,
         Err(e) => {
             logs::append(&format!("Approved reconnect save failed: {e}"));
@@ -232,7 +241,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         st.auth_failure_notified = false;
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-            &hstring(&pair.syncthing_folder_label),
+            &hstring(&pair.destination_label),
         );
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
@@ -245,7 +254,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     }
     apply_activity_log(
         hwnd,
-        &format!("! Syncthing folder approved: {}", pair.syncthing_folder_label),
+        &format!("! Destination approved: {}", pair.destination_label),
     );
     match restart_sync_engine(hwnd) {
         Ok(()) => logs::append("Pairing complete; initial sync started."),

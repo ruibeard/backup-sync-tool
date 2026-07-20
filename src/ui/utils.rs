@@ -301,14 +301,15 @@ unsafe fn ensure_or_prompt_watch_folder(hwnd: HWND) -> bool {
     }
 }
 
-/// Stop the current bundled engine, apply the approved Syncthing assignment,
-/// then keep the shared native snapshot refreshed from its loopback API.
+/// Start/restart the in-process Option H chunk sync engine for the Windows UI.
 unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     read_ctrls(hwnd, stmut(hwnd));
     if let Some(cancel) = stmut(hwnd).sync_cancel.take() {
         cancel.store(true, Ordering::Release);
     }
-    stmut(hwnd).sync_engine = None;
+    if let Some(engine) = stmut(hwnd).sync_engine.take() {
+        engine.stop();
+    }
     if !ensure_or_prompt_watch_folder(hwnd) {
         return Err("Sync not started: choose a valid backup folder on this PC.".into());
     }
@@ -325,43 +326,14 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
         let _ = st.app.send(crate::app::AppCommand::EngineStarting);
     }
 
-    let engine = crate::syncthing::SyncthingSupervisor::start()?;
-    engine.configure_folder(&crate::syncthing::FolderAssignment {
-        local_device_id: cfg.syncthing_device_id.clone(),
-        hub_device_id: cfg.syncthing_hub_device_id.clone(),
-        hub_addresses: cfg.syncthing_hub_addresses.clone(),
-        folder_id: cfg.syncthing_folder_id.clone(),
-        folder_label: cfg.syncthing_folder_label.clone(),
-        path: std::path::PathBuf::from(&cfg.watch_folder),
-    })?;
-    let status = engine.status(&cfg.syncthing_folder_id, &cfg.syncthing_hub_device_id)?;
-    let app = stmut(hwnd).app.clone();
-    let _ = app.send(crate::app::AppCommand::SyncthingStatus(status));
+    let engine = crate::sync::SyncEngine::start(cfg.clone())?;
     stmut(hwnd).sync_engine = Some(engine);
-
-    let cancel = Arc::new(AtomicBool::new(false));
-    stmut(hwnd).sync_cancel = Some(cancel.clone());
-    let folder_id = cfg.syncthing_folder_id.clone();
-    let hub_device_id = cfg.syncthing_hub_device_id.clone();
-    std::thread::spawn(move || {
-        let Ok(client) = crate::syncthing::SyncthingSupervisor::start() else {
-            return;
-        };
-        let mut since = 0;
-        while !cancel.load(Ordering::Acquire) {
-            if let Ok(status) = client.status(&folder_id, &hub_device_id) {
-                let _ = app.send(crate::app::AppCommand::SyncthingStatus(status));
-            }
-            if let Ok(events) = client.poll_events(since, 1) {
-                since = events.iter().map(|event| event.id).max().unwrap_or(since);
-                if !events.is_empty() {
-                    let _ = app.send(crate::app::AppCommand::SyncthingEvents(events));
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    });
-    logs::append(&format!("Syncthing started for {}", cfg.watch_folder));
+    stmut(hwnd).sync_status_text = "Syncing...".into();
+    stmut(hwnd).sync_status_state = UiSyncState::Syncing as usize;
+    logs::append(&format!(
+        "Chunk sync started for {} -> {}",
+        cfg.watch_folder, cfg.chunk_endpoint
+    ));
     Ok(())
 }
 

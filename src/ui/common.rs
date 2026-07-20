@@ -544,7 +544,7 @@ enum UiSyncState {
 struct WndState {
     app: crate::app::AppHandle,
     config: Config,
-    sync_engine: Option<crate::syncthing::SyncthingSupervisor>,
+    sync_engine: Option<crate::sync::SyncEngine>,
     update_url: Option<String>,
     repair_required: bool,
     connected: bool,
@@ -650,11 +650,15 @@ struct PairResult {
     pair_id: u64,
     device_uuid: String,
     device_token: String,
-    syncthing_device_id: String,
-    syncthing_hub_device_id: String,
-    syncthing_hub_addresses: Vec<String>,
-    syncthing_folder_id: String,
-    syncthing_folder_label: String,
+    destination_uuid: String,
+    destination_label: String,
+    chunk_endpoint: String,
+    chunk_region: String,
+    chunk_bucket: String,
+    chunk_prefix: String,
+    chunk_access_key: String,
+    chunk_secret_key: String,
+    chunk_path_style: bool,
 }
 
 struct PairStarted {

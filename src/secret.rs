@@ -58,6 +58,13 @@ fn candidate_nonce() -> String {
     format!("{}_{time}_{sequence}", std::process::id())
 }
 
+/// Protect an arbitrary secret (chunk access/secret keys, etc.).
+pub fn protect_string(plaintext: &str) -> Result<String, String> {
+    crate::logs::register_secret(plaintext);
+    let account = format!("chunk_secret_{}", candidate_nonce());
+    protect(&account, plaintext)
+}
+
 fn remove_handle_if_replaced(old: &str, new: &str) {
     if old != new {
         remove_handle(old);

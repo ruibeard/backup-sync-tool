@@ -21,7 +21,6 @@ pub struct PairStartRequest {
     pub xd_customer_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_customer: Option<String>,
-    pub syncthing_device_id: String,
     pub supported_transports: Vec<String>,
 }
 
@@ -45,13 +44,23 @@ pub struct PairStatusResponse {
     #[serde(default)]
     pub transport: Option<String>,
     #[serde(default)]
-    pub syncthing_hub_device_id: Option<String>,
+    pub destination_uuid: Option<String>,
     #[serde(default)]
-    pub syncthing_hub_addresses: Vec<String>,
+    pub destination_label: Option<String>,
     #[serde(default)]
-    pub syncthing_folder_id: Option<String>,
+    pub chunk_endpoint: Option<String>,
     #[serde(default)]
-    pub syncthing_folder_label: Option<String>,
+    pub chunk_region: Option<String>,
+    #[serde(default)]
+    pub chunk_bucket: Option<String>,
+    #[serde(default)]
+    pub chunk_prefix: Option<String>,
+    #[serde(default)]
+    pub chunk_access_key: Option<String>,
+    #[serde(default)]
+    pub chunk_secret_key: Option<String>,
+    #[serde(default)]
+    pub chunk_path_style: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +133,6 @@ pub fn start_pairing(
     xd_license_number: Option<String>,
     xd_customer_name: Option<String>,
     suggested_customer: Option<String>,
-    syncthing_device_id: String,
 ) -> Option<PairStartResponse> {
     start_pairing_result(
         api_base,
@@ -136,7 +144,6 @@ pub fn start_pairing(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
-        syncthing_device_id,
     )
     .ok()
 }
@@ -154,7 +161,6 @@ pub fn start_pairing_result(
     xd_license_number: Option<String>,
     xd_customer_name: Option<String>,
     suggested_customer: Option<String>,
-    syncthing_device_id: String,
 ) -> Result<PairStartResponse, PairingError> {
     let cancel = AtomicBool::new(false);
     start_pairing_cancellable(
@@ -167,7 +173,6 @@ pub fn start_pairing_result(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
-        syncthing_device_id,
         &cancel,
     )
 }
@@ -183,7 +188,6 @@ pub fn start_pairing_cancellable(
     xd_license_number: Option<String>,
     xd_customer_name: Option<String>,
     suggested_customer: Option<String>,
-    syncthing_device_id: String,
     cancel: &AtomicBool,
 ) -> Result<PairStartResponse, PairingError> {
     if cancel.load(Ordering::Acquire) {
@@ -198,8 +202,7 @@ pub fn start_pairing_cancellable(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
-        syncthing_device_id,
-        supported_transports: vec!["syncthing".to_string()],
+        supported_transports: vec!["chunk_store".to_string()],
     };
     let body = serde_json::to_string(&req).map_err(|err| {
         PairingError::new(
@@ -366,7 +369,14 @@ fn pairing_agent() -> ureq::Agent {
 }
 
 fn register_approval_secrets(status: &PairStatusResponse) {
-    for value in [status.device_token.as_deref()].into_iter().flatten() {
+    for value in [
+        status.device_token.as_deref(),
+        status.chunk_access_key.as_deref(),
+        status.chunk_secret_key.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         crate::logs::register_secret(value);
     }
 }
@@ -423,11 +433,11 @@ pub fn terminal_status_error(status: &PairStatusResponse) -> Option<PairingError
     }
 }
 
-pub fn is_syncthing_approval(status: &PairStatusResponse) -> bool {
+pub fn is_chunk_store_approval(status: &PairStatusResponse) -> bool {
     status
         .transport
         .as_deref()
-        .is_some_and(|transport| transport.eq_ignore_ascii_case("syncthing"))
+        .is_some_and(|transport| transport.eq_ignore_ascii_case("chunk_store"))
 }
 
 /// Validate admin-approved destination / bucket alias.
@@ -464,28 +474,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_start_serializes_syncthing_identity() {
+    fn pair_start_serializes_chunk_store_transport() {
         let req = PairStartRequest {
             machine_name: "PC".into(),
             windows_user: "u".into(),
-            app_version: "2026.0.7".into(),
+            app_version: "2026.2.0".into(),
             detected_install_path: Some(r"C:\XDSoftware".into()),
             detected_backup_path: Some(r"C:\XDSoftware\backups".into()),
             xd_license_number: Some("XDPT.1".into()),
             xd_customer_name: Some("Customer".into()),
             suggested_customer: Some("XDPT.1-Customer".into()),
-            syncthing_device_id: "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"
-                .into(),
-            supported_transports: vec!["syncthing".into()],
+            supported_transports: vec!["chunk_store".into()],
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(
             json["supported_transports"],
-            serde_json::json!(["syncthing"])
-        );
-        assert_eq!(
-            json["syncthing_device_id"],
-            "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH"
+            serde_json::json!(["chunk_store"])
         );
         assert_eq!(json["xd_license_number"], "XDPT.1");
     }
@@ -514,26 +518,29 @@ mod tests {
     }
 
     #[test]
-    fn syncthing_approval_requires_transport_field() {
-        let syncthing = PairStatusResponse {
+    fn chunk_store_approval_requires_transport_field() {
+        let approved = PairStatusResponse {
             status: "approved".into(),
             device_token: Some("t".into()),
             device_uuid: Some("device-uuid".into()),
-            transport: Some("syncthing".into()),
-            syncthing_hub_device_id: Some(
-                "AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD-EEEEEEE-FFFFFFF-GGGGGGG-HHHHHHH".into(),
-            ),
-            syncthing_hub_addresses: vec!["tcp://sync.example:22000".into()],
-            syncthing_folder_id: Some("customer-1".into()),
-            syncthing_folder_label: Some("Customer 1".into()),
+            transport: Some("chunk_store".into()),
+            destination_uuid: Some("dest".into()),
+            destination_label: Some("Customer 1".into()),
+            chunk_endpoint: Some("https://s3.example".into()),
+            chunk_region: Some("garage".into()),
+            chunk_bucket: Some("backup".into()),
+            chunk_prefix: Some("dest/x/".into()),
+            chunk_access_key: Some("ak".into()),
+            chunk_secret_key: Some("sk".into()),
+            chunk_path_style: Some(true),
         };
-        assert!(is_syncthing_approval(&syncthing));
+        assert!(is_chunk_store_approval(&approved));
 
-        let not_syncthing = PairStatusResponse {
+        let not_ok = PairStatusResponse {
             transport: None,
-            ..syncthing
+            ..approved
         };
-        assert!(!is_syncthing_approval(&not_syncthing));
+        assert!(!is_chunk_store_approval(&not_ok));
     }
 
     #[test]

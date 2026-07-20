@@ -1,4 +1,4 @@
-//! Headless Syncthing host for the macOS menubar / daemon.
+//! Headless sync host for the macOS menubar / daemon (Option H chunk engine).
 
 use crate::app::{
     AppCommand, AppController, AppHandle, AppSnapshot, ConnectionState, PairingState, WorkState,
@@ -6,7 +6,7 @@ use crate::app::{
 use crate::config::{self, Config};
 use crate::logs;
 use crate::pairing::{self, PairStatusResponse};
-use crate::syncthing::{FolderAssignment, SyncthingMonitor, SyncthingSupervisor};
+use crate::sync::SyncEngine;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,8 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct SyncHost {
     pub config: Config,
-    monitor: Option<SyncthingMonitor>,
-    engine: Option<SyncthingSupervisor>,
+    engine: Option<SyncEngine>,
     reconnect_required: Arc<AtomicBool>,
     app: AppHandle,
 }
@@ -39,14 +38,17 @@ impl SyncHost {
             pair_api_base: config.pair_api_base.clone(),
             start_at_login: config.start_with_windows,
             auto_update: config.auto_update,
-            folder_label: config.syncthing_folder_label.clone(),
+            folder_label: if !config.destination_label.is_empty() {
+                config.destination_label.clone()
+            } else {
+                config.syncthing_folder_label.clone()
+            },
             ..AppSnapshot::default()
         };
         let (app, events) = AppController::start(initial);
         std::thread::spawn(move || while events.recv().is_ok() {});
         Self {
             config,
-            monitor: None,
             engine: None,
             reconnect_required: Arc::new(AtomicBool::new(false)),
             app,
@@ -110,13 +112,13 @@ impl SyncHost {
     }
 
     pub fn stop_sync(&mut self) {
-        self.monitor = None;
-        self.engine = None;
+        if let Some(engine) = self.engine.take() {
+            engine.stop();
+        }
     }
 
     pub fn restart_sync(&mut self) -> Result<(), String> {
-        self.monitor = None;
-        self.engine = None;
+        self.stop_sync();
         let _ = self.app.send(AppCommand::EngineStarting);
         if !watch_folder_is_valid(&self.config.watch_folder) {
             let error = "Sync not started: choose a valid watch folder.".to_string();
@@ -128,83 +130,31 @@ impl SyncHost {
             let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
             return Err(error);
         }
-        crate::paths::validate_bundled_engine_installation().inspect_err(|error| {
-            let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
-        })?;
 
-        let engine = SyncthingSupervisor::start().inspect_err(|error| {
+        let engine = SyncEngine::start(self.config.clone()).inspect_err(|error| {
             let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
         })?;
-        let assignment = assignment_from_config(&self.config).inspect_err(|error| {
-            let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
-        })?;
-        if let Err(error) = engine.configure_folder(&assignment) {
-            self.reconnect_required.store(true, Ordering::Relaxed);
-            let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
-            return Err(error);
-        }
-        let status = engine
-            .status(
-                &self.config.syncthing_folder_id,
-                &self.config.syncthing_hub_device_id,
-            )
-            .inspect_err(|error| {
-                let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
-            })?;
         self.reconnect_required.store(false, Ordering::Relaxed);
-        let _ = self.app.send(AppCommand::SyncthingStatus(status.clone()));
-        let status_app = self.app.clone();
-        let events_app = self.app.clone();
-        let failure_app = self.app.clone();
-        let status_reconnect = self.reconnect_required.clone();
-        let failure_reconnect = self.reconnect_required.clone();
-        let monitor = engine.start_monitor(
-            self.config.syncthing_folder_id.clone(),
-            self.config.syncthing_hub_device_id.clone(),
-            self.app.snapshot().last_event_id,
-            move |status| {
-                status_reconnect.store(false, Ordering::Relaxed);
-                let _ = status_app.send(AppCommand::SyncthingStatus(status));
-            },
-            move |events| {
-                let _ = events_app.send(AppCommand::SyncthingEvents(events));
-            },
-            move |error| {
-                failure_reconnect.store(true, Ordering::Relaxed);
-                let _ = failure_app.send(AppCommand::EngineFailed(error));
-            },
-        );
-        self.monitor = Some(monitor);
         self.engine = Some(engine);
         logs::append(&format!(
-            "Syncthing started: folder={} state={} hub_connected={} need_files={} need_bytes={}",
-            self.config.syncthing_folder_id,
-            status.folder_state,
-            status.hub_connected,
-            status.need_files,
-            status.need_bytes
+            "Chunk sync started: destination={} endpoint={}",
+            self.config.destination_uuid, self.config.chunk_endpoint
         ));
         Ok(())
     }
 
-    /// POST `/pair/start` after the private engine has generated its stable
-    /// certificate-derived device identity.
+    /// POST `/pair/start` for Option H chunk_store pairing.
     pub fn pair_start_request(&self) -> Result<pairing::PairStartResponse, String> {
         if !watch_folder_is_valid(&self.config.watch_folder) {
             return Err("Set a valid watch folder before pairing.".into());
         }
-        crate::paths::validate_bundled_engine_installation()?;
-        let syncthing_device_id = match self.engine.as_ref() {
-            Some(engine) => engine.device_id()?,
-            None => crate::syncthing::ensure_local_device_id()?,
-        };
         let api_base = self.config.pair_api_base.clone();
         let machine_name = host_machine_name();
         let user_name = host_user_name();
         let backup_path = self.config.watch_folder.clone();
         let suggested_customer = pairing::build_host_folder_hint(&machine_name, &backup_path);
         logs::append(&format!(
-            "Pair start: machine={machine_name} user={user_name} backup={backup_path} syncthing_device_id={syncthing_device_id} suggested={}",
+            "Pair start: machine={machine_name} user={user_name} backup={backup_path} transport=chunk_store suggested={}",
             suggested_customer.as_deref().unwrap_or("none")
         ));
         let _ = self.app.send(AppCommand::Connect);
@@ -218,7 +168,6 @@ impl SyncHost {
             None,
             None,
             suggested_customer,
-            syncthing_device_id,
         )
         .map_err(|error| error.to_string());
         match &result {
@@ -239,71 +188,53 @@ impl SyncHost {
         result
     }
 
-    /// Validate the approved hub assignment locally, persist it, and start the
-    /// long-running engine. No object-storage credential is accepted.
+    /// Persist chunk_store approval and start the in-process sync engine.
     pub fn pair_apply_and_sync(&mut self, status: PairStatusResponse) -> Result<(), String> {
         let _ = self.app.send(AppCommand::PairApproved);
-        // Re-pairing can happen while the previous assignment is live. Stop
-        // the owned process first so approval validation cannot attach a
-        // second supervisor to the same private loopback instance.
         self.stop_sync();
         self.apply_pair_approval(status)?;
         self.restart_sync()?;
-        logs::append("Pairing complete; Syncthing started.");
+        logs::append("Pairing complete; chunk sync started.");
         Ok(())
     }
 
     fn apply_pair_approval(&mut self, status: PairStatusResponse) -> Result<(), String> {
-        if !pairing::is_syncthing_approval(&status) {
-            return Err("Pairing approved without a Syncthing assignment. Pair again.".into());
+        if !pairing::is_chunk_store_approval(&status) {
+            return Err("Pairing approved without a chunk_store assignment. Pair again.".into());
         }
         let device_token = required_field(status.device_token, "device token")?;
         let device_uuid = required_field(status.device_uuid, "device UUID")?;
-        let hub_device_id =
-            required_field(status.syncthing_hub_device_id, "Syncthing hub device ID")?;
-        let folder_id = required_field(status.syncthing_folder_id, "Syncthing folder ID")?;
-        let folder_label = required_field(status.syncthing_folder_label, "Syncthing folder label")?;
-        let engine = SyncthingSupervisor::start()?;
-        let local_device_id = engine.device_id()?;
-        let assignment = FolderAssignment {
-            local_device_id: local_device_id.clone(),
-            hub_device_id: hub_device_id.clone(),
-            hub_addresses: status.syncthing_hub_addresses.clone(),
-            folder_id: folder_id.clone(),
-            folder_label: folder_label.clone(),
-            path: PathBuf::from(&self.config.watch_folder),
-        };
-        engine.configure_folder(&assignment)?;
+        let destination_uuid = required_field(status.destination_uuid, "destination UUID")?;
+        let destination_label = required_field(status.destination_label, "destination label")?;
+        let chunk_endpoint = required_field(status.chunk_endpoint, "chunk endpoint")?;
+        let chunk_bucket = required_field(status.chunk_bucket, "chunk bucket")?;
+        let chunk_access_key = required_field(status.chunk_access_key, "chunk access key")?;
+        let chunk_secret_key = required_field(status.chunk_secret_key, "chunk secret key")?;
 
         let mut candidate = self.config.clone();
         candidate.schema_version = config::CONFIG_SCHEMA_VERSION;
         candidate.device_uuid = device_uuid;
-        candidate.syncthing_device_id = local_device_id;
-        candidate.syncthing_hub_device_id = hub_device_id;
-        candidate.syncthing_hub_addresses = status.syncthing_hub_addresses;
-        candidate.syncthing_folder_id = folder_id;
-        candidate.syncthing_folder_label = folder_label;
+        candidate.destination_uuid = destination_uuid;
+        candidate.destination_label = destination_label.clone();
+        candidate.transport = "chunk_store".into();
+        candidate.chunk_endpoint = chunk_endpoint;
+        candidate.chunk_region = status.chunk_region.unwrap_or_else(|| "garage".into());
+        candidate.chunk_bucket = chunk_bucket;
+        candidate.chunk_prefix = status.chunk_prefix.unwrap_or_default();
+        candidate.chunk_path_style = status.chunk_path_style.unwrap_or(true);
+        candidate.syncthing_folder_label = destination_label;
         candidate.server_approved_at = Some(approval_timestamp_now());
-        candidate = config::save_pairing_candidate(candidate, &device_token)?;
+        candidate = config::save_pairing_candidate(
+            candidate,
+            &device_token,
+            &chunk_access_key,
+            &chunk_secret_key,
+        )?;
         self.config = candidate;
-        self.monitor = None;
-        self.engine = Some(engine);
+        self.engine = None;
         self.reconnect_required.store(false, Ordering::Relaxed);
         Ok(())
     }
-}
-
-fn assignment_from_config(config: &Config) -> Result<FolderAssignment, String> {
-    let assignment = FolderAssignment {
-        local_device_id: config.syncthing_device_id.clone(),
-        hub_device_id: config.syncthing_hub_device_id.clone(),
-        hub_addresses: config.syncthing_hub_addresses.clone(),
-        folder_id: config.syncthing_folder_id.clone(),
-        folder_label: config.syncthing_folder_label.clone(),
-        path: PathBuf::from(&config.watch_folder),
-    };
-    assignment.validate()?;
-    Ok(assignment)
 }
 
 fn is_sync_configured(config: &Config) -> bool {

@@ -259,13 +259,6 @@ unsafe fn do_pair_device(hwnd: HWND) {
         update_server_tooltip(hwnd);
     }
     let cancel = Arc::new(AtomicBool::new(false));
-    let syncthing_device_id = match crate::syncthing::ensure_local_device_id() {
-        Ok(device_id) => device_id,
-        Err(error) => {
-            notify_user_status(hwnd, "Syncthing could not start", C_RED, &error);
-            return;
-        }
-    };
     st.pair_id = st.pair_id.wrapping_add(1);
     let pair_id = st.pair_id;
     st.pair_cancel = Some(cancel.clone());
@@ -292,7 +285,6 @@ unsafe fn do_pair_device(hwnd: HWND) {
             xd.as_ref().map(|detected| detected.number.clone()),
             xd.as_ref().map(|detected| detected.customer.clone()),
             detected_folder,
-            syncthing_device_id.clone(),
             &cancel,
         ) {
             Ok(start) => {
@@ -338,9 +330,9 @@ unsafe fn do_pair_device(hwnd: HWND) {
                             match status.status.as_str() {
                             "approved" => {
                                 approval_received = true;
-                                if !crate::pairing::is_syncthing_approval(&status) {
+                                if !crate::pairing::is_chunk_store_approval(&status) {
                                     break Err(
-                                        "Pairing approved without a Syncthing assignment. Pair again."
+                                        "Pairing approved without a chunk_store assignment. Pair again."
                                             .to_string(),
                                     );
                                 }
@@ -349,30 +341,51 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                         Ok(value) => value,
                                         Err(err) => break Err(err),
                                     };
-                                let hub_device_id = match required_pair_field(
-                                    status.syncthing_hub_device_id,
-                                    "Syncthing hub device ID",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
-                                let folder_id = match required_pair_field(
-                                    status.syncthing_folder_id,
-                                    "Syncthing folder ID",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
-                                let folder_label = match required_pair_field(
-                                    status.syncthing_folder_label,
-                                    "Syncthing folder label",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
                                 let device_uuid = match required_pair_field(
                                     status.device_uuid,
                                     "device UUID",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let destination_uuid = match required_pair_field(
+                                    status.destination_uuid,
+                                    "destination UUID",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let destination_label = match required_pair_field(
+                                    status.destination_label,
+                                    "destination label",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let chunk_endpoint = match required_pair_field(
+                                    status.chunk_endpoint,
+                                    "chunk endpoint",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let chunk_bucket = match required_pair_field(
+                                    status.chunk_bucket,
+                                    "chunk bucket",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let chunk_access_key = match required_pair_field(
+                                    status.chunk_access_key,
+                                    "chunk access key",
+                                ) {
+                                    Ok(value) => value,
+                                    Err(err) => break Err(err),
+                                };
+                                let chunk_secret_key = match required_pair_field(
+                                    status.chunk_secret_key,
+                                    "chunk secret key",
                                 ) {
                                     Ok(value) => value,
                                     Err(err) => break Err(err),
@@ -381,11 +394,17 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     pair_id,
                                     device_uuid,
                                     device_token,
-                                    syncthing_device_id: syncthing_device_id.clone(),
-                                    syncthing_hub_device_id: hub_device_id,
-                                    syncthing_hub_addresses: status.syncthing_hub_addresses,
-                                    syncthing_folder_id: folder_id,
-                                    syncthing_folder_label: folder_label,
+                                    destination_uuid,
+                                    destination_label,
+                                    chunk_endpoint,
+                                    chunk_region: status
+                                        .chunk_region
+                                        .unwrap_or_else(|| "garage".into()),
+                                    chunk_bucket,
+                                    chunk_prefix: status.chunk_prefix.unwrap_or_default(),
+                                    chunk_access_key,
+                                    chunk_secret_key,
+                                    chunk_path_style: status.chunk_path_style.unwrap_or(true),
                                 };
                                 break Ok(pair);
                             }

@@ -93,38 +93,10 @@ pub fn syncthing_license_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("syncthing-LICENSE.txt"))
 }
 
-/// Check the release unit before normal pairing/sync startup. The updater uses
-/// this failure to enter same-version bundle repair, which is required when a
-/// legacy single-executable updater installs v3 without its new engine files.
+/// Option H uses an in-process Rust sync engine; there is no bundled Syncthing
+/// binary to validate. Kept as a no-op so transitional UI/updater call sites
+/// continue to compile until those paths are fully removed.
 pub fn validate_bundled_engine_installation() -> Result<(), String> {
-    let engine = syncthing_binary_path();
-    let license = syncthing_license_path();
-    if !engine.is_file() {
-        return Err(format!(
-            "Bundled Syncthing engine is missing: {}",
-            engine.display()
-        ));
-    }
-    if !license.is_file() {
-        return Err(format!(
-            "Bundled Syncthing license is missing: {}",
-            license.display()
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&engine)
-            .map_err(|error| format!("Could not inspect bundled Syncthing engine: {error}"))?
-            .permissions()
-            .mode();
-        if mode & 0o111 == 0 {
-            return Err(format!(
-                "Bundled Syncthing engine is not executable: {}",
-                engine.display()
-            ));
-        }
-    }
     Ok(())
 }
 

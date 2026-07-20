@@ -110,6 +110,8 @@ pub enum AppCommand {
     },
     CancelPairing,
     EngineStarting,
+    /// Update work phase after the in-process chunk engine starts or settles.
+    Work(WorkState),
     SyncthingStatus(SyncStatus),
     SyncthingEvents(Vec<SyncthingEvent>),
     EngineFailed(String),
@@ -228,6 +230,14 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
         AppCommand::EngineStarting => {
             state.connection = ConnectionState::Connecting;
             state.work = WorkState::Scanning;
+        }
+        AppCommand::Work(work) => {
+            state.work = work;
+            if state.work == WorkState::Idle {
+                state.connection = ConnectionState::Connected;
+                state.hub_connected = true;
+                state.pairing = PairingState::Idle;
+            }
         }
         AppCommand::SyncthingStatus(status) => apply_status(state, status),
         AppCommand::SyncthingEvents(event_batch) => {

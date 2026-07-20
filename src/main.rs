@@ -11,6 +11,7 @@ mod logs;
 mod pairing;
 mod paths;
 mod secret;
+mod sync;
 mod syncthing;
 mod updater;
 

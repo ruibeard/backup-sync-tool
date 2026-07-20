@@ -1,14 +1,13 @@
 //! Persistent desktop configuration.
 //!
-//! Schema v3 is intentionally a clean break from the object-storage client.
-//! A v2 (or older) file retains only the operator-selected control-plane URL;
-//! all pairing and Syncthing assignment data must be approved again.
+//! Schema v4 is Option H (chunk_store). Older schemas keep watch_folder /
+//! pair_api_base hints but require fresh pairing.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-pub const CONFIG_SCHEMA_VERSION: u32 = 3;
+pub const CONFIG_SCHEMA_VERSION: u32 = 4;
 
 static CONFIG_SAVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -25,10 +24,37 @@ pub struct Config {
     pub device_token_enc: String,
     #[serde(default)]
     pub device_uuid: String,
-    /// Certificate-derived ID of the private bundled Syncthing instance.
+    #[serde(default)]
+    pub destination_uuid: String,
+    #[serde(default)]
+    pub destination_label: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub chunk_endpoint: String,
+    #[serde(default)]
+    pub chunk_region: String,
+    #[serde(default)]
+    pub chunk_bucket: String,
+    #[serde(default)]
+    pub chunk_prefix: String,
+    #[serde(default)]
+    pub chunk_access_key_enc: String,
+    #[serde(default)]
+    pub chunk_secret_key_enc: String,
+    #[serde(default = "default_true")]
+    pub chunk_path_style: bool,
+    #[serde(default)]
+    pub server_approved_at: Option<String>,
+    #[serde(default = "default_true")]
+    pub start_with_windows: bool,
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+
+    // Deprecated Syncthing fields retained so transitional UI code still compiles.
+    // They are never required for schema v4 pairing.
     #[serde(default)]
     pub syncthing_device_id: String,
-    /// Always-online CT 105 hub identity approved by the control plane.
     #[serde(default)]
     pub syncthing_hub_device_id: String,
     #[serde(default)]
@@ -37,12 +63,6 @@ pub struct Config {
     pub syncthing_folder_id: String,
     #[serde(default)]
     pub syncthing_folder_label: String,
-    #[serde(default)]
-    pub server_approved_at: Option<String>,
-    #[serde(default = "default_true")]
-    pub start_with_windows: bool,
-    #[serde(default = "default_true")]
-    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -53,14 +73,24 @@ impl Default for Config {
             pair_api_base: default_pair_api_base(),
             device_token_enc: String::new(),
             device_uuid: String::new(),
+            destination_uuid: String::new(),
+            destination_label: String::new(),
+            transport: String::new(),
+            chunk_endpoint: String::new(),
+            chunk_region: String::new(),
+            chunk_bucket: String::new(),
+            chunk_prefix: String::new(),
+            chunk_access_key_enc: String::new(),
+            chunk_secret_key_enc: String::new(),
+            chunk_path_style: true,
+            server_approved_at: None,
+            start_with_windows: true,
+            auto_update: true,
             syncthing_device_id: String::new(),
             syncthing_hub_device_id: String::new(),
             syncthing_hub_addresses: Vec::new(),
             syncthing_folder_id: String::new(),
             syncthing_folder_label: String::new(),
-            server_approved_at: None,
-            start_with_windows: true,
-            auto_update: true,
         }
     }
 }
@@ -69,10 +99,12 @@ pub fn is_paired(cfg: &Config) -> bool {
     cfg.schema_version == CONFIG_SCHEMA_VERSION
         && !cfg.device_token_enc.trim().is_empty()
         && !cfg.device_uuid.trim().is_empty()
-        && !cfg.syncthing_device_id.trim().is_empty()
-        && !cfg.syncthing_hub_device_id.trim().is_empty()
-        && !cfg.syncthing_folder_id.trim().is_empty()
-        && !cfg.syncthing_hub_addresses.is_empty()
+        && !cfg.destination_uuid.trim().is_empty()
+        && cfg.transport.eq_ignore_ascii_case("chunk_store")
+        && !cfg.chunk_endpoint.trim().is_empty()
+        && !cfg.chunk_bucket.trim().is_empty()
+        && !cfg.chunk_access_key_enc.trim().is_empty()
+        && !cfg.chunk_secret_key_enc.trim().is_empty()
 }
 
 fn config_path() -> PathBuf {
@@ -202,11 +234,19 @@ fn replace_file(temporary: &std::path::Path, destination: &std::path::Path) -> s
 }
 
 /// Protect and install a complete pairing assignment in one config write.
-pub fn save_pairing_candidate(mut candidate: Config, device_token: &str) -> Result<Config, String> {
+pub fn save_pairing_candidate(
+    mut candidate: Config,
+    device_token: &str,
+    chunk_access_key: &str,
+    chunk_secret_key: &str,
+) -> Result<Config, String> {
     let staged =
         crate::secret::CandidateDeviceToken::stage(device_token, &candidate.device_token_enc)?;
     candidate.device_token_enc = staged.protected().to_string();
+    candidate.chunk_access_key_enc = crate::secret::protect_string(chunk_access_key)?;
+    candidate.chunk_secret_key_enc = crate::secret::protect_string(chunk_secret_key)?;
     candidate.schema_version = CONFIG_SCHEMA_VERSION;
+    candidate.transport = "chunk_store".into();
     save(&candidate).map_err(|error| format!("Pairing succeeded but save failed: {error}"))?;
     let _ = staged.commit();
     Ok(candidate)
@@ -217,29 +257,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v2_s3_config_deserializes_but_is_not_paired() {
+    fn v3_syncthing_config_is_not_paired() {
         let json = r#"{
-            "schema_version": 2,
+            "schema_version": 3,
             "watch_folder": "C:\\\\backups",
-            "transport": "s3",
-            "s3_endpoint": "https://s3.rui.cam",
-            "pair_api_base": "https://control.example"
+            "pair_api_base": "https://control.example",
+            "device_token_enc": "x",
+            "device_uuid": "d",
+            "syncthing_device_id": "LOCAL"
         }"#;
-        let cfg: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.schema_version, 2);
+        let cfg = load_from_str(json);
+        assert_eq!(cfg.schema_version, CONFIG_SCHEMA_VERSION);
         assert!(!is_paired(&cfg));
         assert_eq!(cfg.pair_api_base, "https://control.example");
+        assert_eq!(cfg.watch_folder, "C:\\\\backups");
+    }
+
+    fn load_from_str(data: &str) -> Config {
+        let parsed: Config = serde_json::from_str(data).unwrap();
+        if parsed.schema_version != CONFIG_SCHEMA_VERSION {
+            let mut fresh = Config::default();
+            if let Ok(base) = normalize_pair_api_base(&parsed.pair_api_base) {
+                fresh.pair_api_base = base;
+            }
+            if !parsed.watch_folder.trim().is_empty() {
+                fresh.watch_folder = parsed.watch_folder;
+            }
+            return fresh;
+        }
+        parsed
     }
 
     #[test]
-    fn complete_v3_assignment_is_paired() {
+    fn complete_v4_assignment_is_paired() {
         let cfg = Config {
             device_token_enc: "protected".into(),
             device_uuid: "desktop-1".into(),
-            syncthing_device_id: "LOCAL-ID".into(),
-            syncthing_hub_device_id: "HUB-ID".into(),
-            syncthing_hub_addresses: vec!["tcp://sync.example:22000".into()],
-            syncthing_folder_id: "customer-1".into(),
+            destination_uuid: "dest-1".into(),
+            transport: "chunk_store".into(),
+            chunk_endpoint: "https://s3.example".into(),
+            chunk_bucket: "backup".into(),
+            chunk_access_key_enc: "ak".into(),
+            chunk_secret_key_enc: "sk".into(),
             ..Config::default()
         };
         assert!(is_paired(&cfg));
