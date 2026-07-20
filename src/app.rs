@@ -1,11 +1,9 @@
 //! Shared application state for the native Windows and macOS shells.
 //!
-//! Syncthing owns transfer scheduling and persistence. Native controls send
-//! `AppCommand`s and render immutable `AppSnapshot`s; they never model a
+//! The in-process chunk sync engine owns transfer scheduling. Native controls
+//! send `AppCommand`s and render immutable `AppSnapshot`s; they never model a
 //! transport queue or attempt individual-file retries.
 
-use crate::syncthing::{SyncStatus, SyncthingEvent};
-use serde_json::Value;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -112,8 +110,14 @@ pub enum AppCommand {
     EngineStarting,
     /// Update work phase after the in-process chunk engine starts or settles.
     Work(WorkState),
-    SyncthingStatus(SyncStatus),
-    SyncthingEvents(Vec<SyncthingEvent>),
+    EngineStatus {
+        connected: bool,
+        folder_state: String,
+        local_files: u64,
+        need_files: u64,
+        need_bytes: u64,
+    },
+    Activity(String),
     EngineFailed(String),
     Shutdown,
 }
@@ -239,10 +243,38 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
                 state.pairing = PairingState::Idle;
             }
         }
-        AppCommand::SyncthingStatus(status) => apply_status(state, status),
-        AppCommand::SyncthingEvents(event_batch) => {
-            for event in event_batch {
-                apply_event(state, event);
+        AppCommand::EngineStatus {
+            connected,
+            folder_state,
+            local_files,
+            need_files,
+            need_bytes,
+        } => {
+            state.hub_connected = connected;
+            state.connection = if connected {
+                ConnectionState::Connected
+            } else {
+                ConnectionState::Disconnected
+            };
+            state.folder_state = folder_state;
+            state.local_files = local_files;
+            state.global_files = local_files;
+            state.need_files = need_files;
+            state.need_bytes = need_bytes;
+            state.pairing = PairingState::Idle;
+            state.work = match state.folder_state.as_str() {
+                "scanning" => WorkState::Scanning,
+                "syncing" => WorkState::Syncing,
+                _ if state.need_files > 0 || state.need_bytes > 0 => WorkState::Syncing,
+                _ => WorkState::Idle,
+            };
+        }
+        AppCommand::Activity(line) => {
+            if state.activity.back() != Some(&line) {
+                state.activity.push_back(line);
+                while state.activity.len() > MAX_RECENT_ACTIVITY {
+                    state.activity.pop_front();
+                }
             }
         }
         AppCommand::EngineFailed(reason) => {
@@ -254,83 +286,23 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
     }
 }
 
-fn apply_status(state: &mut AppSnapshot, status: SyncStatus) {
-    state.hub_connected = status.hub_connected;
-    state.connection = if status.hub_connected {
-        ConnectionState::Connected
-    } else {
-        ConnectionState::Disconnected
-    };
-    state.folder_state = status.folder_state;
-    state.local_files = status.local_files;
-    state.global_files = status.global_files;
-    state.need_files = status.need_files;
-    state.need_bytes = status.need_bytes;
-    state.pairing = PairingState::Idle;
-    state.work = match state.folder_state.as_str() {
-        "scanning" | "scan-waiting" | "cleaning" => WorkState::Scanning,
-        "syncing" | "sync-preparing" | "sync-waiting" => WorkState::Syncing,
-        _ if state.need_files > 0 || state.need_bytes > 0 => WorkState::Syncing,
-        _ => WorkState::Idle,
-    };
-}
-
-fn apply_event(state: &mut AppSnapshot, event: SyncthingEvent) {
-    state.last_event_id = state.last_event_id.max(event.id);
-    let line = match event.kind.as_str() {
-        "ItemStarted" => event_path(&event.data).map(|path| format!("Syncing {path}")),
-        "ItemFinished" => event_path(&event.data).map(|path| {
-            let error = event
-                .data
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if error.is_empty() {
-                format!("Synced {path}")
-            } else {
-                format!("Could not sync {path}: {error}")
-            }
-        }),
-        "FolderErrors" => Some("Folder has items that need attention".to_string()),
-        "FolderPaused" => Some("Folder paused".to_string()),
-        "FolderResumed" => Some("Folder resumed".to_string()),
-        _ => None,
-    };
-    if let Some(line) = line {
-        if state.activity.back() != Some(&line) {
-            state.activity.push_back(line);
-            while state.activity.len() > MAX_RECENT_ACTIVITY {
-                state.activity.pop_front();
-            }
-        }
-    }
-}
-
-fn event_path(data: &Value) -> Option<&str> {
-    data.get("item")
-        .or_else(|| data.get("path"))
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn status_maps_syncthing_state_and_counts() {
+    fn status_maps_engine_state_and_counts() {
         let mut state = AppSnapshot::default();
-        apply_status(
+        reduce(
             &mut state,
-            SyncStatus {
-                hub_connected: true,
+            AppCommand::EngineStatus {
+                connected: true,
                 folder_state: "syncing".into(),
                 local_files: 5,
-                global_files: 8,
                 need_files: 3,
                 need_bytes: 4096,
             },
+            &mpsc::channel().0,
         );
         assert_eq!(state.connection, ConnectionState::Connected);
         assert_eq!(state.work, WorkState::Syncing);
@@ -339,17 +311,13 @@ mod tests {
     }
 
     #[test]
-    fn item_events_become_recent_activity() {
+    fn activity_lines_are_retained() {
         let mut state = AppSnapshot::default();
-        apply_event(
+        reduce(
             &mut state,
-            SyncthingEvent {
-                id: 7,
-                kind: "ItemFinished".into(),
-                data: json!({"item": "Invoices/one.pdf", "error": ""}),
-            },
+            AppCommand::Activity("Synced Invoices/one.pdf".into()),
+            &mpsc::channel().0,
         );
-        assert_eq!(state.last_event_id, 7);
         assert_eq!(state.activity.back().unwrap(), "Synced Invoices/one.pdf");
     }
 }

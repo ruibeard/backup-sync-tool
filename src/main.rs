@@ -12,7 +12,6 @@ mod pairing;
 mod paths;
 mod secret;
 mod sync;
-mod syncthing;
 mod updater;
 
 #[cfg(target_os = "macos")]

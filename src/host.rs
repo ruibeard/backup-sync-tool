@@ -38,11 +38,7 @@ impl SyncHost {
             pair_api_base: config.pair_api_base.clone(),
             start_at_login: config.start_with_windows,
             auto_update: config.auto_update,
-            folder_label: if !config.destination_label.is_empty() {
-                config.destination_label.clone()
-            } else {
-                config.syncthing_folder_label.clone()
-            },
+            folder_label: config.destination_label.clone(),
             ..AppSnapshot::default()
         };
         let (app, events) = AppController::start(initial);
@@ -222,7 +218,6 @@ impl SyncHost {
         candidate.chunk_bucket = chunk_bucket;
         candidate.chunk_prefix = status.chunk_prefix.unwrap_or_default();
         candidate.chunk_path_style = status.chunk_path_style.unwrap_or(true);
-        candidate.syncthing_folder_label = destination_label;
         candidate.server_approved_at = Some(approval_timestamp_now());
         candidate = config::save_pairing_candidate(
             candidate,

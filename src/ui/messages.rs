@@ -215,7 +215,6 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     candidate_config.chunk_bucket = pair.chunk_bucket.clone();
     candidate_config.chunk_prefix = pair.chunk_prefix.clone();
     candidate_config.chunk_path_style = pair.chunk_path_style;
-    candidate_config.syncthing_folder_label = pair.destination_label.clone();
     candidate_config.server_approved_at = Some(approval_timestamp_now());
 
     let candidate_config = match crate::config::save_pairing_candidate(

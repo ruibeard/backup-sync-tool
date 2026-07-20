@@ -1,6 +1,6 @@
 //! updater.rs — check GitHub releases, download, replace in place, restart.
-//! A release is one tested unit: desktop executable, bundled Syncthing engine,
-//! and the engine license. The updater always stages and swaps the whole unit.
+//! A release is one tested unit: the desktop executable (macOS: the sealed
+//! `.app` bundle). The updater always stages and swaps that unit.
 
 use serde::Deserialize;
 use std::io::Read;
@@ -72,8 +72,8 @@ fn fetch_latest_release() -> Result<GhRelease, String> {
     serde_json::from_str(&body).map_err(|error| format!("Invalid release JSON: {error}"))
 }
 
-/// Repair an old-updater rollout that installed the desktop executable without
-/// its bundled engine. This intentionally ignores semantic-version equality.
+/// Repair hook retained for older call sites. Option H has no nested engine
+/// binary, so this is a no-op unless installation validation fails.
 pub fn repair_current_bundle(progress: impl Fn(u8)) -> Result<(), String> {
     let health = crate::paths::validate_bundled_engine_installation();
     if !repair_required(&health) {
@@ -185,128 +185,57 @@ fn replace_windows(exe: &Path, buf: &[u8]) -> Result<(), String> {
     // Shell.Application ZIP extraction is present on Windows 7 and avoids
     // depending on Expand-Archive, which was introduced in later PowerShell.
     let app = stage.join("backupsynctool.exe");
-    let engine = stage.join("syncthing.exe");
-    let license = stage.join("syncthing-LICENSE.txt");
     let ps = format!(
         "$zip={zip};$dest={dest};$shell=New-Object -ComObject Shell.Application;\
          $source=$shell.NameSpace($zip);$target=$shell.NameSpace($dest);\
          if(($null -eq $source) -or ($null -eq $target)){{exit 2}};\
          $target.CopyHere($source.Items(),20);\
          for($i=0;$i -lt 300;$i++){{\
-           if((Test-Path {app}) -and (Test-Path {engine}) -and (Test-Path {license})){{exit 0}};\
+           if(Test-Path {app}){{exit 0}};\
            Start-Sleep -Milliseconds 100\
          }};exit 3",
         zip = powershell_literal(&archive),
         dest = powershell_literal(&stage),
         app = powershell_literal(&app),
-        engine = powershell_literal(&engine),
-        license = powershell_literal(&license),
     );
     let status = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
         .status()
         .map_err(|error| format!("Could not extract update bundle: {error}"))?;
-    if !status.success() || !app.is_file() || !engine.is_file() || !license.is_file() {
+    if !status.success() || !app.is_file() {
         let _ = std::fs::remove_dir_all(&stage);
         return Err("The Windows update archive is incomplete or could not be extracted.".into());
     }
-    let version = std::process::Command::new(&engine)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("Could not validate the update engine: {error}"))?;
-    let version_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&version.stdout),
-        String::from_utf8_lossy(&version.stderr)
-    );
-    if !version.status.success()
-        || !version_text.starts_with("syncthing v2.1.1")
-        || !version_text.contains("noupgrade")
-    {
-        let _ = std::fs::remove_dir_all(&stage);
-        return Err(format!(
-            "The update contains an unexpected Syncthing engine: {}",
-            version_text.trim()
-        ));
-    }
 
-    let install_dir = exe
-        .parent()
-        .ok_or_else(|| "The running executable has no install directory.".to_string())?;
-    let installed_engine = install_dir.join("syncthing.exe");
-    let installed_license = install_dir.join("syncthing-LICENSE.txt");
     let bat_path = stage.join("install-update.bat");
     let old_app = stage.join("backupsynctool.old.exe");
-    let old_engine = stage.join("syncthing.old.exe");
-    let old_license = stage.join("syncthing-LICENSE.old.txt");
     std::fs::copy(exe, &old_app)
         .map_err(|error| format!("Could not stage app rollback copy: {error}"))?;
-    let had_engine = installed_engine.is_file();
-    let had_license = installed_license.is_file();
-    if had_engine {
-        std::fs::copy(&installed_engine, &old_engine)
-            .map_err(|error| format!("Could not stage engine rollback copy: {error}"))?;
-    }
-    if had_license {
-        std::fs::copy(&installed_license, &old_license)
-            .map_err(|error| format!("Could not stage license rollback copy: {error}"))?;
-    }
 
     let bat = format!(
         "@echo off\r\n\
          ping 127.0.0.1 -n 3 >nul\r\n\
          for /L %%i in (1,1,30) do (\r\n\
-           move /y \"%~dp0syncthing.exe\" \"{engine}\" >nul 2>&1 && goto engine_done\r\n\
+           move /y \"%~dp0backupsynctool.exe\" \"{exe}\" >nul 2>&1 && goto app_done\r\n\
            ping 127.0.0.1 -n 2 >nul\r\n\
          )\r\n\
          goto rollback\r\n\
-         :engine_done\r\n\
-         move /y \"%~dp0syncthing-LICENSE.txt\" \"{license}\" >nul 2>&1 || goto rollback\r\n\
-         move /y \"%~dp0backupsynctool.exe\" \"{exe}\" >nul 2>&1 || goto rollback\r\n\
-         start \"\" \"{exe}\"\r\n",
-        exe = exe.display(),
-        engine = installed_engine.display(),
-        license = installed_license.display(),
-    );
-    let rollback = format!(
-        ":rollback\r\n\
+         :app_done\r\n\
+         start \"\" \"{exe}\"\r\n\
+         exit /b 0\r\n\
+         :rollback\r\n\
          move /y \"%~dp0backupsynctool.old.exe\" \"{exe}\" >nul 2>&1\r\n\
-         {restore_engine}\r\n\
-         {restore_license}\r\n\
          start \"\" \"{exe}\"\r\n\
          exit /b 12\r\n",
         exe = exe.display(),
-        restore_engine = if had_engine {
-            format!(
-                "move /y \"%~dp0syncthing.old.exe\" \"{}\" >nul 2>&1",
-                installed_engine.display()
-            )
-        } else {
-            format!("del /f /q \"{}\" >nul 2>&1", installed_engine.display())
-        },
-        restore_license = if had_license {
-            format!(
-                "move /y \"%~dp0syncthing-LICENSE.old.txt\" \"{}\" >nul 2>&1",
-                installed_license.display()
-            )
-        } else {
-            format!("del /f /q \"{}\" >nul 2>&1", installed_license.display())
-        },
     );
-    let bat = format!("{bat}{rollback}");
     std::fs::write(&bat_path, bat).map_err(|e| e.to_string())?;
 
-    shutdown_engine_for_update()?;
     std::process::Command::new("cmd")
         .args(["/c", &bat_path.to_string_lossy()])
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-fn shutdown_engine_for_update() -> Result<(), String> {
-    crate::syncthing::SyncthingSupervisor::shutdown_if_running()
-        .map_err(|error| format!("Could not stop the bundled engine before update: {error}"))
 }
 
 #[cfg(windows)]
@@ -317,7 +246,7 @@ fn powershell_literal(path: &Path) -> String {
 #[cfg(target_os = "macos")]
 fn replace_macos(exe: &Path, url: &str, buf: &[u8]) -> Result<(), String> {
     if !url.contains(".tar.gz") && !looks_like_gzip(buf) {
-        return Err("The macOS update is not a complete app and engine archive.".into());
+        return Err("The macOS update is not a complete app archive.".into());
     }
     let staged_app = if url.contains(".tar.gz") || looks_like_gzip(buf) {
         extract_via_system_tar(buf)?
@@ -376,7 +305,6 @@ fn replace_macos(exe: &Path, url: &str, buf: &[u8]) -> Result<(), String> {
     std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
     set_executable(&script_path)?;
 
-    shutdown_engine_for_update()?;
     std::process::Command::new("bash")
         .arg(&script_path)
         .spawn()
@@ -439,22 +367,9 @@ fn macos_app_root(exe: &Path) -> Result<PathBuf, String> {
 
 #[cfg(target_os = "macos")]
 fn verify_macos_update_app(app: &Path) -> Result<(), String> {
-    let engine = app.join("Contents/Resources/syncthing");
-    let license = app.join("Contents/Resources/syncthing-LICENSE.txt");
     let desktop = app.join("Contents/MacOS/backupsynctool");
-    if !desktop.is_file() || !engine.is_file() || !license.is_file() {
-        return Err("The macOS update bundle is missing the app, engine, or license.".into());
-    }
-    let version = std::process::Command::new(&engine)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("Could not validate the bundled engine: {error}"))?;
-    let version_text = String::from_utf8_lossy(&version.stdout);
-    if !version.status.success() || !version_text.starts_with("syncthing v2.1.1") {
-        return Err(format!(
-            "The update contains an unexpected Syncthing engine: {}",
-            version_text.trim()
-        ));
+    if !desktop.is_file() {
+        return Err("The macOS update bundle is missing backupsynctool.".into());
     }
     let signature = std::process::Command::new("codesign")
         .args(["--verify", "--strict"])

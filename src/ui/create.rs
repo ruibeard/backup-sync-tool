@@ -38,7 +38,7 @@ unsafe fn on_create(hwnd: HWND) {
         pair_api_base: cfg.pair_api_base.clone(),
         start_at_login: cfg.start_with_windows,
         auto_update: cfg.auto_update,
-        folder_label: cfg.syncthing_folder_label.clone(),
+        folder_label: cfg.destination_label.clone(),
         ..crate::app::AppSnapshot::default()
     };
     let (app_controller, app_events) = crate::app::AppController::start(initial_app);
@@ -1088,7 +1088,7 @@ unsafe fn layout_bridge_section(
                 layout.pair_btn_w,
                 BRIDGE_BTN_H,
             );
-            // Folder recovery is managed on the versioned Syncthing hub.
+            // Folder recovery is managed on the Laravel file shelf.
             let _ = ShowWindow(GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32), SW_HIDE);
         } else {
             place_btn(
@@ -1160,17 +1160,23 @@ unsafe fn layout_bridge_section(
 }
 
 fn server_tooltip_text(cfg: &Config) -> String {
-    let hub = if cfg.syncthing_hub_addresses.is_empty() {
-        "not assigned".to_string()
+    let control = if cfg.pair_api_base.trim().is_empty() {
+        "not configured".to_string()
     } else {
-        cfg.syncthing_hub_addresses.join(", ")
+        cfg.pair_api_base.trim().to_string()
     };
-    let folder = if cfg.syncthing_folder_label.trim().is_empty() {
+    let folder = if cfg.destination_label.trim().is_empty() {
         "waiting for Laravel approval"
     } else {
-        cfg.syncthing_folder_label.trim()
+        cfg.destination_label.trim()
     };
-    let mut lines = vec![format!("Syncthing hub: {hub}"), format!("Folder: {folder}")];
+    let mut lines = vec![
+        format!("Control plane: {control}"),
+        format!("Destination: {folder}"),
+    ];
+    if !cfg.chunk_endpoint.trim().is_empty() {
+        lines.push(format!("Chunk store: {}", cfg.chunk_endpoint.trim()));
+    }
     if let Some(approved_at) = cfg.server_approved_at.as_deref().and_then(non_empty_str) {
         lines.push(format!("Approved: {approved_at}"));
     }
@@ -1178,10 +1184,10 @@ fn server_tooltip_text(cfg: &Config) -> String {
 }
 
 fn server_display_text(cfg: &Config) -> String {
-    if cfg.syncthing_hub_addresses.is_empty() {
-        "Syncthing hub not configured".to_string()
+    if cfg.pair_api_base.trim().is_empty() {
+        "Control plane not configured".to_string()
     } else {
-        cfg.syncthing_hub_addresses[0].clone()
+        cfg.pair_api_base.trim().to_string()
     }
 }
 
@@ -1191,16 +1197,16 @@ fn destination_display_text(
     detected_customer: Option<&str>,
 ) -> String {
     if is_paired(cfg) {
-        return cfg.syncthing_folder_label.clone();
+        return cfg.destination_label.clone();
     }
-    if remote_folder_from_xd && !cfg.syncthing_folder_label.trim().is_empty() {
+    if remote_folder_from_xd && !cfg.destination_label.trim().is_empty() {
         if let Some(customer) = detected_customer.and_then(non_empty_str) {
-            return format!("{customer} ({})", cfg.syncthing_folder_label);
+            return format!("{customer} ({})", cfg.destination_label);
         }
-        return cfg.syncthing_folder_label.clone();
+        return cfg.destination_label.clone();
     }
-    if !cfg.syncthing_folder_label.trim().is_empty() {
-        return cfg.syncthing_folder_label.clone();
+    if !cfg.destination_label.trim().is_empty() {
+        return cfg.destination_label.clone();
     }
     "Waiting for pairing approval".to_string()
 }

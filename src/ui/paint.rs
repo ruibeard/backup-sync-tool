@@ -310,7 +310,7 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
         &bridge_server_name(st),
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
-    let conn_color = if is_paired(&st.config) && !st.config.syncthing_folder_label.trim().is_empty() {
+    let conn_color = if is_paired(&st.config) && !st.config.destination_label.trim().is_empty() {
         C_BRIDGE_PATH_TXT
     } else if st.bridge_conn_ok {
         C_BRIDGE_CONN_OK
@@ -588,17 +588,21 @@ fn bridge_pc_path(st: &WndState) -> String {
 }
 
 fn bridge_server_name(st: &WndState) -> String {
-    let Some(address) = st.config.syncthing_hub_addresses.first() else {
-        return "Syncthing hub".to_string();
-    };
-    let without_scheme = address.split_once("://").map(|(_, rest)| rest).unwrap_or(address);
+    if !st.config.destination_label.trim().is_empty() {
+        return st.config.destination_label.trim().to_string();
+    }
+    let base = st.config.pair_api_base.trim();
+    if base.is_empty() {
+        return "Control plane".to_string();
+    }
+    let without_scheme = base.split_once("://").map(|(_, rest)| rest).unwrap_or(base);
     let host = without_scheme
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default()
         .trim();
     if host.is_empty() {
-        "Syncthing hub".to_string()
+        "Control plane".to_string()
     } else {
         host.to_string()
     }

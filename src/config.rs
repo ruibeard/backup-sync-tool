@@ -50,19 +50,6 @@ pub struct Config {
     pub start_with_windows: bool,
     #[serde(default = "default_true")]
     pub auto_update: bool,
-
-    // Deprecated Syncthing fields retained so transitional UI code still compiles.
-    // They are never required for schema v4 pairing.
-    #[serde(default)]
-    pub syncthing_device_id: String,
-    #[serde(default)]
-    pub syncthing_hub_device_id: String,
-    #[serde(default)]
-    pub syncthing_hub_addresses: Vec<String>,
-    #[serde(default)]
-    pub syncthing_folder_id: String,
-    #[serde(default)]
-    pub syncthing_folder_label: String,
 }
 
 impl Default for Config {
@@ -86,11 +73,6 @@ impl Default for Config {
             server_approved_at: None,
             start_with_windows: true,
             auto_update: true,
-            syncthing_device_id: String::new(),
-            syncthing_hub_device_id: String::new(),
-            syncthing_hub_addresses: Vec::new(),
-            syncthing_folder_id: String::new(),
-            syncthing_folder_label: String::new(),
         }
     }
 }

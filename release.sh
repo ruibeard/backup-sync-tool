@@ -7,10 +7,9 @@ cd "$(dirname "$0")"
 command -v gh >/dev/null || { echo "need gh" >&2; exit 1; }
 
 WIN=dist/windows/backupsynctool.exe
-WIN_ENGINE=dist/windows/syncthing.exe
 WIN_BUNDLE=dist/windows/backupsynctool-windows-amd64.zip
-[[ -f "$WIN" && -f "$WIN_ENGINE" && -f "$WIN_BUNDLE" ]] || {
-  echo "missing pinned Windows app/engine bundle — on a Windows machine run: .\\build-windows.ps1 -NoLaunch" >&2
+[[ -f "$WIN" && -f "$WIN_BUNDLE" ]] || {
+  echo "missing Windows app bundle — on a Windows machine run: .\\build-windows.ps1 -NoLaunch" >&2
   exit 1
 }
 
@@ -31,7 +30,7 @@ git commit -m "release: $TAG"
 
 MAC="$(ls dist/macos/backupsynctool-macos-*.tar.gz | head -1)"
 [[ -f "$MAC" ]] || { echo "missing mac tarball" >&2; exit 1; }
-[[ -f "$WIN" && -f "$WIN_ENGINE" && -f "$WIN_BUNDLE" ]] || { echo "missing Windows app/engine bundle" >&2; exit 1; }
+[[ -f "$WIN" && -f "$WIN_BUNDLE" ]] || { echo "missing Windows app bundle" >&2; exit 1; }
 
 git tag "$TAG"
 git push -u origin "HEAD:$BRANCH"

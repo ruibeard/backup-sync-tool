@@ -23,12 +23,12 @@ unsafe fn update_bridge_display(hwnd: HWND) {
     st.bridge_conn_ok = paired && st.connected && !auth_fail;
     st.bridge_conn_label = if !paired {
         "Not connected".to_string()
-    } else if !st.config.syncthing_folder_label.trim().is_empty() {
-        st.config.syncthing_folder_label.trim().to_string()
+    } else if !st.config.destination_label.trim().is_empty() {
+        st.config.destination_label.trim().to_string()
     } else if auth_fail {
-        "Syncthing hub unavailable".to_string()
+        "Control plane unavailable".to_string()
     } else {
-        "Syncthing hub unavailable".to_string()
+        "Control plane unavailable".to_string()
     };
 
     st.bridge_sync_head = if auth_fail && !is_syncing && !is_checking {

@@ -90,7 +90,7 @@ fn run_daemon() {
         if host.auth_failed() {
             host.stop_sync();
             logs::append(
-                "daemon: Syncthing assignment rejected — stopped. Re-pair, then relaunch.",
+                "daemon: chunk store credentials rejected — stopped. Re-pair, then relaunch.",
             );
             break;
         }

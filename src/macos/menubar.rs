@@ -391,7 +391,7 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
     };
     StatusSnapshot {
         watch_folder: host.config.watch_folder.clone(),
-        folder_label: host.config.syncthing_folder_label.clone(),
+        folder_label: host.config.destination_label.clone(),
         connected,
         server_status,
         start_at_login: host.config.start_with_windows,

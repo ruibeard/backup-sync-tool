@@ -286,7 +286,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     ui.watch.setStringValue(&NSString::from_str(watch));
 
     let connected_title = if s.folder_label.trim().is_empty() {
-        "Syncthing hub"
+        "Backup destination"
     } else {
         s.folder_label.as_str()
     };

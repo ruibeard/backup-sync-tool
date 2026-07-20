@@ -258,7 +258,7 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 Audit of `option-h-chunk-store` on desktop (`backup-sync-tool`) and Laravel (`box-rui-cam`). Done vs Missing only — no invented completion percentage.
 
-Desktop commits: `10c773f`, `e5771f1`, `ae0afde`, `cf19c87`. Laravel commits: `12a60c6`, `f6092c8`, `c615d0a`.
+Desktop commits: through Syncthing strip on `option-h-chunk-store`. Laravel commits: `12a60c6`, `f6092c8`, `c615d0a`.
 
 ### Done
 
@@ -268,11 +268,11 @@ Desktop commits: `10c773f`, `e5771f1`, `ae0afde`, `cf19c87`. Laravel commits: `1
 - Laravel minimal shelf (list metadata only).
 - Desktop schema v4 + `chunk_store` pairing (Win + Mac).
 - Desktop `SyncEngine` recursive scan / push / pull + SigV4 PUT/GET (`src/sync/*`).
+- Syncthing stripped from desktop: deleted `src/syncthing.rs`, build scripts no longer bundle an engine binary, updater swaps desktop-only unit, UI/status strings use control plane / destination / chunk store.
 - Unit/feature tests green in-repo (desktop ~38; Laravel `ChunkStorePairingAndSyncTest` 3).
 
 ### Missing / not done
 
-- Strip Syncthing (code, UI residue; build still bundles it).
 - Real FS watcher (currently ~3s poll full rescan).
 - FastCDC (fixed 1MB chunks today).
 - Real MinIO IAM provisioning (driver uses fake keys).
@@ -280,6 +280,7 @@ Desktop commits: `10c773f`, `e5771f1`, `ae0afde`, `cf19c87`. Laravel commits: `1
 - Win7 packaged operator smoke.
 - Shelf download / preview / history restore UI.
 - Proven live object-store roundtrip in CI.
+- Laravel SyncthingProvisioner / operator-surface residue cleanup.
 
 ## Out of scope
 

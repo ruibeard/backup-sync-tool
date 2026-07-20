@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 const APP_DIR_NAME: &str = "BackupSyncTool";
 
-/// Root directory for app-local state (private engine home and config).
+/// Root directory for app-local state (config, sync state, logs).
 pub fn app_support_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -51,51 +51,8 @@ pub fn app_support_dir() -> PathBuf {
     }
 }
 
-/// Private Syncthing home. Its GUI/API is loopback-only and never shared with a
-/// separately installed Syncthing instance.
-pub fn syncthing_home_dir() -> PathBuf {
-    app_support_dir().join("syncthing")
-}
-
-/// Locate the engine shipped beside the app executable. The environment
-/// override exists for development and packaging smoke tests only.
-pub fn syncthing_binary_path() -> PathBuf {
-    if let Some(path) =
-        std::env::var_os("BACKUP_SYNC_TOOL_SYNCTHING").filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(path);
-    }
-    let mut path = std::env::current_exe().unwrap_or_default();
-    #[cfg(windows)]
-    path.set_file_name("syncthing.exe");
-    #[cfg(target_os = "macos")]
-    {
-        // Packaged: BackupSyncTool.app/Contents/MacOS/backupsynctool
-        //        -> BackupSyncTool.app/Contents/Resources/syncthing
-        if let Some(contents) = path.parent().and_then(Path::parent) {
-            let bundled = contents.join("Resources").join("syncthing");
-            if bundled.is_file() {
-                return bundled;
-            }
-        }
-        // Unpackaged development builds keep both executables together.
-        path.set_file_name("syncthing");
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    path.set_file_name("syncthing");
-    path
-}
-
-pub fn syncthing_license_path() -> PathBuf {
-    syncthing_binary_path()
-        .parent()
-        .map(|parent| parent.join("syncthing-LICENSE.txt"))
-        .unwrap_or_else(|| PathBuf::from("syncthing-LICENSE.txt"))
-}
-
-/// Option H uses an in-process Rust sync engine; there is no bundled Syncthing
-/// binary to validate. Kept as a no-op so transitional UI/updater call sites
-/// continue to compile until those paths are fully removed.
+/// Option H ships a single desktop binary (no nested sync engine). Kept so
+/// transitional updater call sites continue to compile.
 pub fn validate_bundled_engine_installation() -> Result<(), String> {
     Ok(())
 }
