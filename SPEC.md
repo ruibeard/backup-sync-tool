@@ -258,29 +258,30 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 Audit of `option-h-chunk-store` on desktop (`backup-sync-tool`) and Laravel (`box-rui-cam`). Done vs Missing only — no invented completion percentage.
 
-Desktop commits: through Syncthing strip on `option-h-chunk-store`. Laravel commits: `12a60c6`, `f6092c8`, `c615d0a`.
+Desktop commits: Syncthing strip + FS watcher on `option-h-chunk-store`. Laravel: Syncthing strip + MinIO root-key path on same branch name.
 
 ### Done
 
 - SPEC lock Option H v4.
-- Laravel `chunk_store` pairing + provisioner (fake works; Garage path exists; MinIO mints fake keys).
+- Laravel `chunk_store` pairing + provisioner (fake for tests; Garage path; MinIO returns root credentials + ensures shared `MINIO_BUCKET`).
 - Laravel sync APIs (cursor / changes / chunks/present / commit), last-writer-wins accept, 30-day prune command.
 - Laravel minimal shelf (list metadata only).
+- Laravel SyncthingProvisioner deleted; operator UI no longer shows Syncthing IDs; factory/tests retargeted to chunk_store.
 - Desktop schema v4 + `chunk_store` pairing (Win + Mac).
 - Desktop `SyncEngine` recursive scan / push / pull + SigV4 PUT/GET (`src/sync/*`).
 - Syncthing stripped from desktop: deleted `src/syncthing.rs`, build scripts no longer bundle an engine binary, updater swaps desktop-only unit, UI/status strings use control plane / destination / chunk store.
 - Desktop FS watcher (`notify`) + mtime/size fingerprint skip (no blind full-file re-read every 3s; remote poll ≤15s).
-- Unit/feature tests green in-repo (desktop ~38; Laravel `ChunkStorePairingAndSyncTest` 3).
+- Unit/feature tests green in-repo (desktop ~38; Laravel chunk-store suite 4).
 
 ### Missing / not done
 
 - FastCDC (fixed 1MB chunks today).
-- Real MinIO IAM provisioning (driver uses fake keys).
-- Live MinIO/Garage two-device e2e smoke.
+- Per-device MinIO IAM keys (local minio uses shared root credentials by design for now).
+- Live MinIO/Garage two-device e2e smoke (Docker daemon was unavailable this session; harness + MinIO driver wired).
 - Win7 packaged operator smoke.
 - Shelf download / preview / history restore UI.
 - Proven live object-store roundtrip in CI.
-- Laravel SyncthingProvisioner / operator-surface residue cleanup.
+- Nullable DB columns `syncthing_*` still present (unused; drop migration optional).
 
 ## Out of scope
 
