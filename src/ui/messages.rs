@@ -109,14 +109,14 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
 unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
     let st = stmut(hwnd);
     let _ = st.app.send(crate::app::AppCommand::EngineFailed(
-        "Syncthing assignment was rejected.".into(),
+        "Chunk store credentials were rejected.".into(),
     ));
     if st.auth_failure_notified {
         return LRESULT(0);
     }
     st.auth_failure_notified = true;
-    if st.sync_engine.is_some() {
-        st.sync_engine = None;
+    if let Some(engine) = st.sync_engine.take() {
+        engine.stop();
     }
     st.connected = false;
     restore_pair_idle_controls(hwnd);
@@ -124,7 +124,7 @@ unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
         hwnd,
         "Reconnect required",
         C_RED,
-        "The Syncthing assignment is invalid. Use Reconnect to continue.",
+        "Device credentials are invalid or revoked. Use Reconnect to pair again.",
     );
     let _ = SetForegroundWindow(hwnd);
     LRESULT(0)

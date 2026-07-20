@@ -62,15 +62,6 @@ impl Drop for SyncEngine {
     }
 }
 
-impl Drop for SyncEngine {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
 fn run_loop(cfg: Config, stop: Arc<AtomicBool>) {
     let device_token = match crate::secret::decrypt(&cfg.device_token_enc) {
         Ok(token) => token,
