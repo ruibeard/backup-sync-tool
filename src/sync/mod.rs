@@ -4,6 +4,7 @@ mod chunker;
 mod client;
 mod state;
 mod store;
+mod watch;
 
 pub use chunker::chunk_bytes;
 pub use client::SyncApiClient;
@@ -21,7 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
+use watch::FolderWatcher;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineState {
@@ -106,6 +108,9 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>) {
     );
     let state_path = state_path_for_destination(&cfg.destination_uuid);
     let mut state = SyncState::load(&state_path);
+    let dirty = Arc::new(AtomicBool::new(true));
+    let watch_root = PathBuf::from(cfg.watch_folder.trim());
+    let _watcher = FolderWatcher::start(&watch_root, Arc::clone(&dirty));
 
     while !stop.load(Ordering::Acquire) {
         match api.cursor() {
@@ -119,19 +124,25 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>) {
             }
             Err(err) => {
                 logs::append(&format!("sync: cursor failed: {err}"));
-                sleep_interruptible(&stop, Duration::from_secs(5));
+                sleep_interruptible(&stop, &dirty, Duration::from_secs(5));
                 continue;
             }
         }
 
-        if let Err(err) = push_local_changes(&cfg, &api, &store, &mut state) {
-            match &err {
-                ApiError::Auth(msg) => {
-                    logs::append(&format!("sync: auth error on push: {msg}"));
-                    let _ = state.save(&state_path);
-                    return;
+        let local_dirty = dirty.swap(false, Ordering::AcqRel);
+        if local_dirty {
+            if let Err(err) = push_local_changes(&cfg, &api, &store, &mut state) {
+                match &err {
+                    ApiError::Auth(msg) => {
+                        logs::append(&format!("sync: auth error on push: {msg}"));
+                        let _ = state.save(&state_path);
+                        return;
+                    }
+                    other => {
+                        logs::append(&format!("sync: push failed: {other}"));
+                        dirty.store(true, Ordering::Release);
+                    }
                 }
-                other => logs::append(&format!("sync: push failed: {other}")),
             }
         }
 
@@ -148,7 +159,8 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>) {
         if let Err(err) = state.save(&state_path) {
             logs::append(&format!("sync: state save failed: {err}"));
         }
-        sleep_interruptible(&stop, Duration::from_secs(3));
+        // Wake early on FS events; still poll remote at least every ~15s.
+        sleep_interruptible(&stop, &dirty, Duration::from_secs(15));
     }
 }
 
@@ -167,10 +179,26 @@ fn push_local_changes(
     let local_paths: HashSet<String> = local_files.keys().cloned().collect();
 
     for (rel, abs) in &local_files {
+        let (size, mtime_secs) = file_fingerprint(abs).map_err(ApiError::Other)?;
+        if let Some(tip) = state.files.get(rel) {
+            if tip.size == size
+                && tip.mtime_secs == mtime_secs
+                && mtime_secs > 0
+                && !tip.content_sha256.is_empty()
+            {
+                continue;
+            }
+        }
+
         let bytes = fs::read(abs).map_err(|e| ApiError::Other(e.to_string()))?;
         let content_sha = sha256_hex(&bytes);
         if let Some(tip) = state.files.get(rel) {
             if tip.content_sha256 == content_sha && tip.size == bytes.len() as u64 {
+                // Bytes unchanged; refresh fingerprint so future scans stay cheap.
+                let mut tip = tip.clone();
+                tip.mtime_secs = mtime_secs;
+                tip.size = size;
+                state.upsert_tip(rel, tip);
                 continue;
             }
         }
@@ -212,6 +240,7 @@ fn push_local_changes(
                 revision: result.revision,
                 size: bytes.len() as u64,
                 content_sha256: content_sha,
+                mtime_secs,
             },
         );
         logs::append(&format!("sync: committed {}", result.path));
@@ -322,6 +351,7 @@ fn apply_remote_change(
     {
         if let Some(tip) = state.files.get(&change.path) {
             if tip.content_sha256 == content_sha {
+                let mtime_secs = file_mtime_secs(&safe_join(root, &change.path).unwrap_or_default());
                 state.upsert_tip(
                     &change.path,
                     FileTip {
@@ -329,6 +359,7 @@ fn apply_remote_change(
                         revision: change.revision,
                         size: change.payload.size,
                         content_sha256: content_sha,
+                        mtime_secs,
                     },
                 );
                 return Ok(());
@@ -360,6 +391,8 @@ fn apply_remote_change(
     }
 
     write_local_file(root, &change.path, &assembled)?;
+    let abs = safe_join(root, &change.path)?;
+    let mtime_secs = file_mtime_secs(&abs);
     state.upsert_tip(
         &change.path,
         FileTip {
@@ -371,6 +404,7 @@ fn apply_remote_change(
             } else {
                 content_sha
             },
+            mtime_secs,
         },
     );
     logs::append(&format!(
@@ -487,10 +521,33 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn sleep_interruptible(stop: &AtomicBool, total: Duration) {
+fn file_fingerprint(path: &Path) -> Result<(u64, u64), String> {
+    let meta = fs::metadata(path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+    Ok((meta.len(), mtime_secs_from_meta(&meta)))
+}
+
+fn file_mtime_secs(path: &Path) -> u64 {
+    fs::metadata(path)
+        .ok()
+        .map(|meta| mtime_secs_from_meta(&meta))
+        .unwrap_or(0)
+}
+
+fn mtime_secs_from_meta(meta: &fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn sleep_interruptible(stop: &AtomicBool, dirty: &AtomicBool, total: Duration) {
     let mut left = total;
     let step = Duration::from_millis(200);
-    while left > Duration::ZERO && !stop.load(Ordering::Acquire) {
+    while left > Duration::ZERO
+        && !stop.load(Ordering::Acquire)
+        && !dirty.load(Ordering::Acquire)
+    {
         let slice = step.min(left);
         thread::sleep(slice);
         left = left.saturating_sub(slice);

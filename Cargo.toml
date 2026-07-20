@@ -32,6 +32,7 @@ qrcodegen = "1"
 # PNG decode for bridge/status icons (assets/bridge-*.png)
 image = { version = "0.25", default-features = false, features = ["png"] }
 hmac = "0.12"
+notify = { version = "6", features = ["macos_fsevent"] }
 
 # Win32 API bindings — Windows targets only
 [target.'cfg(windows)'.dependencies]

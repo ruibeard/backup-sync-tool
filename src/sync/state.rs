@@ -21,6 +21,9 @@ pub struct FileTip {
     pub size: u64,
     #[serde(default)]
     pub content_sha256: String,
+    /// Local mtime seconds (UNIX). Used to skip unchanged files without re-reading.
+    #[serde(default)]
+    pub mtime_secs: u64,
 }
 
 impl SyncState {
@@ -89,6 +92,7 @@ mod tests {
                 revision: 1,
                 size: 1,
                 content_sha256: "aa".into(),
+                mtime_secs: 0,
             },
         );
         state.upsert_tip(
@@ -98,6 +102,7 @@ mod tests {
                 revision: 2,
                 size: 1,
                 content_sha256: "aa".into(),
+                mtime_secs: 0,
             },
         );
         assert!(!state.files.contains_key("old.txt"));
@@ -124,6 +129,7 @@ mod tests {
                 revision: 3,
                 size: 10,
                 content_sha256: "abcd".into(),
+                mtime_secs: 42,
             },
         );
         state.save(&path).unwrap();

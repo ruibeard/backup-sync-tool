@@ -269,11 +269,11 @@ Desktop commits: through Syncthing strip on `option-h-chunk-store`. Laravel comm
 - Desktop schema v4 + `chunk_store` pairing (Win + Mac).
 - Desktop `SyncEngine` recursive scan / push / pull + SigV4 PUT/GET (`src/sync/*`).
 - Syncthing stripped from desktop: deleted `src/syncthing.rs`, build scripts no longer bundle an engine binary, updater swaps desktop-only unit, UI/status strings use control plane / destination / chunk store.
+- Desktop FS watcher (`notify`) + mtime/size fingerprint skip (no blind full-file re-read every 3s; remote poll ≤15s).
 - Unit/feature tests green in-repo (desktop ~38; Laravel `ChunkStorePairingAndSyncTest` 3).
 
 ### Missing / not done
 
-- Real FS watcher (currently ~3s poll full rescan).
 - FastCDC (fixed 1MB chunks today).
 - Real MinIO IAM provisioning (driver uses fake keys).
 - Live MinIO/Garage two-device e2e smoke.
