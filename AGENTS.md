@@ -2,6 +2,8 @@
 
 Docs: `SPEC.md` = technical contract + platform checklists. `README.md` = short GitHub summary. **Do not add more markdown** for product/behavior — edit `SPEC.md`. Leave `proxmox/` and `license-inspector/` alone (unrelated tooling).
 
+Option H Done/Missing checklist: `SPEC.md` → **Implementation status (2026-07-20)**.
+
 ## Locked architecture (Option H)
 
 Mini-Dropbox: Laravel owns pairing + sync metadata + 30-day history + file shelf. Desktop owns the Rust sync engine. Chunk bytes live in an S3-compatible object store behind a Laravel storage driver. Last-writer-wins. Greenfield — ignore WebDAV/Syncthing/CT 105 product paths.
