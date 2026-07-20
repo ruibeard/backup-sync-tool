@@ -256,33 +256,30 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 ## Implementation status (2026-07-20)
 
-Audit of `option-h-chunk-store` on desktop (`backup-sync-tool`) and Laravel (`box-rui-cam`). Roughly **~55%** of this plan. Unit/feature tests pass; **no** live Garage/MinIO or Win7 packaged smoke has been proven.
+Audit of `option-h-chunk-store` on desktop (`backup-sync-tool`) and Laravel (`box-rui-cam`). Done vs Missing only — no invented completion percentage.
+
+Desktop commits: `10c773f`, `e5771f1`, `ae0afde`, `cf19c87`. Laravel commits: `12a60c6`, `f6092c8`, `c615d0a`.
 
 ### Done
 
-- Spec locked Option H / schema v4 (this file; Laravel `BACKUP_SYNC_COMMUNICATION_SPEC.md`).
-- Desktop schema v4 + `transport: "chunk_store"` pairing (`src/config.rs`, `src/pairing.rs`, `src/host.rs`).
-- Desktop in-process `SyncEngine`: recursive folder scan, push/pull, rename/delete apply, local tip/cursor state (`src/sync/`).
-- Desktop SigV4 chunk PUT/GET via blocking `ureq` (`src/sync/store.rs`); metadata client for cursor/changes/commit/chunks-present (`src/sync/client.rs`).
-- Fixed-size 1 MiB chunker (`src/sync/chunker.rs`) — enough to move bytes; not FastCDC yet.
-- Laravel `chunk_store` pairing + `StorageProvisioner` with `fake` and Garage Admin API paths (`PairingController`, `StorageProvisioner`, `BackupStorage`).
-- Laravel sync metadata API: cursor, changes, chunks/present, commit with last-writer-wins accept (`SyncController` + migration `2026_07_20_140000_option_h_chunk_store_metadata`).
-- Laravel 30-day prune command (`sync:prune-history`).
-- Laravel minimal destination file shelf (live path/size list on customer show).
-- Repo tests green as of audit: desktop `cargo test` (38 pass); Laravel `ChunkStorePairingAndSyncTest` (3 pass). Metadata-only — tests do not PUT/GET real object-store bytes.
+- SPEC lock Option H v4.
+- Laravel `chunk_store` pairing + provisioner (fake works; Garage path exists; MinIO mints fake keys).
+- Laravel sync APIs (cursor / changes / chunks/present / commit), last-writer-wins accept, 30-day prune command.
+- Laravel minimal shelf (list metadata only).
+- Desktop schema v4 + `chunk_store` pairing (Win + Mac).
+- Desktop `SyncEngine` recursive scan / push / pull + SigV4 PUT/GET (`src/sync/*`).
+- Unit/feature tests green in-repo (desktop ~38; Laravel `ChunkStorePairingAndSyncTest` 3).
 
 ### Missing / not done
 
-- Syncthing still in the tree: `src/syncthing.rs`, Syncthing-shaped UI/status fields, and build scripts still download/bundle `syncthing` / `syncthing.exe`.
-- Real FS watcher — engine polls with a full rescan sleep (~3s), no OS directory events.
-- FastCDC (or equivalent) content-defined chunking.
-- Live MinIO/Garage end-to-end smoke (pair → chunk PUT/GET → two-device converge). Not done.
-- `BACKUP_STORAGE_DRIVER=minio` still mints fake keys / fake buckets — not real MinIO IAM.
-- Win7 (and current Windows / macOS) packaged operator smoke against a real chunk store.
-- Shelf history restore UI / `POST /api/sync/restore`; shelf is list-only (no download/preview of historical revisions).
-- Backup-health operator views beyond basic shelf listing.
-- Clean auto-update story without a separate Syncthing engine binary.
-- Production cutover: strip Syncthing provisioner leftovers on Laravel (`SyncthingProvisioner`, leftover model fields).
+- Strip Syncthing (code, UI residue; build still bundles it).
+- Real FS watcher (currently ~3s poll full rescan).
+- FastCDC (fixed 1MB chunks today).
+- Real MinIO IAM provisioning (driver uses fake keys).
+- Live MinIO/Garage two-device e2e smoke.
+- Win7 packaged operator smoke.
+- Shelf download / preview / history restore UI.
+- Proven live object-store roundtrip in CI.
 
 ## Out of scope
 
