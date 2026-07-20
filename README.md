@@ -1,15 +1,18 @@
 # Backup Sync Tool
 
-Native Windows and macOS clients that run a private bundled Syncthing engine and pair it with the always-online CT 105 backup hub.
+Native Windows and macOS clients for a small self-hosted Dropbox: live two-way folder sync with QR pairing, per-device credentials, revoke, and a Laravel admin shelf.
 
-The Laravel control plane approves devices and customer folders. Backup bytes move directly between Syncthing peers; Laravel never handles file data. Every approved device is `sendreceive`, so creates, edits, renames, conflicts, and deletions propagate in every direction. CT 105 keeps staggered file versions for recovery.
+Laravel is the control and metadata plane (pairing, file revisions, 30-day history, browse/health). File bytes are content-addressed chunks in an S3-compatible object store. The desktop never picks the storage vendor. Conflicts are last-writer-wins.
+
+Technical contract: [SPEC.md](SPEC.md) (architecture **Option H**, schema v4).
 
 ## Operator smoke
 
 1. Set Laravel `APP_URL` to the public control-plane URL.
-2. Windows: `.\build-windows.ps1`, set **CONTROL PLANE URL** to that `APP_URL`, select the folder, pair, approve, and confirm CT 105 connects and synchronizes.
-3. macOS: `./build-macos.sh`, set tray **Control plane URL…** to the same `APP_URL`, select the folder, pair, approve, and confirm synchronization.
-4. A `control_plane_url mismatch` log means the desktop URL and Laravel `APP_URL` disagree.
+2. Windows: `.\build-windows.ps1`, set **CONTROL PLANE URL** to that `APP_URL`, select the folder, pair, approve, confirm two-way sync.
+3. macOS: `./build-macos.sh`, set tray **Control plane URL…** to the same `APP_URL`, pair, approve, confirm sync.
+4. Confirm the Laravel shelf sees files; revoke a device and confirm it can no longer sync.
+5. A `control_plane_url mismatch` log means the desktop URL and Laravel `APP_URL` disagree.
 
 ## Build
 
@@ -24,13 +27,9 @@ The Laravel control plane approves devices and customer folders. Backup bytes mo
 .\build-windows.ps1 -NoLaunch
 ```
 
-Both builds bundle the project-pinned Syncthing v2.1.1 engine. Windows 7 SP1 x64 remains supported through the pinned legacy-compatible Go toolchain; Syncthing self-update is disabled so the tested engine cannot replace itself.
-
-| Platform | UI | Protected secret |
+| Platform | UI | Protected secrets |
 | --- | --- | --- |
-| Windows 7–11 | Native Win32 tray app | Device token via DPAPI |
-| macOS | Native menu bar app / daemon | Device token via Keychain |
+| Windows 7–11 | Native Win32 tray app | Device token + chunk keys via DPAPI |
+| macOS | Native menu bar app / daemon | Device token + chunk keys via Keychain |
 
-Configuration schema is v3. Any S3, WebDAV, or earlier configuration requires fresh pairing. The private Syncthing API is loopback-only and its API key stays inside Syncthing's application-support directory.
-
-Technical contract and checklists: [SPEC.md](SPEC.md).
+Configuration schema is v4. Older Syncthing/S3/WebDAV configs require fresh pairing.

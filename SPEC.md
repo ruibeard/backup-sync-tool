@@ -1,46 +1,115 @@
-# Backup Sync Tool — Technical Spec v3
+# Backup Sync Tool — Technical Spec v4
+
+**Locked architecture: Option H — mini-Dropbox** (metadata plane + chunk plane).
+
+Greenfield product. WebDAV, Syncthing, CT 105 hub provisioning, and shared storage passwords are out of scope. Existing prod stacks are ignored; desktops will be replaced by hand later.
+
+## Product decisions (locked 2026-07-20)
+
+| Decision | Choice |
+| --- | --- |
+| Sync model | Full multi-device live two-way from day one |
+| Conflicts | Last-writer-wins (no conflict copies) |
+| Metadata host | Laravel (pairing, sync metadata API, admin shelf, revoke) |
+| Bytes host | S3-compatible object store via storage driver |
+| Default driver | `garage` (interface first; live Proxmox optional while coding) |
+| Future drivers | `b2`, `r2`, `minio`, `spaces` — Laravel-side only |
+| Version retention | 30 days |
+| Browse UI | Laravel file shelf only (no Filestash requirement) |
+| Legacy WebDAV | Does not exist for this product |
+| Windows | Win7 SP1 x64 through Win11 — hard release requirement |
+| macOS | Separate native client; Win7 constraints do not apply to macOS builds |
 
 ## Architecture
 
 | Layer | Windows | macOS |
 | --- | --- | --- |
 | UI | Raw Win32 through `windows-rs` | Native menu bar app; `--daemon` for LaunchAgent |
-| Sync engine | Bundled Syncthing v2.1.1 | Bundled Syncthing v2.1.1 |
-| Engine control | Blocking REST/event API on private loopback | same |
-| Desktop secrets | Device token in DPAPI | Device token in Keychain (`cam.rui.backupsynctool`) |
-| Control plane | Laravel at editable `pair_api_base` | same |
-| Always-online peer | CT 105 Syncthing hub | same |
+| Sync engine | In-process Rust sync engine (this repo) | same |
+| HTTP | Blocking `ureq` | same |
+| Desktop secrets | Device token + chunk-store secret in DPAPI | Keychain (`cam.rui.backupsynctool`) |
+| Control / metadata | Laravel at editable `pair_api_base` | same |
+| Chunk bytes | Object store endpoint from approval payload | same |
 
-Windows 7 SP1 x64 through Windows 11 is mandatory. Windows builds compile the pinned engine with the repository-pinned legacy-compatible Go toolchain. macOS packages the engine for the supported Intel/Apple Silicon target. Engine self-update and restart are disabled; only a tested Backup Sync Tool release may replace it.
+There is no bundled Syncthing, no WebDAV client, no Electron/webview/egui/nwg, no async runtime, and no AWS SDK. XD licence detection remains Windows-only.
 
-There is no S3, WebDAV, object-storage transport, custom manifest, multipart uploader, lease, tombstone, or per-device deletion policy. Do not add an async runtime, Electron, webview, AWS SDK, or a second UI framework. XD licence detection remains Windows-only.
-
-## Three systems
+### Three systems
 
 | System | Responsibility |
 | --- | --- |
-| Laravel control plane | Pair requests, admin approval, device/customer assignment, CT 105 provisioning |
-| Desktop app | Native UI, private engine lifecycle, loopback API, selected folder |
-| CT 105 | Always-online Syncthing hub and staggered recovery versions |
+| Laravel | Pairing/QR approve, device tokens, revoke, sync metadata (files, revisions, chunks, change cursor), 30-day version history, operator file shelf / backup health |
+| Object store | Opaque content-addressed chunk bytes only |
+| Desktop | Watch selected folder, chunk/hash, upload/download missing chunks, apply last-writer-wins updates, report status |
 
-`pair_api_base` identifies Laravel only. A direct hub address may later use a domain such as `sync.rui.cam:22000`, but it is returned by approval and is never confused with the control-plane URL. The CT 105 GUI/API port is not public.
+`pair_api_base` is Laravel only. The object-store endpoint in the approval payload is never confused with the control-plane URL. Desktop never chooses or exposes the storage vendor; Laravel’s `BACKUP_STORAGE_DRIVER` decides.
+
+```text
+[Win/Mac app] --pair / sync metadata / cursor--> [Laravel]
+       |                                              |
+       | put/get chunks (device-scoped key)           | provision bucket/prefix + keys
+       v                                              v
+                    [Object store driver]
+```
+
+## Data model
+
+### Content-addressed chunks
+
+- Files are split with content-defined chunking (FastCDC or equivalent).
+- Each chunk is addressed by SHA-256.
+- Object key layout (driver-normalized): `{destination_prefix}/chunks/{sha256[0:2]}/{sha256}`.
+- Identical bytes across files/devices store once per destination.
+
+### File revision (metadata, Laravel)
+
+A live file is an ordered list of chunk hashes plus:
+
+- stable `file_id` (UUID; survives renames)
+- relative path within the customer destination
+- size, mtime (client hint), content sha256 of the full file
+- `revision` (monotonic per `file_id`)
+- `updated_at` (server time)
+- `updated_by_device_uuid`
+- `deleted_at` (tombstone when deleted)
+
+### Last-writer-wins
+
+When two devices mutate the same `file_id` (or same path for a new file) concurrently:
+
+1. Laravel accepts the write with the higher server-assigned `revision` / later commit timestamp as authoritative.
+2. The losing revision is retained as history for 30 days, then pruned with unreferenced chunks.
+3. Desktops do **not** create `.sync-conflict` copies.
+4. The losing device replaces its local bytes with the winner on next pull.
+
+Renames update path metadata for the same `file_id`. Deletes set a tombstone and propagate to all devices; tombstones and prior revisions remain recoverable in Laravel for 30 days.
+
+### Destinations and devices
+
+- One `BackupDestination` (customer) owns one object-store prefix/bucket assignment.
+- Each approved device receives a distinct device UUID, device token (control/metadata auth), and chunk-store credentials scoped to that destination.
+- Revoke: mark device revoked, invalidate device token, delete/disable that device’s chunk-store key. Do not delete customer files or other devices’ keys.
+- Re-pair of the same machine creates a new device row/token/key and revokes the previous active row for that machine when policy says so.
 
 ## Configuration
 
-Only `schema_version: 3` is accepted as paired. v2 S3 and all older configurations preserve the selected watch folder/control-plane URL where possible but require fresh pairing.
+Only `schema_version: 4` is accepted as paired. Any v3 Syncthing, v2 S3, WebDAV, or older config may keep watch folder / `pair_api_base` hints but requires fresh pairing.
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "pair_api_base": "https://backup.rui.cam",
   "watch_folder": "C:\\XDSoftware\\backups",
-  "device_token_enc": "DPAPI...",
+  "device_token_enc": "DPAPI-or-keychain-handle",
   "device_uuid": "desktop-uuid",
-  "syncthing_device_id": "LOCAL-DEVICE-ID",
-  "syncthing_hub_device_id": "CT105-DEVICE-ID",
-  "syncthing_hub_addresses": ["tcp://sync.rui.cam:22000", "quic://sync.rui.cam:22000"],
-  "syncthing_folder_id": "customer-folder-id",
-  "syncthing_folder_label": "XDPT.59655-Palmeira-Minimercado",
+  "destination_uuid": "customer-destination-uuid",
+  "transport": "chunk_store",
+  "chunk_endpoint": "https://s3.example",
+  "chunk_region": "garage",
+  "chunk_bucket": "backup-…",
+  "chunk_prefix": "dest/…/",
+  "chunk_access_key_enc": "…",
+  "chunk_secret_key_enc": "…",
+  "chunk_path_style": true,
   "server_approved_at": "1784050000",
   "start_with_windows": true,
   "auto_update": true
@@ -52,141 +121,145 @@ Paths:
 | State | Windows | macOS |
 | --- | --- | --- |
 | Desktop config | beside `backupsynctool.exe` | `~/Library/Application Support/BackupSyncTool/backupsynctool.json` |
-| Private engine home | `%LOCALAPPDATA%\BackupSyncTool\syncthing` | `~/Library/Application Support/BackupSyncTool/syncthing` |
+| Local sync DB | `%LOCALAPPDATA%\BackupSyncTool\sync\` | `~/Library/Application Support/BackupSyncTool/sync/` |
 | Logs | `logs\` beside executable | `~/Library/Application Support/BackupSyncTool/logs` |
 
-The private engine's API key lives only in `syncthing/config.xml`. It must never enter desktop config, Laravel, logs, or pairing payloads. Desktop startup binds the engine GUI/API to `127.0.0.1:8385`, supplies the API key in `X-API-Key`, and sets a hidden GUI username/password derived from that unexposed key so a local browser cannot administer the engine. The app never opens a browser. A separately installed user Syncthing instance is not modified.
-
-On macOS, `device_token_enc` is a Keychain handle. Ad-hoc development signing must not prompt for a Keychain password. On Windows it is DPAPI ciphertext using the established application entropy. Syncthing's private certificate and key are protected by the user's application-support directory permissions and must persist because they define the device ID.
+On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt for a Keychain password. On Windows, DPAPI uses the established application entropy (`webdavsync-v1`). Never log device tokens or chunk-store secrets.
 
 ## Pairing contract
 
-Before starting a pair request, the desktop starts the private engine, waits for `/rest/system/status`, and obtains its certificate-derived `myID`. The device ID persists even when the temporary pairing-time process stops.
-
-`POST /api/pair/start` includes the existing machine/XD hints plus:
+`POST /api/pair/start`:
 
 ```json
 {
-  "syncthing_device_id": "LOCAL-DEVICE-ID",
-  "supported_transports": ["syncthing"]
+  "machine_name": "RECEPTION-PC",
+  "windows_user": "office",
+  "app_version": "2026.2.0",
+  "detected_install_path": "C:\\XDSoftware",
+  "detected_backup_path": "C:\\XDSoftware\\backups",
+  "xd_license_number": "XDPT.59655",
+  "xd_customer_name": "Palmeira Minimercado",
+  "suggested_customer": "XDPT.59655-Palmeira-Minimercado",
+  "supported_transports": ["chunk_store"]
 }
 ```
 
-Admin approval provisions the local device on the customer's CT 105 folder. Approved polling status must contain:
+`machine_name` and `supported_transports: ["chunk_store"]` are required. Detected values are untrusted display hints.
+
+Response includes `code`, `approve_url` (QR target), `poll_token`, `poll_interval_ms`, and `control_plane_url` (`APP_URL`, no trailing slash). Desktop logs `control_plane_url mismatch` if it disagrees with configured `pair_api_base`.
+
+Admin approval selects/creates a `BackupDestination`, provisions chunk-store access for the new device, then returns once via poll:
 
 ```json
 {
   "status": "approved",
-  "transport": "syncthing",
+  "transport": "chunk_store",
   "device_uuid": "desktop-uuid",
-  "device_token": "one-time-visible-token",
-  "syncthing_hub_device_id": "CT105-DEVICE-ID",
-  "syncthing_hub_addresses": ["tcp://sync.rui.cam:22000"],
-  "syncthing_folder_id": "customer-folder-id",
-  "syncthing_folder_label": "Customer label"
+  "device_token": "one-time-device-token",
+  "destination_uuid": "customer-destination-uuid",
+  "destination_label": "XDPT.59655-Palmeira-Minimercado",
+  "chunk_endpoint": "https://s3.example",
+  "chunk_region": "garage",
+  "chunk_bucket": "backup-…",
+  "chunk_prefix": "dest/…/",
+  "chunk_access_key": "…",
+  "chunk_secret_key": "…",
+  "chunk_path_style": true
 }
 ```
 
-The client rejects missing/invalid device IDs, folder IDs, labels, addresses, or a transport other than `syncthing`. It verifies that the running local ID matches the ID sent during pairing, installs the hub device and folder through `/rest/config`, triggers `/rest/db/scan`, atomically saves schema v3, and starts synchronization. Cancellation, rejection, expiry, malformed approval, and failed local activation do not replace an active assignment.
+Client rejects any transport other than `chunk_store`, missing fields, or invalid URLs. It stores secrets, atomically writes schema v4, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel retains chunk access-key ids for revoke and must not keep chunk secrets after handoff.
 
-The optional `control_plane_url` in pair start response is compared with configured `pair_api_base`; mismatch is logged as `control_plane_url mismatch`. The UI continues to support **Change Server** and persists the normalized site root before creating a replacement request.
+Default `pair_api_base` = `https://backup.rui.cam` (editable + persisted: Windows **CONTROL PLANE URL** on blur + pair; macOS tray **Control plane URL…**).
 
-## Syncthing folder contract
+## Sync protocol (desktop ↔ Laravel metadata)
 
-Every desktop customer folder is configured as:
+Authenticated with `Authorization: Bearer <device_token>`. Revoked tokens receive `401` and the desktop shows reconnect/re-pair.
 
-- `type: sendreceive`;
-- local selected path, one local device, and the approved CT 105 device;
-- filesystem watcher enabled plus periodic full rescan;
-- approved hub addresses only (`tcp://`, `quic://`, `relay://`, or `dynamic`);
-- no introducer or auto-accept behaviour;
-- no desktop engine self-update.
+Minimum surface (names may be refined in Laravel; behavior is normative):
 
-Every customer folder on CT 105 is `sendreceive` and uses staggered file versioning. All devices may originate and receive creates, edits, renames, conflicts, and deletions. Syncthing's conflict naming/retention behaviour is authoritative. There is no `can_delete_files` switch and `ignoreDelete` must not be enabled.
+| Call | Purpose |
+| --- | --- |
+| `GET /api/sync/cursor` | Current destination change cursor / generation |
+| `GET /api/sync/changes?since=` | Metadata changes since cursor (upserts, renames, tombstones) |
+| `POST /api/sync/commit` | Propose file revision: path, `file_id`, chunk hash list, size, content hash, client mtime, base revision |
+| `POST /api/sync/chunks/present` | Ask which chunk hashes the store already has |
+| `POST /api/sync/restore` (admin/desktop optional) | Materialize a historical revision as the new live tip (LWW commit) |
 
-CT 105 must keep a complete synchronized copy. Operators recover deleted/replaced files from CT 105 staggered versions. The old whole-customer S3 restore operation does not exist; desktop restore UI must not claim that it downloads an object-store snapshot.
+Chunk bytes go **only** to the object store with the device chunk credentials (PUT/GET). Laravel may use a scanner/admin key to verify presence and serve the shelf; it does not proxy bulk desktop transfers.
 
-## Engine lifecycle and status
+### Desktop sync loop
 
-The desktop launches only the bundled engine using the equivalent of:
+On launch (if paired), after approval, and after watch-path save:
 
-```text
-syncthing serve --home=<private-home> --no-browser --no-restart --no-upgrade --gui-address=127.0.0.1:8385
-```
+1. Ensure local sync DB exists.
+2. Scan / watch the selected folder.
+3. For local changes: chunk → `chunks/present` → upload missing chunks → `sync/commit`.
+4. Pull `sync/changes` and apply remote revisions (download missing chunks, write files, apply deletes/renames).
+5. Persist cursor. Retry with backoff on offline; offline is not credential failure.
+6. UI states: unpaired, pairing, syncing, idle, offline, auth/revoke error, hard failure.
 
-Stdout/stderr are forwarded into application logs. Startup is bounded; an absent binary, early exit, missing API key, REST failure, or identity mismatch is a visible error. Normal app shutdown requests `/rest/system/shutdown`, waits briefly, then kills only the child it owns if necessary.
+All approved devices may create, edit, rename, and delete. There is no `can_delete_files` flag.
 
-Before normal pairing/sync startup, both native shells verify that the engine executable and `syncthing-LICENSE.txt` are present (and executable on Unix). Missing bundle files trigger a retryable same-version repair download from the latest GitHub release. This bypasses the usual “latest version equals current version” result so a legacy single-file updater cannot strand a v3 desktop without its engine. Repair does not require pairing: Windows shows a **Retry repair** action, and macOS exposes **Repair Installation…** in the menu bar after a visible failure.
+## Laravel operator surface
 
-Desktop status is derived from `/rest/db/status`, `/rest/system/connections`, and `/rest/events`. At minimum the UI distinguishes disconnected/reconnect-required, scanning, syncing, idle, and failure, and may show needed files/bytes. The engine owns transfer retries and offline convergence.
+- Pairing approve/deny with QR/`approve_url`.
+- Device list + revoke.
+- Destination list and per-customer shelf (browse live tree + 30-day history).
+- Backup health derived from metadata (last activity, file counts, stale devices) — not from Syncthing events.
+- Storage driver configured only in Laravel env (`BACKUP_STORAGE_DRIVER` + driver secrets).
 
-## XD detection
+## Storage drivers
 
-Windows optionally checks:
+Laravel binds a `DeviceStorageProvisioner`:
 
-- `C:\XDSoftware`
-- `C:\XDSoftware\backups`
-- `C:\XDSoftware\cfg\xd.lic`
-- `C:\XDSoftware\cfg\xd.pem`
+| Driver | Role |
+| --- | --- |
+| `garage` | Default self-hosted S3-compatible; Admin API creates bucket/key/allow/delete |
+| `b2` / `r2` / `minio` / `spaces` | Same approve/revoke semantics when wired |
 
-It sends detected licence/customer values only as pairing hints. Manual selection and macOS never pretend to be XD detection. Pairing remains available when detection fails.
+Desktop speaks a single chunk-store profile from approval. Adding a vendor is a Laravel provisioner change, not a desktop settings change.
+
+While Garage/Proxmox is unavailable, implementation may use local MinIO/Garage fixtures or fakes for tests; the wire contract stays the same.
 
 ## Build and release
 
-Only these entry points are supported: `./build-macos.sh`, `.\build-windows.ps1`, and `./release.sh`.
+Only `./build-macos.sh`, `.\build-windows.ps1`, and `./release.sh`.
 
 | Script | Contract |
 | --- | --- |
-| `./build-macos.sh` | Build release app, copy pinned engine to `Contents/Resources/syncthing`, sign nested executable then app, and package the sealed `.app` as one updater archive; launch unless `--no-launch` |
-| `.\build-windows.ps1` | Build Win7 desktop plus pinned Win7-compatible `syncthing.exe`, stage app/engine/license together, emit the updater ZIP, and launch unless `-NoLaunch` |
-| `./release.sh` | Require staged Windows desktop and engine, package macOS, bump/tag/upload without moving existing tags |
+| `./build-macos.sh` | Build/sign/package macOS app; launch unless `--no-launch` |
+| `.\build-windows.ps1` | Build Win7-compatible desktop into `dist\windows\`; `-NoLaunch` skips run |
+| `./release.sh` | Requires staged Windows dist; bump/tag/upload without moving tags |
 
-Never launch from `target/debug` or `target/release`. A build is successful only with zero errors and a running packaged app, or staged executable pair when no-launch was requested.
+Never launch from `target/debug` or `target/release`. Auto-update replaces the whole tested desktop bundle (no separate engine binary once Syncthing is gone).
 
-Operator smoke after relevant builds:
+Windows 7 is a release blocker for Windows artifacts. macOS build/signing is independent.
 
-1. Confirm Laravel `APP_URL` and desktop Control plane URL match.
-2. Pair Windows 7, current Windows, and macOS with CT 105.
-3. Verify initial convergence, edits, concurrent conflicts, renames, offline changes, and deletions from every device.
-4. Verify CT 105 staggered-version recovery.
-5. Verify quit/relaunch keeps the same local device ID and does not show the engine GUI or a Keychain password prompt.
-6. Verify no public API port, no engine self-update, and useful logs for process/API failures.
+### Operator smoke
 
-Windows 7 is a release blocker, not an optional compatibility target.
+1. Laravel `APP_URL` matches desktop Control plane URL.
+2. Pair Win7, current Windows, and macOS to one disposable destination.
+3. Verify two-way creates, edits, renames, offline edits, and deletes from every device.
+4. Concurrent edit → last-writer-wins; loser converges to winner; loser revision visible in 30-day history.
+5. Revoke one device → uploads/metadata calls fail; other devices and data remain.
+6. Laravel shelf shows files and recent activity without SSH/Filestash.
+7. No Syncthing process, no public chunk-store admin API exposure beyond intended S3 endpoint.
 
-## Implementation handoff — 2026-07-15
+## Implementation order
 
-The S3 transport has been replaced in the desktop and Laravel repositories. The desktop now bundles and supervises Syncthing, pairing schema v3 carries Syncthing assignments, Laravel provisions customer/device shares through a narrow external service, and the old object-storage upload, restore, scan, browser, credential, and lease paths have been removed. The macOS package has been built and signature-verified. Rust and targeted Laravel tests pass. A real Windows 7 build and the live CT 105/Laravel smoke test remain operator work.
+1. Lock this spec (done).
+2. Laravel greenfield: destinations, devices, pairing for `chunk_store`, storage provisioner interface, sync metadata tables + API, 30-day prune job, basic shelf.
+3. Desktop: remove Syncthing supervisor path; schema v4; chunker + sync loop + ureq to metadata/chunk store.
+4. Win7 + macOS packaged builds and smoke.
+5. Optional: switch `BACKUP_STORAGE_DRIVER` to managed B2/R2 without desktop changes.
 
-No production infrastructure was changed. In particular, no Forge environment, CT 105 configuration, DNS, router/firewall rule, old S3 key, or stored S3 data was touched.
+## Out of scope
 
-### Tomorrow: operator installation sequence
-
-Use these as three different endpoints; never substitute one for another:
-
-| Purpose | Suggested endpoint | Exposure |
-| --- | --- | --- |
-| Laravel pairing/control plane | `https://backup.rui.cam` | Public HTTPS |
-| Syncthing device traffic | `sync.rui.cam:22000` | Public TCP and UDP to CT 105 |
-| Narrow share/unshare provisioner | `https://sync-provision.rui.cam` or a private-tunnel URL | Reachable by Laravel only |
-
-Do **not** publish Syncthing GUI/API port `8384`, its REST API key, or the desktop-private port `8385`. Laravel must call the narrow provisioner rather than CT 105's Syncthing API directly.
-
-1. Take a CT 105 configuration/data snapshot and record the existing hub device ID. The expected ID from the previous setup is `XLTL234-AJRMJV6-W3LNSHR-2YXZD7D-AOWWFDQ-NQ3X6HK-AJ6IS5K-B6MWKAH`; confirm it instead of changing it blindly.
-2. Create DNS for `sync.rui.cam` pointing to the public address that reaches CT 105. Forward TCP `22000` and UDP `22000` to CT 105. Do not forward `8384` or `8385`.
-3. Install the narrow provisioner beside CT 105 or behind a private tunnel. It must implement the authenticated, idempotent `POST /v1/folders/share` and `DELETE /v1/folders/unshare` contract in `box-rui-cam/BACKUP_SYNC_COMMUNICATION_SPEC.md`. It must configure hub folders as `sendreceive` with staggered versioning, and unshare a device without deleting customer files or history. These commits define and consume that contract but do not contain the CT 105 provisioner service itself; if it does not already exist, stop here and implement/deploy it before pairing.
-4. Give the provisioner a long random bearer token. Restrict the endpoint by firewall, tunnel, or access policy so only Laravel can reach it. Test unauthorized requests are rejected.
-5. In the Laravel operator environment, set `APP_URL=https://backup.rui.cam`, `SYNCTHING_PROVISIONER_ENDPOINT=<provisioner base URL>`, and `SYNCTHING_PROVISIONER_TOKEN=<same token>`. Do not place the Syncthing GUI URL or API key in Laravel.
-6. Deploy the Laravel changes using the normal operator process, run the database migrations, clear/rebuild Laravel configuration cache, and confirm the pairing page loads at the public `APP_URL`. The agent must not access Forge or production environment values.
-7. On a Windows 7 SP1 x64 test machine with Rust/Visual Studio prerequisites, run `.\build-windows.ps1`. Require zero build errors, a passing forbidden-import audit, and the packaged `dist\windows\backupsynctool.exe`, `syncthing.exe`, `syncthing-LICENSE.txt`, and updater ZIP. Do not release if the Windows 7 build or launch fails.
-8. On macOS, run `./build-macos.sh`. Confirm the packaged app launches, no Terminal or Syncthing GUI appears, no Keychain password prompt appears, and `codesign --verify --strict "dist/macos/Backup Sync Tool.app"` succeeds.
-9. In each desktop app, set **Control plane URL** to exactly `https://backup.rui.cam`, select a new disposable test folder, start pairing, approve it in Laravel, and verify the returned hub address is `sync.rui.cam:22000` rather than a control-plane or GUI address.
-10. Pair at least Windows 7, a current Windows machine, and macOS to the same disposable customer. Confirm all three retain different stable local Syncthing device IDs while sharing the same customer folder ID.
-11. Test convergence in both directions: create and edit a file on each device, rename a file, make one device offline and reconnect it, and create a concurrent-edit conflict. Wait for all devices and CT 105 to become idle after each case.
-12. Test deletion propagation explicitly. Delete a disposable file on Windows, then a different file on macOS. Confirm both deletions reach every device and CT 105. There is intentionally no per-device deletion permission.
-13. From CT 105 staggered versions, restore one deleted file and one earlier file version. Confirm the recovered files synchronize back to every device. Do not use the removed S3 restore workflow.
-14. Quit and relaunch every desktop app. Confirm the local device IDs do not change, sync resumes, the engine remains private, and logs contain no `control_plane_url mismatch`.
-15. Only after the complete smoke test, run `./release.sh` from macOS with the verified Windows bundle already in `dist/windows/`. This is the only supported release path.
-16. Separately revoke the obsolete Garage/S3 access keys and decide the retention/deletion date for old object-storage data. This is irreversible infrastructure work and is intentionally outside these code commits.
-
-If tomorrow stops before completion, record the last successful numbered step and the exact desktop, Laravel, provisioner, or CT 105 log error. Do not work around a failure by exposing port `8384`, enabling Syncthing self-update, changing a device ID, or disabling deletion propagation.
+- WebDAV and shared folder passwords
+- Syncthing / CT 105 / sync provisioner
+- Filestash as a product dependency
+- Migrating old WebDAV or Garage customer data automatically
+- Conflict-copy UX
+- Per-device deletion permissions
+- Desktop storage-vendor picker
