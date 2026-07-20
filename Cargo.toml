@@ -31,6 +31,7 @@ qrcodegen = "1"
 
 # PNG decode for bridge/status icons (assets/bridge-*.png)
 image = { version = "0.25", default-features = false, features = ["png"] }
+hmac = "0.12"
 
 # Win32 API bindings — Windows targets only
 [target.'cfg(windows)'.dependencies]
