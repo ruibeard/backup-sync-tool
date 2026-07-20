@@ -258,29 +258,27 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 Audit of `option-h-chunk-store` on desktop (`backup-sync-tool`) and Laravel (`box-rui-cam`). Done vs Missing only — no invented completion percentage.
 
-Desktop commits: Syncthing strip + FS watcher on `option-h-chunk-store`. Laravel: Syncthing strip + MinIO root-key path on same branch name.
-
 ### Done
 
 - SPEC lock Option H v4.
 - Laravel `chunk_store` pairing + provisioner (fake for tests; Garage path; MinIO returns root credentials + ensures shared `MINIO_BUCKET`).
-- Laravel sync APIs (cursor / changes / chunks/present / commit), last-writer-wins accept, 30-day prune command.
-- Laravel minimal shelf (list metadata only).
+- Laravel sync APIs (cursor / changes / chunks/present / commit / restore), last-writer-wins accept, 30-day prune command.
+- Laravel shelf: live tip + 30-day history, restore (web + `POST /api/sync/restore`), download tip/revision from object store.
 - Laravel SyncthingProvisioner deleted; operator UI no longer shows Syncthing IDs; factory/tests retargeted to chunk_store.
 - Desktop schema v4 + `chunk_store` pairing (Win + Mac).
 - Desktop `SyncEngine` recursive scan / push / pull + SigV4 PUT/GET (`src/sync/*`).
 - Syncthing stripped from desktop: deleted `src/syncthing.rs`, build scripts no longer bundle an engine binary, updater swaps desktop-only unit, UI/status strings use control plane / destination / chunk store.
 - Desktop FS watcher (`notify`) + mtime/size fingerprint skip (no blind full-file re-read every 3s; remote poll ≤15s).
-- Unit/feature tests green in-repo (desktop ~38; Laravel chunk-store suite 4).
+- FastCDC v2020 chunking (`src/sync/chunker.rs`; avg ~1 MiB, min 256 KiB, max 4 MiB).
+- Live MinIO e2e proven locally: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh` (desktop SigV4 PUT/GET; Laravel `MINIO_LIVE=1` pair → PutObject → commit → changes → shelf download).
+- Unit/feature tests green in-repo (desktop chunker/store; Laravel chunk-store suite including restore).
 
 ### Missing / not done
 
-- FastCDC (fixed 1MB chunks today).
 - Per-device MinIO IAM keys (local minio uses shared root credentials by design for now).
-- Live MinIO/Garage two-device e2e smoke (Docker daemon was unavailable this session; harness + MinIO driver wired).
-- Win7 packaged operator smoke.
-- Shelf download / preview / history restore UI.
-- Proven live object-store roundtrip in CI.
+- Win7 packaged operator smoke (operator-only; not agent-runnable).
+- Multi-device concurrent LWW physical smoke (two real desktops).
+- Wired into CI as a required job (script exists; not a GitHub Action yet).
 - Nullable DB columns `syncthing_*` still present (unused; drop migration optional).
 
 ## Out of scope
