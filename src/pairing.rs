@@ -47,20 +47,6 @@ pub struct PairStatusResponse {
     pub destination_uuid: Option<String>,
     #[serde(default)]
     pub destination_label: Option<String>,
-    #[serde(default)]
-    pub chunk_endpoint: Option<String>,
-    #[serde(default)]
-    pub chunk_region: Option<String>,
-    #[serde(default)]
-    pub chunk_bucket: Option<String>,
-    #[serde(default)]
-    pub chunk_prefix: Option<String>,
-    #[serde(default)]
-    pub chunk_access_key: Option<String>,
-    #[serde(default)]
-    pub chunk_secret_key: Option<String>,
-    #[serde(default)]
-    pub chunk_path_style: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,15 +321,8 @@ fn pairing_agent() -> ureq::Agent {
 }
 
 fn register_approval_secrets(status: &PairStatusResponse) {
-    for value in [
-        status.device_token.as_deref(),
-        status.chunk_access_key.as_deref(),
-        status.chunk_secret_key.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        crate::logs::register_secret(value);
+    if let Some(token) = status.device_token.as_deref() {
+        crate::logs::register_secret(token);
     }
 }
 
@@ -447,13 +426,6 @@ mod tests {
             transport: Some("chunk_store".into()),
             destination_uuid: Some("dest".into()),
             destination_label: Some("Customer 1".into()),
-            chunk_endpoint: Some("https://s3.example".into()),
-            chunk_region: Some("garage".into()),
-            chunk_bucket: Some("backup".into()),
-            chunk_prefix: Some("dest/x/".into()),
-            chunk_access_key: Some("ak".into()),
-            chunk_secret_key: Some("sk".into()),
-            chunk_path_style: Some(true),
         };
         assert!(is_chunk_store_approval(&approved));
 

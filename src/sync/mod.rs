@@ -5,6 +5,9 @@
 //! changes when the server cursor moved (parallel chunk GET into a local
 //! cache, then apply in cursor order). Only the pull advances the local
 //! cursor, so changes from other devices are never skipped.
+//!
+//! The device holds no store keys: every chunk PUT/GET uses a short-lived
+//! URL that Laravel signs for this destination.
 
 mod chunker;
 mod client;
@@ -29,7 +32,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, UNIX_EPOCH};
-use store::ChunkStoreClient;
+use store::ChunkStore;
 use watch::FolderWatcher;
 
 /// How often the engine asks the server for remote changes when idle.
@@ -43,8 +46,10 @@ const HASH_WORKERS: usize = 4;
 const BATCH_FILES: usize = 200;
 /// Soft cap on bytes hashed and uploaded per push batch.
 const BATCH_BYTES: u64 = 256 * 1024 * 1024;
-/// `chunks/present` accepts up to 2000 hashes.
+/// `chunks/present` and `chunks/download` accept up to 2000 hashes.
 const PRESENT_BATCH: usize = 2000;
+/// Download URLs are signed per group, just before use, so they stay fresh on slow links.
+const DOWNLOAD_GROUP: usize = 500;
 /// Extra attempts for one chunk PUT/GET before it counts as failed.
 const CHUNK_RETRIES: u32 = 2;
 /// A remote change that fails this many times is skipped so later changes still apply.
@@ -153,7 +158,7 @@ struct Ctx<'a> {
     device_uuid: &'a str,
     root: PathBuf,
     api: SyncApiClient,
-    store: ChunkStoreClient,
+    store: ChunkStore,
     cache_dir: PathBuf,
     stop: &'a AtomicBool,
 }
@@ -187,20 +192,10 @@ struct ApplyRetry {
 }
 
 fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
-    let secrets = (|| {
-        Ok::<_, String>((
-            crate::secret::decrypt(&cfg.device_token_enc)
-                .map_err(|e| format!("device token: {e}"))?,
-            crate::secret::decrypt(&cfg.chunk_access_key_enc)
-                .map_err(|e| format!("chunk access key: {e}"))?,
-            crate::secret::decrypt(&cfg.chunk_secret_key_enc)
-                .map_err(|e| format!("chunk secret key: {e}"))?,
-        ))
-    })();
-    let (device_token, access_key, secret_key) = match secrets {
+    let device_token = match crate::secret::decrypt(&cfg.device_token_enc) {
         Ok(v) => v,
         Err(err) => {
-            logs::append(&format!("sync: decrypt failed: {err}"));
+            logs::append(&format!("sync: device token decrypt failed: {err}"));
             reporter.failed("Stored credentials could not be read. Pair this computer again.");
             return;
         }
@@ -211,15 +206,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
         device_uuid: &cfg.device_uuid,
         root: PathBuf::from(cfg.watch_folder.trim()),
         api: SyncApiClient::new(&cfg.pair_api_base, &device_token),
-        store: ChunkStoreClient::new(
-            &cfg.chunk_endpoint,
-            &cfg.chunk_region,
-            &cfg.chunk_bucket,
-            &cfg.chunk_prefix,
-            &access_key,
-            &secret_key,
-            cfg.chunk_path_style,
-        ),
+        store: ChunkStore::new(),
         cache_dir: state_path.with_extension("cache"),
         stop: &stop,
     };
@@ -465,6 +452,7 @@ fn push_batch(
     }
 
     // 2. Ask the server which chunks it lacks (deduped across the batch).
+    //    Each missing chunk comes back with a signed PUT URL.
     let mut sources: HashMap<&str, (&Path, &ChunkRef)> = HashMap::new();
     for (c, chunks) in &ready {
         for chunk in &chunks.chunks {
@@ -474,27 +462,27 @@ fn push_batch(
         }
     }
     let hashes: Vec<String> = sources.keys().map(|h| h.to_string()).collect();
-    let mut missing = Vec::new();
+    let mut missing = HashMap::new();
     for group in hashes.chunks(PRESENT_BATCH) {
-        missing.extend(ctx.api.chunks_present(group)?.1);
+        missing.extend(ctx.api.missing_chunks(group)?);
     }
 
     // 3. Upload missing chunks in parallel, reading each slice from disk.
-    let jobs: Vec<(&Path, &ChunkRef)> = missing
+    let jobs: Vec<(&Path, &ChunkRef, &str)> = missing
         .iter()
-        .filter_map(|hash| sources.get(hash.as_str()).copied())
+        .filter_map(|(hash, url)| {
+            let (abs, chunk) = sources.get(hash.as_str())?;
+            Some((*abs, *chunk, url.as_str()))
+        })
         .collect();
-    let uploads = pool::parallel_map(&jobs, TRANSFER_WORKERS, |(abs, chunk)| {
+    let uploads = pool::parallel_map(&jobs, TRANSFER_WORKERS, |(abs, chunk, url)| {
         if ctx.stopping() {
             return Err("stopped".to_string());
         }
-        with_retries(ctx, || {
-            let data = read_chunk(abs, chunk)?;
-            ctx.store.put_chunk(&chunk.sha256_hex, &data)
-        })
+        with_retries(ctx, || ctx.store.put(url, &read_chunk(abs, chunk)?))
     });
     let mut failed: HashSet<&str> = HashSet::new();
-    for ((abs, chunk), result) in jobs.iter().zip(uploads) {
+    for ((abs, chunk, _), result) in jobs.iter().zip(uploads) {
         if let Err(err) = result {
             logs::append(&format!(
                 "sync: upload from {} failed: {err}",
@@ -616,7 +604,7 @@ fn pull_remote_changes(
             page.changes.iter().map(|c| c.payload.size).sum(),
         );
         out.changed = true;
-        let complete = apply_remote_page(ctx, state, &page.changes, reporter, apply_retry);
+        let complete = apply_remote_page(ctx, state, &page.changes, reporter, apply_retry)?;
         if !complete || state.cursor >= page.cursor {
             break;
         }
@@ -632,7 +620,7 @@ fn apply_remote_page(
     changes: &[RemoteChange],
     reporter: &Reporter,
     apply_retry: &mut ApplyRetry,
-) -> bool {
+) -> Result<bool, ApiError> {
     // Only the last change per file in a page matters.
     let mut last_for_file: HashMap<&str, u64> = HashMap::new();
     for change in changes {
@@ -669,15 +657,22 @@ fn apply_remote_page(
     if !needed.is_empty() {
         if let Err(err) = fs::create_dir_all(&ctx.cache_dir) {
             logs::append(&format!("sync: cache dir: {err}"));
-            return false;
+            return Ok(false);
         }
-        let fills = pool::parallel_map(&needed, TRANSFER_WORKERS, |hash| {
+    }
+    for group in needed.chunks(DOWNLOAD_GROUP) {
+        if ctx.stopping() {
+            break;
+        }
+        let hashes: Vec<String> = group.iter().map(|h| h.to_string()).collect();
+        let urls = ctx.api.download_urls(&hashes)?;
+        let fills = pool::parallel_map(group, TRANSFER_WORKERS, |hash| {
             if ctx.stopping() {
                 return Err("stopped".to_string());
             }
-            fill_cache(ctx, hash, reuse.get(*hash))
+            fill_cache(ctx, hash, reuse.get(*hash), urls.get(*hash))
         });
-        for (hash, result) in needed.iter().zip(fills) {
+        for (hash, result) in group.iter().zip(fills) {
             if let Err(err) = result {
                 logs::append(&format!("sync: chunk {hash} fetch failed: {err}"));
             }
@@ -739,7 +734,7 @@ fn apply_remote_page(
     ));
     reporter.activity("Downloaded", &downloaded);
     reporter.activity("Removed", &removed);
-    complete
+    Ok(complete)
 }
 
 /// This device already knows the same or a newer revision of the file.
@@ -775,14 +770,22 @@ fn needs_bytes(ctx: &Ctx, state: &SyncState, change: &RemoteChange) -> bool {
         && !already_local(ctx, state, change)
 }
 
-fn fill_cache(ctx: &Ctx, hash: &str, local: Option<&(PathBuf, ChunkRef)>) -> Result<(), String> {
+fn fill_cache(
+    ctx: &Ctx,
+    hash: &str,
+    local: Option<&(PathBuf, ChunkRef)>,
+    url: Option<&String>,
+) -> Result<(), String> {
     let dest = cache_path(&ctx.cache_dir, hash)?;
     if dest.is_file() {
         return Ok(());
     }
     let data = match local.map(|(abs, chunk)| read_chunk(abs, chunk)) {
         Some(Ok(data)) => data,
-        _ => with_retries(ctx, || ctx.store.get_chunk(hash))?,
+        _ => {
+            let url = url.ok_or("server gave no download URL")?;
+            with_retries(ctx, || ctx.store.get(url, hash))?
+        }
     };
     let tmp = dest.with_extension("part");
     fs::write(&tmp, &data).map_err(|e| format!("cache write: {e}"))?;
@@ -1177,15 +1180,7 @@ mod tests {
                 device_uuid: Box::leak(env(&format!("BST_E2E_{tag}_UUID")).into_boxed_str()),
                 root: root.clone(),
                 api: SyncApiClient::new(&env("BST_E2E_API"), &env(&format!("BST_E2E_{tag}_TOKEN"))),
-                store: ChunkStoreClient::new(
-                    &env("BST_E2E_S3_ENDPOINT"),
-                    "us-east-1",
-                    &env("BST_E2E_S3_BUCKET"),
-                    &env("BST_E2E_S3_PREFIX"),
-                    &env("BST_E2E_S3_ACCESS"),
-                    &env("BST_E2E_S3_SECRET"),
-                    true,
-                ),
+                store: ChunkStore::new(),
                 cache_dir: root.with_extension("cache"),
                 stop: &stop,
             };

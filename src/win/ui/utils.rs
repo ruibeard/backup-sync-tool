@@ -332,7 +332,7 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     stmut(hwnd).sync_status_state = UiSyncState::Syncing as usize;
     logs::append(&format!(
         "Chunk sync started for {} -> {}",
-        cfg.watch_folder, cfg.chunk_endpoint
+        cfg.watch_folder, cfg.destination_label
     ));
     Ok(())
 }

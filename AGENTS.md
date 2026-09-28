@@ -49,11 +49,11 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 - Windows UI is raw Win32 through `windows-rs`; do not add egui, nwg, webview, Electron, or an async runtime.
 - HTTP uses blocking `ureq`; no async runtime or AWS SDK.
 - Config is `backupsynctool.json` next to the exe on Windows and under app support on macOS.
-- Device token / chunk secrets: Windows DPAPI in `src/secret.rs` (entropy `webdavsync-v1`); macOS Keychain via `security … -A` (no Keychain password prompts on ad-hoc rebuilds).
+- Device token: Windows DPAPI in `src/secret.rs` (entropy `webdavsync-v1`); macOS Keychain via `security … -A` (no Keychain password prompts on ad-hoc rebuilds).
 - Sync is the in-process Rust engine (chunk + metadata protocol in `SPEC.md`). Do not reintroduce Syncthing, WebDAV, or a second transfer stack.
 - Tray: closing hides; double-click reopens.
 - Auto-update replaces one tested desktop bundle.
-- Config schema must be v4; older schemas require new pairing.
+- Config schema must be v5; older schemas require new pairing.
 - Every approved device may create, edit, rename, and delete. No `can_delete_files`.
 - Conflicts are last-writer-wins; no `.sync-conflict` copies.
 - Version/tombstone retention is 30 days in Laravel.
@@ -63,10 +63,10 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 
 - Start sync on launch (if configured), after pair approval, and after saving a watch path.
 - Pair start sends `supported_transports: ["chunk_store"]` (plus machine/XD hints).
-- Approval must contain `transport: "chunk_store"`, `device_uuid`, `device_token`, `destination_uuid`, and chunk-store fields (`chunk_endpoint`, `chunk_bucket`, keys, etc.).
-- Desktop validates, stores secrets, atomically saves schema v4, and starts the sync loop.
+- Approval must contain `transport: "chunk_store"`, `device_uuid`, `device_token`, `destination_uuid`, and `destination_label`. It carries no store keys.
+- Desktop validates, protects the token, atomically saves schema v5, and starts the sync loop.
 - Default `pair_api_base` = `https://backup.rui.cam`; editable + persisted. Optional Laravel `control_plane_url` on pair/start → mismatch log if different.
-- Metadata calls use the device token. Chunk PUT/GET use device chunk credentials against the object store only.
+- Metadata calls use the device token. Chunk PUT/GET use signed URLs from `chunks/present` / `chunks/download`, straight to the object store. Never log those URLs.
 - Logs always on under `logs/` next to the exe on Windows and app support on macOS.
 
 ## Sync Errors

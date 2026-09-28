@@ -210,19 +210,9 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     candidate_config.destination_uuid = pair.destination_uuid.clone();
     candidate_config.destination_label = pair.destination_label.clone();
     candidate_config.transport = "chunk_store".into();
-    candidate_config.chunk_endpoint = pair.chunk_endpoint.clone();
-    candidate_config.chunk_region = pair.chunk_region.clone();
-    candidate_config.chunk_bucket = pair.chunk_bucket.clone();
-    candidate_config.chunk_prefix = pair.chunk_prefix.clone();
-    candidate_config.chunk_path_style = pair.chunk_path_style;
     candidate_config.server_approved_at = Some(approval_timestamp_now());
 
-    let candidate_config = match crate::config::save_pairing_candidate(
-        candidate_config,
-        &pair.device_token,
-        &pair.chunk_access_key,
-        &pair.chunk_secret_key,
-    ) {
+    let candidate_config = match crate::config::save_pairing_candidate(candidate_config, &pair.device_token) {
         Ok(config) => config,
         Err(e) => {
             logs::append(&format!("Approved reconnect save failed: {e}"));

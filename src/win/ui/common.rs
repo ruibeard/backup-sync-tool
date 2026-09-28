@@ -650,13 +650,6 @@ struct PairResult {
     device_token: String,
     destination_uuid: String,
     destination_label: String,
-    chunk_endpoint: String,
-    chunk_region: String,
-    chunk_bucket: String,
-    chunk_prefix: String,
-    chunk_access_key: String,
-    chunk_secret_key: String,
-    chunk_path_style: bool,
 }
 
 struct PairStarted {

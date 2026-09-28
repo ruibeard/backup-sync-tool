@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -167,32 +168,18 @@ impl SyncApiClient {
         })
     }
 
-    pub fn chunks_present(
-        &self,
-        hashes: &[String],
-    ) -> Result<(Vec<String>, Vec<String>), ApiError> {
+    /// Chunks the store lacks, each with a signed PUT URL.
+    pub fn missing_chunks(&self, hashes: &[String]) -> Result<HashMap<String, String>, ApiError> {
         let url = format!("{}/api/sync/chunks/present", self.base);
-        let body = json!({ "hashes": hashes }).to_string();
-        let parsed = self.post_json(&url, &body)?;
-        let present = parsed
-            .get("present")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let missing = parsed
-            .get("missing")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok((present, missing))
+        let parsed = self.post_json(&url, &json!({ "hashes": hashes }).to_string())?;
+        signed_urls(&parsed, "upload_urls")
+    }
+
+    /// Signed GET URLs for chunks to download.
+    pub fn download_urls(&self, hashes: &[String]) -> Result<HashMap<String, String>, ApiError> {
+        let url = format!("{}/api/sync/chunks/download", self.base);
+        let parsed = self.post_json(&url, &json!({ "hashes": hashes }).to_string())?;
+        signed_urls(&parsed, "urls")
     }
 
     /// Commit files in order. Each entry is that item's result or its error.
@@ -275,6 +262,20 @@ fn parse_commit_result(value: &serde_json::Value, path: &str) -> Result<CommitRe
     })
 }
 
+fn signed_urls(
+    parsed: &serde_json::Value,
+    field: &str,
+) -> Result<HashMap<String, String>, ApiError> {
+    let urls = parsed
+        .get(field)
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| ApiError::Other(format!("response without {field}")))?;
+    Ok(urls
+        .iter()
+        .filter_map(|(hash, url)| Some((hash.clone(), url.as_str()?.to_string())))
+        .collect())
+}
+
 fn parse_payload(value: serde_json::Value) -> ChangePayload {
     serde_json::from_value(value).unwrap_or_default()
 }
@@ -325,6 +326,16 @@ mod tests {
         assert_eq!(payload.content_sha256.as_deref(), Some("aa"));
         assert_eq!(payload.chunk_hashes, vec!["bb".to_string()]);
         assert_eq!(payload.updated_by_device_uuid.as_deref(), Some("dev-1"));
+    }
+
+    #[test]
+    fn signed_urls_need_the_field_and_map_hashes() {
+        let body = serde_json::json!({ "upload_urls": { "aa": "https://s/aa?sig", "bb": 1 } });
+        let urls = signed_urls(&body, "upload_urls").unwrap();
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls["aa"], "https://s/aa?sig");
+        // Old servers without signed URLs must fail loudly, not upload nothing.
+        assert!(signed_urls(&serde_json::json!({ "missing": [] }), "upload_urls").is_err());
     }
 
     #[test]

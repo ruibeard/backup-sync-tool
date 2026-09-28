@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Two-device live sync proof, no Docker:
 #   rclone S3 server (local dir) + Laravel on a scratch SQLite DB + desktop engine test.
+#   Devices get signed chunk URLs from Laravel; only Laravel knows the S3 key.
 # Needs: rclone, php, jq, cargo, and box-rui-cam next to this repo (or LARAVEL_ROOT).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -79,9 +80,6 @@ B=$(pair B)
 export BST_E2E_API="$API"
 export BST_E2E_A_TOKEN=$(jq -r .device_token <<<"$A") BST_E2E_A_UUID=$(jq -r .device_uuid <<<"$A")
 export BST_E2E_B_TOKEN=$(jq -r .device_token <<<"$B") BST_E2E_B_UUID=$(jq -r .device_uuid <<<"$B")
-export BST_E2E_S3_ENDPOINT=$(jq -r .chunk_endpoint <<<"$A") BST_E2E_S3_BUCKET=$(jq -r .chunk_bucket <<<"$A")
-export BST_E2E_S3_PREFIX=$(jq -r .chunk_prefix <<<"$A")
-export BST_E2E_S3_ACCESS=$(jq -r .chunk_access_key <<<"$A") BST_E2E_S3_SECRET=$(jq -r .chunk_secret_key <<<"$A")
 
 cd "$ROOT"
 if ! cargo test -q two_device_sync_e2e -- --ignored --nocapture; then

@@ -1162,9 +1162,6 @@ fn server_tooltip_text(cfg: &Config) -> String {
         format!("Control plane: {control}"),
         format!("Destination: {folder}"),
     ];
-    if !cfg.chunk_endpoint.trim().is_empty() {
-        lines.push(format!("Chunk store: {}", cfg.chunk_endpoint.trim()));
-    }
     if let Some(approved_at) = cfg.server_approved_at.as_deref().and_then(non_empty_str) {
         lines.push(format!("Approved: {approved_at}"));
     }

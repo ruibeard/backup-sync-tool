@@ -1,4 +1,4 @@
-# Backup Sync Tool — Technical Spec v4
+# Backup Sync Tool — Technical Spec v5
 
 **Architecture: live sync** — a small self-hosted Dropbox built from a metadata plane (Laravel) and a chunk plane (object store).
 
@@ -29,9 +29,9 @@ Branches: `main` (both repos) is the legacy WebDAV production build and stays un
 | UI | Raw Win32 through `windows-rs` | Native menu bar app; `--daemon` for LaunchAgent |
 | Sync engine | In-process Rust sync engine (this repo) | same |
 | HTTP | Blocking `ureq` | same |
-| Desktop secrets | Device token + chunk-store secret in DPAPI | Keychain (`cam.rui.backupsynctool`) |
+| Desktop secrets | Device token in DPAPI (no store keys) | Keychain (`cam.rui.backupsynctool`) |
 | Control / metadata | Laravel at editable `pair_api_base` | same |
-| Chunk bytes | Object store endpoint from approval payload | same |
+| Chunk bytes | Signed URLs from Laravel, straight to the object store | same |
 
 There is no bundled Syncthing, no WebDAV client, no Electron/webview/egui/nwg, no async runtime, and no AWS SDK. XD licence detection remains Windows-only.
 
@@ -43,14 +43,14 @@ There is no bundled Syncthing, no WebDAV client, no Electron/webview/egui/nwg, n
 | Object store | Opaque content-addressed chunk bytes only |
 | Desktop | Watch selected folder, chunk/hash, upload/download missing chunks, apply last-writer-wins updates, report status |
 
-`pair_api_base` is Laravel only. The object-store endpoint in the approval payload is never confused with the control-plane URL. Desktop never chooses or exposes the storage vendor; Laravel’s `BACKUP_STORAGE_DRIVER` decides.
+`pair_api_base` is Laravel only. Desktop never chooses or exposes the storage vendor; Laravel’s `BACKUP_STORAGE_DRIVER` decides.
 
 ```text
-[Win/Mac app] --pair / sync metadata / cursor--> [Laravel]
-       |                                              |
-       | put/get chunks (device-scoped key)           | provision bucket/prefix + keys
-       v                                              v
-                    [Object store driver]
+[Win/Mac app] --pair / sync metadata / signed chunk URLs--> [Laravel]
+       |                                                        |
+       | PUT/GET chunks with signed URLs (no device key)        | one store key: buckets, signing, shelf
+       v                                                        v
+                         [Object store driver]
 ```
 
 ## Data model
@@ -88,30 +88,25 @@ Renames update path metadata for the same `file_id`. Deletes set a tombstone and
 ### Destinations and devices
 
 - One `BackupDestination` (customer) owns one object-store prefix/bucket assignment.
-- Each approved device receives a distinct device UUID, device token (control/metadata auth), and chunk-store credentials scoped to that destination.
-- Revoke: mark device revoked, invalidate device token, delete/disable that device’s chunk-store key. Do not delete customer files or other devices’ keys.
-- Re-pair of the same machine creates a new device row/token/key and revokes the previous active row for that machine when policy says so.
+- Each approved device receives a distinct device UUID and device token. It gets no object-store key.
+- Laravel keeps one store key per install. It signs short-lived (1 h) chunk PUT/GET URLs, scoped to the destination prefix, for a valid device token.
+- Revoke: mark the device revoked. Its token then gets `401`, so it gets no more chunk URLs. URLs already signed expire within 1 h. Do not delete customer files.
+- Re-pair of the same machine creates a new device row/token and revokes the previous active row for that machine.
 
 ## Configuration
 
-Only `schema_version: 4` is accepted as paired. Any v3 Syncthing, v2 S3, WebDAV, or older config may keep watch folder / `pair_api_base` hints but requires fresh pairing.
+Only `schema_version: 5` is accepted as paired. Any v4 (store keys on the device), v3 Syncthing, v2 S3, WebDAV, or older config may keep watch folder / `pair_api_base` hints but requires fresh pairing.
 
 ```json
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "pair_api_base": "https://backup.rui.cam",
   "watch_folder": "C:\\XDSoftware\\backups",
   "device_token_enc": "DPAPI-or-keychain-handle",
   "device_uuid": "desktop-uuid",
   "destination_uuid": "customer-destination-uuid",
   "transport": "chunk_store",
-  "chunk_endpoint": "https://s3.example",
-  "chunk_region": "garage",
-  "chunk_bucket": "backup-…",
-  "chunk_prefix": "dest/…/",
-  "chunk_access_key_enc": "…",
-  "chunk_secret_key_enc": "…",
-  "chunk_path_style": true,
+  "destination_label": "XDPT.59655-Palmeira-Minimercado",
   "server_approved_at": "1784050000",
   "start_with_windows": true,
   "auto_update": true
@@ -126,7 +121,7 @@ Paths:
 | Local sync DB | `%LOCALAPPDATA%\BackupSyncTool\sync\` | `~/Library/Application Support/BackupSyncTool/sync/` |
 | Logs | `logs\` beside executable | `~/Library/Application Support/BackupSyncTool/logs` |
 
-On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt for a Keychain password. On Windows, DPAPI uses the established application entropy (`webdavsync-v1`). Never log device tokens or chunk-store secrets.
+On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt for a Keychain password. On Windows, DPAPI uses the established application entropy (`webdavsync-v1`). Never log device tokens or signed chunk URLs.
 
 ## Pairing contract
 
@@ -150,7 +145,7 @@ On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt
 
 Response includes `code`, `approve_url` (QR target), `poll_token`, `poll_interval_ms`, and `control_plane_url` (`APP_URL`, no trailing slash). Desktop logs `control_plane_url mismatch` if it disagrees with configured `pair_api_base`.
 
-Admin approval selects/creates a `BackupDestination`, provisions chunk-store access for the new device, then returns once via poll:
+Admin approval selects/creates a `BackupDestination` and the device, then returns once via poll:
 
 ```json
 {
@@ -159,18 +154,11 @@ Admin approval selects/creates a `BackupDestination`, provisions chunk-store acc
   "device_uuid": "desktop-uuid",
   "device_token": "one-time-device-token",
   "destination_uuid": "customer-destination-uuid",
-  "destination_label": "XDPT.59655-Palmeira-Minimercado",
-  "chunk_endpoint": "https://s3.example",
-  "chunk_region": "garage",
-  "chunk_bucket": "backup-…",
-  "chunk_prefix": "dest/…/",
-  "chunk_access_key": "…",
-  "chunk_secret_key": "…",
-  "chunk_path_style": true
+  "destination_label": "XDPT.59655-Palmeira-Minimercado"
 }
 ```
 
-Client rejects any transport other than `chunk_store`, missing fields, or invalid URLs. It stores secrets, atomically writes schema v4, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel retains chunk access-key ids for revoke and must not keep chunk secrets after handoff.
+Client rejects any transport other than `chunk_store` or missing fields. It protects the device token, atomically writes schema v5, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel keeps only the token hash.
 
 Default `pair_api_base` = `https://backup.rui.cam` (editable + persisted: Windows **CONTROL PLANE URL** on blur + pair; macOS tray **Control plane URL…**).
 
@@ -186,12 +174,13 @@ Minimum surface (names may be refined in Laravel; behavior is normative):
 | `GET /api/sync/changes?since=` | Metadata changes since cursor (upserts, renames, tombstones) |
 | `POST /api/sync/commit` | Propose file revision: path, `file_id`, chunk hash list, size, content hash, client mtime, base revision |
 | `POST /api/sync/commit/batch` | Up to 200 commits in order; `results[i]` is item `i`'s commit or `{error}` (one bad item does not stop the rest) |
-| `POST /api/sync/chunks/present` | Ask which chunk hashes the store already has |
+| `POST /api/sync/chunks/present` | Up to 2000 hashes → `present`, `missing`, and `upload_urls` (hash → signed PUT URL for each missing chunk) |
+| `POST /api/sync/chunks/download` | Up to 2000 hashes → `urls` (hash → signed GET URL) |
 | `POST /api/sync/restore` (admin/desktop optional) | Materialize a historical revision as the new live tip (LWW commit) |
 
 Sync routes are rate-limited per device (`throttle:sync`, 600/min), not per IP: behind the Cloudflare tunnel many devices can share one IP.
 
-Chunk bytes go **only** to the object store with the device chunk credentials (PUT/GET). Laravel may use a scanner/admin key to verify presence and serve the shelf; it does not proxy bulk desktop transfers.
+Chunk bytes go **only** to the object store, through the signed URLs (SigV4 query auth, `UNSIGNED-PAYLOAD`, 1 h). Laravel does not proxy bulk desktop transfers, so bytes never pass through PHP or Cloudflare. The desktop checks every downloaded chunk against its SHA-256. Both responses carry `expires_in`.
 
 ### Desktop sync loop
 
@@ -199,8 +188,8 @@ On launch (if paired), after approval, and after watch-path save:
 
 1. Ensure local sync DB exists.
 2. Scan / watch the selected folder. FS events wake the loop at once (after a 0.5 s settle); otherwise it polls `sync/cursor` every 4 s.
-3. Push local changes in batches (≤200 files, ~256 MB): stream-chunk files (never read whole into memory) → one `chunks/present` → upload missing chunks with 8 parallel workers → one `sync/commit/batch`. Local deletes go in `commit/batch` too.
-4. When the server cursor is ahead, pull `sync/changes` pages: fetch the needed chunks in parallel into a local cache (reusing matching chunks from the old local copy), then apply changes in cursor order. Only the last change per file in a page is applied.
+3. Push local changes in batches (≤200 files, ~256 MB): stream-chunk files (never read whole into memory) → one `chunks/present` (returns PUT URLs) → upload missing chunks with 8 parallel workers → one `sync/commit/batch`. Local deletes go in `commit/batch` too.
+4. When the server cursor is ahead, pull `sync/changes` pages: get GET URLs from `chunks/download` in groups of 500 just before use, fetch the chunks in parallel into a local cache (reusing matching chunks from the old local copy), then apply changes in cursor order. Only the last change per file in a page is applied. An expired URL fails like any transfer error; the next loop signs fresh ones.
 5. Only the pull advances the local cursor (a commit's cursor can jump past another device's change). A failing remote change is retried 3 times, then skipped. Chunk PUT/GET retry transient store errors in place.
 6. Skip unchanged files by size + nanosecond mtime (whole seconds miss same-size edits made right after a sync).
 7. Report status and activity through `AppCommand::EngineStatus` / `Activity`; auth failure sends `EngineFailed` (pair again). Offline is not credential failure.
@@ -219,16 +208,16 @@ All approved devices may create, edit, rename, and delete. There is no `can_dele
 
 ## Storage drivers
 
-Laravel binds a `DeviceStorageProvisioner`:
+Laravel's `StorageProvisioner` creates destinations; `ChunkUrlSigner` signs chunk URLs with the driver's one key:
 
 | Driver | Role |
 | --- | --- |
-| `spaces` | Launch driver. One bucket per customer; DigitalOcean API mints/deletes a per-bucket key per device |
-| `garage` | Self-hosted S3-compatible; Admin API creates bucket/key/allow/delete |
-| `minio` | Local dev/e2e harness only (shared root key). Not for production: MinIO community edition is in maintenance mode |
+| `spaces` | Launch driver. One bucket per customer; `SPACES_KEY` creates buckets, signs URLs and reads the shelf. No per-device keys, so the 200-key account limit does not apply |
+| `garage` | Self-hosted S3-compatible; Admin API creates the bucket; the scanner key signs URLs |
+| `minio` | Local dev/e2e harness only (root key). Not for production: MinIO community edition is in maintenance mode |
 | `b2` | Not wired. Candidate managed driver if Spaces cost grows |
 
-Desktop speaks a single chunk-store profile from approval. Adding a vendor is a Laravel provisioner change, not a desktop settings change.
+Desktop only follows signed URLs. Adding a vendor is a Laravel change, not a desktop change.
 
 Tests may use local MinIO/Garage fixtures or fakes; the wire contract stays the same.
 
@@ -236,10 +225,10 @@ Tests may use local MinIO/Garage fixtures or fakes; the wire contract stays the 
 
 | Option | Verdict |
 | --- | --- |
-| DigitalOcean Spaces | **Launch.** Driver exists. $5/mo incl. 250 GiB + 1 TB egress, then ~$20/TB. Limits: 100 buckets, 200 keys per account (ask support to raise; presigned URLs remove the key limit) |
+| DigitalOcean Spaces | **Launch.** Driver exists. $5/mo incl. 250 GiB + 1 TB egress, then ~$20/TB. Limit: 100 buckets per account (ask support to raise). The 200-key limit does not apply: devices get signed URLs |
 | Backblaze B2 | Cheaper managed option (~$6.95/TB) if data grows. Needs a driver |
 | Own Hetzner dedicated server + ZFS + Garage | Cheapest per TB above ~15–20 TB; operator maintains disks/OS and a second copy |
-| Hetzner Object Storage | Rejected for now: no API to mint keys, 100-bucket cap, 64 KB minimum billable object, ~100 ms small-object latency and NBG1 throttling incidents in 2026 |
+| Hetzner Object Storage | Rejected for now: 100-bucket cap, 64 KB minimum billable object, ~100 ms small-object latency and NBG1 throttling incidents in 2026 |
 | Hetzner Storage Box | Not a primary store (SFTP/WebDAV, 10 connections per box). Fine as an off-site copy |
 | Proxying bytes through Laravel | Rejected: PHP workers and Cloudflare Tunnel become the bottleneck; Cloudflare Free/Pro caps request bodies at 100 MB |
 
@@ -272,29 +261,29 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 | Path | Scope |
 | --- | --- |
-| `src/sync/` | Shared sync engine: chunker, chunk store client, metadata API client, local state, FS watcher |
+| `src/sync/` | Shared sync engine: chunker, signed-URL chunk transfers, metadata API client, local state, FS watcher |
 | `src/pairing.rs`, `src/config.rs`, `src/secret.rs`, `src/updater.rs`, `src/app.rs`, `src/paths.rs`, `src/logs.rs` | Shared core |
 | `src/win/` | Windows shell: Win32 UI (`ui.rs` + `ui/` shards), tray, XD licence detection |
 | `src/macos/` | macOS shell: menubar, status window, LaunchAgent daemon, `host.rs` sync host |
 
-## Implementation status (2026-09-28)
+## Implementation status (2026-09-29)
 
 ### Done
 
-- Laravel (`box-rui-cam` `live-sync`): `chunk_store` pairing + provisioner (fake, Garage, Spaces, MinIO), sync APIs (cursor / changes / chunks/present / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
-- Desktop: schema v4 pairing (Win + Mac), in-process sync engine with SigV4 PUT/GET, FastCDC chunking, FS watcher with mtime/size skip.
+- Laravel (`box-rui-cam` `live-sync`): `chunk_store` pairing + provisioner (fake, Garage, Spaces, MinIO), sync APIs (cursor / changes / chunks/present / chunks/download / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
+- Desktop: schema v5 pairing (Win + Mac), in-process sync engine, FastCDC chunking, FS watcher with mtime/size skip.
 - Engine speed: batched `chunks/present` + `commit/batch`, 8 parallel chunk transfers, streamed chunking, local chunk reuse on download, 4 s cursor poll, status and activity sent to both UIs.
-- Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`). 262 files + 9 MiB seed in ~1.9 s (release build, single-threaded PHP dev server).
-- Local MinIO e2e: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh`.
+- Signed chunk URLs (schema v5): devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
+- Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`); the desktop gets no S3 key. 262 files + 9 MiB seed in ~3.2 s (debug build, single-threaded PHP dev server).
+- Local MinIO e2e: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh` (Laravel signs, test PUTs/GETs through the URLs).
 - Cleanup: Syncthing/WebDAV leftovers, the no-op installation repair feature and dead code removed; Windows code moved to `src/win/`.
 
 ### Roadmap (in order)
 
-1. **Presigned chunk URLs.** Laravel keeps one store key and signs short-lived PUT/GET URLs scoped to the destination prefix (`chunks/present` returns PUT URLs for missing chunks; a batch endpoint returns GET URLs). Desktop drops chunk credentials (schema v5). Revoke = disable device token. Bytes never pass through Laravel or Cloudflare.
-2. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator).
-3. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
-4. CI job for `dev/e2e/two-device-sync.sh`; then drop the Docker MinIO harness.
-5. Re-pair catch-up: a fresh device replays the whole change log page by page. Add a server snapshot of live tips if large destinations make that slow.
+1. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). `SpacesClient::createBucket` uses the AWS SDK, which `composer.json` does not require (it is only in the local `vendor/`); sign CreateBucket like `MinioBucketClient` or add the package.
+2. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
+3. CI job for `dev/e2e/two-device-sync.sh`; then drop the Docker MinIO harness.
+4. Re-pair catch-up: a fresh device replays the whole change log page by page. Add a server snapshot of live tips if large destinations make that slow.
 
 ## Out of scope
 

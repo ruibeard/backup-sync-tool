@@ -2,9 +2,9 @@
 
 Native Windows and macOS clients for a small self-hosted Dropbox: live two-way folder sync with QR pairing, per-device credentials, revoke, and a Laravel admin shelf.
 
-Laravel is the control and metadata plane (pairing, file revisions, 30-day history, browse/health). File bytes are content-addressed chunks in an S3-compatible object store. The desktop never picks the storage vendor. Conflicts are last-writer-wins.
+Laravel is the control and metadata plane (pairing, file revisions, 30-day history, browse/health). File bytes are content-addressed chunks in an S3-compatible object store. Desktops hold no store keys: Laravel signs short-lived chunk URLs. The desktop never picks the storage vendor. Conflicts are last-writer-wins.
 
-Technical contract: [SPEC.md](SPEC.md) (schema v4, roadmap and status).
+Technical contract: [SPEC.md](SPEC.md) (schema v5, roadmap and status).
 
 ## Operator smoke
 
@@ -35,7 +35,7 @@ Two-device sync test (needs `rclone`, `php`, `jq` and `../box-rui-cam`; no Docke
 
 | Platform | UI | Protected secrets |
 | --- | --- | --- |
-| Windows 7–11 | Native Win32 tray app | Device token + chunk keys via DPAPI |
-| macOS | Native menu bar app / daemon | Device token + chunk keys via Keychain |
+| Windows 7–11 | Native Win32 tray app | Device token via DPAPI |
+| macOS | Native menu bar app / daemon | Device token via Keychain |
 
-Configuration schema is v4. Older configs require fresh pairing.
+Configuration schema is v5. Older configs require fresh pairing.

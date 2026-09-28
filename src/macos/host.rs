@@ -134,8 +134,8 @@ impl SyncHost {
         self.reconnect_required.store(false, Ordering::Relaxed);
         self.engine = Some(engine);
         logs::append(&format!(
-            "Chunk sync started: destination={} endpoint={}",
-            self.config.destination_uuid, self.config.chunk_endpoint
+            "Chunk sync started: destination={}",
+            self.config.destination_uuid
         ));
         Ok(())
     }
@@ -203,10 +203,6 @@ impl SyncHost {
         let device_uuid = required_field(status.device_uuid, "device UUID")?;
         let destination_uuid = required_field(status.destination_uuid, "destination UUID")?;
         let destination_label = required_field(status.destination_label, "destination label")?;
-        let chunk_endpoint = required_field(status.chunk_endpoint, "chunk endpoint")?;
-        let chunk_bucket = required_field(status.chunk_bucket, "chunk bucket")?;
-        let chunk_access_key = required_field(status.chunk_access_key, "chunk access key")?;
-        let chunk_secret_key = required_field(status.chunk_secret_key, "chunk secret key")?;
 
         let mut candidate = self.config.clone();
         candidate.schema_version = config::CONFIG_SCHEMA_VERSION;
@@ -214,18 +210,8 @@ impl SyncHost {
         candidate.destination_uuid = destination_uuid;
         candidate.destination_label = destination_label.clone();
         candidate.transport = "chunk_store".into();
-        candidate.chunk_endpoint = chunk_endpoint;
-        candidate.chunk_region = status.chunk_region.unwrap_or_else(|| "garage".into());
-        candidate.chunk_bucket = chunk_bucket;
-        candidate.chunk_prefix = status.chunk_prefix.unwrap_or_default();
-        candidate.chunk_path_style = status.chunk_path_style.unwrap_or(true);
         candidate.server_approved_at = Some(approval_timestamp_now());
-        candidate = config::save_pairing_candidate(
-            candidate,
-            &device_token,
-            &chunk_access_key,
-            &chunk_secret_key,
-        )?;
+        candidate = config::save_pairing_candidate(candidate, &device_token)?;
         self.config = candidate;
         self.engine = None;
         self.reconnect_required.store(false, Ordering::Relaxed);

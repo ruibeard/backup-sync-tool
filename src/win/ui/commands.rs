@@ -362,49 +362,12 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     Ok(value) => value,
                                     Err(err) => break Err(err),
                                 };
-                                let chunk_endpoint = match required_pair_field(
-                                    status.chunk_endpoint,
-                                    "chunk endpoint",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
-                                let chunk_bucket = match required_pair_field(
-                                    status.chunk_bucket,
-                                    "chunk bucket",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
-                                let chunk_access_key = match required_pair_field(
-                                    status.chunk_access_key,
-                                    "chunk access key",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
-                                let chunk_secret_key = match required_pair_field(
-                                    status.chunk_secret_key,
-                                    "chunk secret key",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
                                 let pair = PairResult {
                                     pair_id,
                                     device_uuid,
                                     device_token,
                                     destination_uuid,
                                     destination_label,
-                                    chunk_endpoint,
-                                    chunk_region: status
-                                        .chunk_region
-                                        .unwrap_or_else(|| "garage".into()),
-                                    chunk_bucket,
-                                    chunk_prefix: status.chunk_prefix.unwrap_or_default(),
-                                    chunk_access_key,
-                                    chunk_secret_key,
-                                    chunk_path_style: status.chunk_path_style.unwrap_or(true),
                                 };
                                 break Ok(pair);
                             }
