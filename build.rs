@@ -1,6 +1,11 @@
-// build.rs — embed app icons and manifest into the .exe
+// build.rs — embed app icons and manifest into the .exe (Windows only)
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
+    #[cfg(windows)]
+    {
+        if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "windows" {
+            return;
+        }
+
         println!("cargo:rerun-if-changed=assets");
 
         let mut res = winres::WindowsResource::new();

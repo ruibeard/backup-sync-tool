@@ -1,64 +1,35 @@
 # Backup Sync Tool
 
-Native Windows tray app that backs up one local folder to WebDAV. Pairing via a Laravel admin app supplies credentials; uploads go direct to WebDAV (no proxy).
+Native Windows and macOS clients for a small self-hosted Dropbox: live two-way folder sync with QR pairing, per-device credentials, revoke, and a Laravel admin shelf.
 
-## Screenshots
+Laravel is the control and metadata plane (pairing, file revisions, 30-day history, browse/health). File bytes are content-addressed chunks in an S3-compatible object store. The desktop never picks the storage vendor. Conflicts are last-writer-wins.
 
-![Backup Sync Tool main window](assets/readme/main-window.png)
+Technical contract: [SPEC.md](SPEC.md) (schema v4, roadmap and status).
 
-![Server pairing QR code](assets/readme/pairing-qr.png)
+## Operator smoke
 
-## Features
+1. Set Laravel `APP_URL` to the public control-plane URL.
+2. Windows: `.\build-windows.ps1`, set **CONTROL PLANE URL** to that `APP_URL`, select the folder, pair, approve, confirm two-way sync.
+3. macOS: `./build-macos.sh`, set tray **Control plane URL…** to the same `APP_URL`, pair, approve, confirm sync.
+4. Confirm the Laravel shelf sees files; revoke a device and confirm it can no longer sync.
+5. A `control_plane_url mismatch` log means the desktop URL and Laravel `APP_URL` disagree.
 
-- System tray — close hides; double-click restores
-- Recursive folder watch + debounced uploads
-- Parallel uploads (`parallel_uploads`, default 10)
-- First-run baseline upload when no local manifest
-- Optional download-from-server (`sync_remote_changes`)
-- Admin pairing (QR/code) — server owns destination folder
-- DPAPI-encrypted password + device token
-- Recent Activity + sync footer progress
-- GitHub auto-update, enabled by default
+## Build
 
-## Requirements
-
-- Windows 7 SP1 x64 or newer
-- WebDAV server + [pairing API](SPEC.md#pairing-api) (default base `https://box.rui.cam`)
-
-## Install
-
-Download `backupsynctool.exe` from [Releases](https://github.com/ruibeard/backup-sync-tool/releases/latest). Place `backupsynctool.json` next to the exe.
-
-## Use
-
-1. Set **backup folder** (or use detected `C:\XDSoftware\backups` when present; otherwise the app prompts after pairing).
-2. **Pair** — scan QR / enter code; admin approves customer folder on server.
-3. Sync starts automatically after pairing (no Save button).
-4. **Reconnect** if WebDAV returns HTTP 401.
-
-Settings auto-save on folder choose and checkbox changes. Auto-update is enabled by default and can be turned off from the bottom bar.
-
-## Build (developers)
-
-```powershell
-.\build-local.ps1
+```bash
+./build-macos.sh              # .app + launch
+./build-macos.sh --package    # updater archive
+./release.sh                  # requires the Windows distribution first
 ```
 
-`build-local.ps1` builds the single Windows 7 SP1 x64 through Windows 11-compatible `backupsynctool.exe`.
+```powershell
+.\build-windows.ps1
+.\build-windows.ps1 -NoLaunch
+```
 
-Public release: `.\release.ps1` (builds the same compatible exe, bumps version, tags `vX.Y.Z`, pushes).
+| Platform | UI | Protected secrets |
+| --- | --- | --- |
+| Windows 7–11 | Native Win32 tray app | Device token + chunk keys via DPAPI |
+| macOS | Native menu bar app / daemon | Device token + chunk keys via Keychain |
 
-Details: [SPEC.md](SPEC.md) · Agent rules: [AGENTS.md](AGENTS.md) (LLM/Cursor only)
-
-## Repo layout
-
-| Path | Role |
-| --- | --- |
-| `src/` | Rust app (Win32 UI, sync, WebDAV, pairing) |
-| `license-inspector/` | Optional XD licence diagnostic helper |
-| `mockups.html` | UI layout reference |
-| `build-local.ps1` / `release.ps1` | Build & release scripts |
-
-## Security note
-
-Desktop folder lock prevents accidental wrong-customer uploads. Hard tenant isolation needs server-scoped WebDAV credentials per customer ([SPEC.md](SPEC.md#security)).
+Configuration schema is v4. Older configs require fresh pairing.

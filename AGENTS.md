@@ -1,69 +1,94 @@
 # Agent Instructions
 
-`SPEC.md` is the technical spec. `README.md` is the GitHub-facing summary. Do not add separate feature/spec markdown for implemented behavior; update `SPEC.md` instead.
+Docs: `SPEC.md` = technical contract + platform checklists. `README.md` = short GitHub summary. **Do not add more markdown** for product/behavior — edit `SPEC.md`. Leave `proxmox/` and `license-inspector/` alone (unrelated tooling).
+
+Status and roadmap: `SPEC.md` → **Implementation status**. Work happens on branch `live-sync`; `main` is the legacy WebDAV production build — do not touch it.
+
+## Architecture (live sync)
+
+Small self-hosted Dropbox: Laravel owns pairing + sync metadata + 30-day history + file shelf. Desktop owns the Rust sync engine. Chunk bytes live in an S3-compatible object store behind a Laravel storage driver. Last-writer-wins.
+
+| System | Where |
+| --- | --- |
+| Control + metadata | Laravel — public `APP_URL`. Desktop `pair_api_base` must match (default `https://backup.rui.cam`; editable + persisted) |
+| Sync app | this repo — shared core + `src/sync/` engine; Windows shell in `src/win/`, macOS shell in `src/macos/` |
+| Chunk store | Object store via `BACKUP_STORAGE_DRIVER` (`spaces` for launch; `garage` self-hosted later; `minio` local tests only) |
+
+Desktop does not choose or expose the storage vendor. Approval returns `transport: "chunk_store"` plus device token and chunk credentials.
+
+**Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy.
+
+## YOU DO — operator smoke
+
+After builds, operator (not agent) smokes Control plane URL:
+
+1. Laravel `APP_URL` = public control-plane base.
+2. Windows: `.\build-windows.ps1` → **CONTROL PLANE URL** = that `APP_URL` → pair → two-way sync against chunk store.
+3. Mac: `./build-macos.sh` → tray **Control plane URL…** → same → pair → two-way sync.
+4. Confirm Laravel shelf sees files; revoke one device; fix any `control_plane_url mismatch` in logs.
+
+Win7, current Windows, and macOS smoke must cover initial convergence, edits, renames, offline changes, deletion propagation, and last-writer-wins under concurrent edit (30-day history retains loser).
 
 ## Build & Launch Rules
 
-After every code change:
+After **every** code change that affects the running app, rebuild. Do not leave a stale binary.
 
-```powershell
-.\build-local.ps1
-```
+Three scripts only:
 
-Always run these commands from the repo root. Never launch from `target/debug` or `target/release`; the app expects `backupsynctool.json` next to the root exe.
+| Script | Use |
+| --- | --- |
+| `./build-macos.sh` | Mac: build + launch `.app` (`--package` / `--install` / `--no-launch` / `--identity=…`) |
+| `.\build-windows.ps1` | Win7 desktop → `dist\windows\` (`-NoLaunch` to skip run) |
+| `./release.sh` | Mac: needs Windows bundle already staged → bump + mac package + tag + GitHub |
 
-Always confirm:
-
-- release build succeeded with 0 errors
-- root `backupsynctool.exe` was copied
-- app is running from the repo root
+Never launch from `target/debug` or `target/release`. Confirm: 0 errors · process running (or staged with no-launch).
 
 ## Project Rules
 
 - Rust app lives in the repo root.
-- UI is raw Win32 through `windows-rs`; do not add egui, nwg, webview, Electron, or an async runtime.
-- HTTP/WebDAV uses blocking `ureq`.
-- Config is `backupsynctool.json` next to the exe.
-- Password and device token are encrypted with Windows DPAPI in `src/secret.rs`.
-- Tray behavior: closing hides to tray, double-click reopens.
-- Auto-update checks GitHub releases directly and replaces the exe in place.
-- `target/` is ignored and should not be committed.
+- Windows UI is raw Win32 through `windows-rs`; do not add egui, nwg, webview, Electron, or an async runtime.
+- HTTP uses blocking `ureq`; no async runtime or AWS SDK.
+- Config is `backupsynctool.json` next to the exe on Windows and under app support on macOS.
+- Device token / chunk secrets: Windows DPAPI in `src/secret.rs` (entropy `webdavsync-v1`); macOS Keychain via `security … -A` (no Keychain password prompts on ad-hoc rebuilds).
+- Sync is the in-process Rust engine (chunk + metadata protocol in `SPEC.md`). Do not reintroduce Syncthing, WebDAV, or a second transfer stack.
+- Tray: closing hides; double-click reopens.
+- Auto-update replaces one tested desktop bundle.
+- Config schema must be v4; older schemas require new pairing.
+- Every approved device may create, edit, rename, and delete. No `can_delete_files`.
+- Conflicts are last-writer-wins; no `.sync-conflict` copies.
+- Version/tombstone retention is 30 days in Laravel.
+- `target/` is ignored; do not commit.
 
 ## Sync And Pairing (must match SPEC.md)
 
-- **Start sync** via `restart_sync_engine()` in `src/ui/utils.rs` — on app launch (if configured), after successful pairing (`on_app_pair_result`), and on Save (`do_save`). Pairing must not end at config save without starting the engine.
-- **First backup:** no local `.backupsynctool-manifest.json` + `sync_remote_changes` false → startup uploads every file in `watch_folder`.
-- **Local manifest** (`{watch_folder}/.backupsynctool-manifest.json`): last successful upload per path only; updated in `upload_path` after PUT succeeds.
-- **Remote manifest:** written from `PROPFIND` (`save_remote_manifest_from_server`), never from a full local scan.
-- **Upload skip** (when local manifest exists): local unchanged since last success **and** file present on server with matching size (`remote_file_states`).
-- **Logs:** always on; daily files under `logs/` next to the exe (`src/logs.rs`).
+- Start sync on launch (if configured), after pair approval, and after saving a watch path.
+- Pair start sends `supported_transports: ["chunk_store"]` (plus machine/XD hints).
+- Approval must contain `transport: "chunk_store"`, `device_uuid`, `device_token`, `destination_uuid`, and chunk-store fields (`chunk_endpoint`, `chunk_bucket`, keys, etc.).
+- Desktop validates, stores secrets, atomically saves schema v4, and starts the sync loop.
+- Default `pair_api_base` = `https://backup.rui.cam`; editable + persisted. Optional Laravel `control_plane_url` on pair/start → mismatch log if different.
+- Metadata calls use the device token. Chunk PUT/GET use device chunk credentials against the object store only.
+- Logs always on under `logs/` next to the exe on Windows and app support on macOS.
 
-## WebDAV Errors
+## Sync Errors
 
-- Only **HTTP 401** → `WebDavError::AuthFailed` → pause sync + pair-again UI.
-- **HTTP 403** on `MKCOL` → treat as folder exists (403/405); continue to PUT.
-- Do not show “Credentials Invalid” for Storage Box folder-create 403s.
+- Malformed approval, storage auth failure after revoke, or rejected commits must show a visible reconnect/error state.
+- Normal offline object-store/Laravel state is not credential failure; engine retries.
+- A failed new approval must not silently preserve unauthorized credentials.
 
 ## UI Notices
 
-- Use `notify_user()` / `notify_user_status()` in `src/ui/utils.rs` for non-blocking ribbon + Recent Activity messages.
-- Do not add `MessageBox` for routine success/error; it freezes the UI thread. Reserve modals for actions that need explicit Yes/No (e.g. update install).
+- Use `notify_user()` / `notify_user_status()` — no MessageBox for routine notices.
+- Native Windows/macOS UI remains the product surface.
 
 ## Release
 
-Use `.\build-local.ps1` for normal local build/test cycles. It performs the required stop, Windows 7-compatible release build, root exe copy, root launch, import verification, and running-process verification.
-
-Use `.\release.ps1` for an actual public release. It bumps the patch version in `Cargo.toml`, builds the Windows 7-compatible release target, copies it to repo-root `backupsynctool.exe`, commits, creates a new `vX.Y.Z` tag, pushes `main`, pushes the tag, and verifies the remote tag exists.
-
-Do not move or force-push an existing release tag during normal releases. Only use `git tag -f` / `git push --force` when explicitly repairing a bad tag or bad release.
+`./build-macos.sh` / `.\build-windows.ps1` for cycles; `./release.sh` for `vX.Y.Z` (complete Windows bundle must already be in `dist/windows/`). Do not force-move tags unless repairing.
 
 ## Win32 Gotchas
 
-- `WM_DRAWITEM` only arrives at the parent for direct child controls; avoid intermediate panel windows for owner-drawn controls.
-- `WM_CTLCOLORSTATIC` brushes must be preallocated in `WndState`; do not create brushes per message.
-- `SS_CENTERIMAGE` (`0x0200`) is `SS_REALSIZEIMAGE` on Win32; use manual text centering instead.
-- BGR colour order: `#2B4FA3` is `COLORREF(0x00A34F2B)`.
-- `EnableWindow` and `SetFocus` are in `Win32::UI::Input::KeyboardAndMouse`.
-- `SetWindowSubclass` and `DefSubclassProc` are in `Win32::UI::Shell`.
-- `Config::Default` must be explicit; derived `Default` ignores serde default functions for bool fields.
-- `ureq` v2 has no `.into_json()`; use `.into_string()` and `serde_json::from_str()`.
+- `WM_DRAWITEM` only for direct children of parent.
+- Preallocate `WM_CTLCOLORSTATIC` brushes in `WndState`.
+- `SS_CENTERIMAGE` (`0x0200`) is `SS_REALSIZEIMAGE` — center text manually.
+- BGR: `#2B4FA3` → `COLORREF(0x00A34F2B)`.
+- `Config::Default` must be explicit.
+- `ureq` v2: `.into_string()` + `serde_json::from_str()`.

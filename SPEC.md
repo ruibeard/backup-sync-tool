@@ -1,355 +1,303 @@
-# Backup Sync Tool — Technical Spec
+# Backup Sync Tool — Technical Spec v4
 
-Engineer / LLM reference. User-facing summary: [README.md](README.md).
+**Architecture: live sync** — a small self-hosted Dropbox built from a metadata plane (Laravel) and a chunk plane (object store).
 
-## Stack
+Greenfield product. WebDAV, Syncthing, CT 105 hub provisioning, and shared storage passwords are out of scope. Existing prod stacks are ignored; desktops will be replaced by hand later.
 
-| Layer | Choice |
+Branches: `main` (both repos) is the legacy WebDAV production build and stays untouched. This product lives on `live-sync` in `backup-sync-tool` and `box-rui-cam`. `box-rui-cam` `main` auto-deploys through Forge, so `live-sync` must not merge there until the operator smoke passes on a separate server.
+
+## Product decisions (locked 2026-07-20)
+
+| Decision | Choice |
 | --- | --- |
-| Language | Rust 2021 |
-| UI | Raw Win32 (`windows-rs`) — no egui/webview/Electron/async runtime |
-| HTTP | Blocking `ureq` (WebDAV + pairing API) |
-| Watcher | `notify` |
-| Config | `serde_json` → `backupsynctool.json` next to exe |
-| Secrets | Windows DPAPI (`src/secret.rs`) |
+| Sync model | Full multi-device live two-way from day one |
+| Conflicts | Last-writer-wins (no conflict copies) |
+| Metadata host | Laravel (pairing, sync metadata API, admin shelf, revoke) |
+| Bytes host | S3-compatible object store via storage driver |
+| Launch driver | `spaces` (DigitalOcean Spaces; driver already in Laravel) |
+| Other drivers | `garage` (self-hosted, larger scale later), `b2` — Laravel-side only; `minio` is a local test harness only |
+| Version retention | 30 days |
+| Browse UI | Laravel file shelf only (no Filestash requirement) |
+| Legacy WebDAV | Does not exist for this product |
+| Windows | Win7 SP1 x64 through Win11 — hard release requirement |
+| macOS | Separate native client; Win7 constraints do not apply to macOS builds |
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    UI["src/ui - Win32, pairing, settings"]
-    Config["src/config.rs"]
-    Secret["src/secret.rs"]
-    XD["src/xd.rs"]
-    Pairing["src/pairing.rs"]
-    Sync["src/sync.rs"]
-    WebDAV["src/webdav.rs"]
-    Tray["src/tray.rs"]
-    Updater["src/updater.rs"]
-    Logs["src/logs.rs"]
+| Layer | Windows | macOS |
+| --- | --- | --- |
+| UI | Raw Win32 through `windows-rs` | Native menu bar app; `--daemon` for LaunchAgent |
+| Sync engine | In-process Rust sync engine (this repo) | same |
+| HTTP | Blocking `ureq` | same |
+| Desktop secrets | Device token + chunk-store secret in DPAPI | Keychain (`cam.rui.backupsynctool`) |
+| Control / metadata | Laravel at editable `pair_api_base` | same |
+| Chunk bytes | Object store endpoint from approval payload | same |
 
-    UI <--> Config
-    UI <--> Secret
-    UI --> XD
-    UI --> Pairing
-    UI --> Sync
-    UI --> Tray
-    UI --> Updater
-    UI --> Logs
-    Sync --> WebDAV
-    Sync --> Logs
-```
+There is no bundled Syncthing, no WebDAV client, no Electron/webview/egui/nwg, no async runtime, and no AWS SDK. XD licence detection remains Windows-only.
 
-## Module map
+### Three systems
 
-| Path | Purpose |
+| System | Responsibility |
 | --- | --- |
-| `src/main.rs` | Entry, message loop |
-| `src/ui/` | Window, commands, pairing UX, activity list |
-| `src/config.rs` | Load/save config |
-| `src/sync.rs` | Watcher, manifests, upload/download engine |
-| `src/webdav.rs` | PROPFIND, MKCOL, PUT, GET |
-| `src/pairing.rs` | Pair start/status client |
-| `src/xd.rs` | Native XD licence detection |
-| `src/tray.rs` | Tray icon/menu |
-| `src/updater.rs` | GitHub release check/swap |
-| `src/logs.rs` | `logs/YYYY-MM-DD.log` |
+| Laravel | Pairing/QR approve, device tokens, revoke, sync metadata (files, revisions, chunks, change cursor), 30-day version history, operator file shelf / backup health |
+| Object store | Opaque content-addressed chunk bytes only |
+| Desktop | Watch selected folder, chunk/hash, upload/download missing chunks, apply last-writer-wins updates, report status |
 
-UI layout reference: `mockups.html`.
+`pair_api_base` is Laravel only. The object-store endpoint in the approval payload is never confused with the control-plane URL. Desktop never chooses or exposes the storage vendor; Laravel’s `BACKUP_STORAGE_DRIVER` decides.
 
-## System roles
-
-```mermaid
-flowchart LR
-    Desktop["Rust app"]
-    Laravel["Laravel admin"]
-    Admin["Admin browser"]
-    WebDAV["WebDAV server"]
-
-    Desktop -->|pair API| Laravel
-    Admin -->|approve| Laravel
-    Laravel -->|MKCOL verify| WebDAV
-    Laravel -->|credentials once| Desktop
-    Desktop -->|PUT files| WebDAV
+```text
+[Win/Mac app] --pair / sync metadata / cursor--> [Laravel]
+       |                                              |
+       | put/get chunks (device-scoped key)           | provision bucket/prefix + keys
+       v                                              v
+                    [Object store driver]
 ```
 
-Laravel = control plane only. Never proxies backup bytes.
+## Data model
+
+### Content-addressed chunks
+
+- Files are split with content-defined chunking (FastCDC or equivalent).
+- Each chunk is addressed by SHA-256.
+- Object key layout (driver-normalized): `{destination_prefix}/chunks/{sha256[0:2]}/{sha256}`.
+- Identical bytes across files/devices store once per destination.
+
+### File revision (metadata, Laravel)
+
+A live file is an ordered list of chunk hashes plus:
+
+- stable `file_id` (UUID; survives renames)
+- relative path within the customer destination
+- size, mtime (client hint), content sha256 of the full file
+- `revision` (monotonic per `file_id`)
+- `updated_at` (server time)
+- `updated_by_device_uuid`
+- `deleted_at` (tombstone when deleted)
+
+### Last-writer-wins
+
+When two devices mutate the same `file_id` (or same path for a new file) concurrently:
+
+1. Laravel accepts the write with the higher server-assigned `revision` / later commit timestamp as authoritative.
+2. The losing revision is retained as history for 30 days, then pruned with unreferenced chunks.
+3. Desktops do **not** create `.sync-conflict` copies.
+4. The losing device replaces its local bytes with the winner on next pull.
+
+Renames update path metadata for the same `file_id`. Deletes set a tombstone and propagate to all devices; tombstones and prior revisions remain recoverable in Laravel for 30 days.
+
+### Destinations and devices
+
+- One `BackupDestination` (customer) owns one object-store prefix/bucket assignment.
+- Each approved device receives a distinct device UUID, device token (control/metadata auth), and chunk-store credentials scoped to that destination.
+- Revoke: mark device revoked, invalidate device token, delete/disable that device’s chunk-store key. Do not delete customer files or other devices’ keys.
+- Re-pair of the same machine creates a new device row/token/key and revokes the previous active row for that machine when policy says so.
 
 ## Configuration
 
-`backupsynctool.json` beside `backupsynctool.exe`. Secrets never plaintext.
+Only `schema_version: 4` is accepted as paired. Any v3 Syncthing, v2 S3, WebDAV, or older config may keep watch folder / `pair_api_base` hints but requires fresh pairing.
 
 ```json
 {
+  "schema_version": 4,
+  "pair_api_base": "https://backup.rui.cam",
   "watch_folder": "C:\\XDSoftware\\backups",
-  "webdav_url": "https://example.com/webdav/XD-BACKUPS",
-  "username": "user",
-  "password_enc": "...",
-  "remote_folder": "XDPT.59655-Palmeira-Minimercado",
-  "pair_api_base": "https://box.rui.cam",
-  "device_token_enc": "...",
-  "server_approved_at": "2026-06-17 00:42",
-  "credential_profile_id": 10,
-  "credential_version": 1,
+  "device_token_enc": "DPAPI-or-keychain-handle",
+  "device_uuid": "desktop-uuid",
+  "destination_uuid": "customer-destination-uuid",
+  "transport": "chunk_store",
+  "chunk_endpoint": "https://s3.example",
+  "chunk_region": "garage",
+  "chunk_bucket": "backup-…",
+  "chunk_prefix": "dest/…/",
+  "chunk_access_key_enc": "…",
+  "chunk_secret_key_enc": "…",
+  "chunk_path_style": true,
+  "server_approved_at": "1784050000",
   "start_with_windows": true,
-  "sync_remote_changes": false,
-  "auto_update": true,
-  "parallel_uploads": 10
+  "auto_update": true
 }
 ```
 
-| Field | Notes |
-| --- | --- |
-| `watch_folder` | Watched recursively |
-| `remote_folder` | Server-approved single segment; locked after pair |
-| `device_token_enc` | Present ⇒ paired |
-| `server_approved_at` | Local timestamp written when pairing approval is accepted |
-| `sync_remote_changes` | UI: **Download from server**; enables remote poll + download baseline |
-| `auto_update` | UI: **Auto-update**; default `true`; installs newer GitHub releases automatically |
-| `parallel_uploads` | Default `10` for files under 50 MB. Files ≥ 50 MB upload serially (one at a time) after the small-file batch. |
-
-Scan, watcher, and upload skip everything under `.tmp.driveupload` directories (Google Drive temporary upload staging).
-
-WebDAV PUT timeout scales with file size (about 2 minutes + 15s/MiB, capped at 2 hours) so large uploads are not killed by the short default used for PROPFIND/auth.
-
-`Config::Default` must be explicit (serde ignores `default` fns on derived `Default`).
-
-## XD detection (`src/xd.rs`)
-
-Optional. Pairing works without XD.
-
 Paths:
 
-```text
-C:\XDSoftware\backups          → default watch_folder if dir exists
-C:\XDSoftware\cfg\xd.lic       → JSON licence
-C:\XDSoftware\cfg\xd.pem       → RSA public key
-```
+| State | Windows | macOS |
+| --- | --- | --- |
+| Desktop config | beside `backupsynctool.exe` | `~/Library/Application Support/BackupSyncTool/backupsynctool.json` |
+| Local sync DB | `%LOCALAPPDATA%\BackupSyncTool\sync\` | `~/Library/Application Support/BackupSyncTool/sync/` |
+| Logs | `logs\` beside executable | `~/Library/Application Support/BackupSyncTool/logs` |
 
-Native flow: parse `xd.lic` → decrypt `Number`, `ClientComercialName` (raw RSA blocks, same algorithm as `license-inspector`) → folder = `{Number}-{slug(commercial_name)}`.
+On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt for a Keychain password. On Windows, DPAPI uses the established application entropy (`webdavsync-v1`). Never log device tokens or chunk-store secrets.
 
-| Output | Example |
-| --- | --- |
-| `default_watch_folder()` | `C:\XDSoftware\backups` |
-| `detect_customer_hint().customer` | `Palmeira Minimercado` |
-| `detect_customer_hint().folder` | `XDPT.59655-Palmeira-Minimercado` |
+## Pairing contract
 
-Rules:
-
-- `detected_folder` in pair start = hint from XD only — **not** editable destination field.
-- Prefill destination before pair only; Laravel approval is authoritative.
-- `license-inspector.exe` — diagnostic / test parity only; app does not spawn it in normal flow.
-
-## Pairing API
-
-Base: `{pair_api_base}` (default `https://box.rui.cam`).
-
-### Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant App
-    participant XD
-    participant API
-    participant Admin
-
-    User->>App: Choose local backup folder
-    User->>App: Pair
-    App-->>User: Popup immediately
-    App->>XD: detect_customer_hint
-    App->>API: POST pair start
-    API-->>App: code and poll_token
-    Admin->>API: approve remote_folder
-    loop status poll
-        App->>API: GET pair status
-    end
-    API-->>App: approved credentials
-    App->>App: DPAPI save and lock
-    App->>App: restart sync engine
-```
-
-### `POST /api/pair/start`
+`POST /api/pair/start`:
 
 ```json
 {
   "machine_name": "RECEPTION-PC",
   "windows_user": "office",
-  "app_version": "2026.0.3",
-  "detected_folder": "XDPT.59655-Palmeira-Minimercado"
+  "app_version": "2026.2.0",
+  "detected_install_path": "C:\\XDSoftware",
+  "detected_backup_path": "C:\\XDSoftware\\backups",
+  "xd_license_number": "XDPT.59655",
+  "xd_customer_name": "Palmeira Minimercado",
+  "suggested_customer": "XDPT.59655-Palmeira-Minimercado",
+  "supported_transports": ["chunk_store"]
 }
 ```
 
-Response: `code`, `approve_url`, `poll_token`, `poll_interval_ms`.
+`machine_name` and `supported_transports: ["chunk_store"]` are required. Detected values are untrusted display hints.
 
-### `GET /api/pair/status/{poll_token}`
+Response includes `code`, `approve_url` (QR target), `poll_token`, `poll_interval_ms`, and `control_plane_url` (`APP_URL`, no trailing slash). Desktop logs `control_plane_url mismatch` if it disagrees with configured `pair_api_base`.
 
-| Status | App behavior |
-| --- | --- |
-| `pending` | Keep polling |
-| `approved` | Validate, save, start sync, stop poll |
-| `rejected` | Stop, notify user |
-| `expired` | Stop, notify user |
-| `consumed` | Stop, re-pair message |
-| `failed` | Stop, notify user |
-
-Do not use `denied`.
-
-### Approved payload (once)
+Admin approval selects/creates a `BackupDestination`, provisions chunk-store access for the new device, then returns once via poll:
 
 ```json
 {
   "status": "approved",
-  "device_token": "...",
-  "webdav_url": "https://...",
-  "username": "...",
-  "password": "...",
-  "remote_folder": "XDPT.59655-Palmeira-Minimercado",
-  "credential_profile_id": 10,
-  "credential_version": 1
+  "transport": "chunk_store",
+  "device_uuid": "desktop-uuid",
+  "device_token": "one-time-device-token",
+  "destination_uuid": "customer-destination-uuid",
+  "destination_label": "XDPT.59655-Palmeira-Minimercado",
+  "chunk_endpoint": "https://s3.example",
+  "chunk_region": "garage",
+  "chunk_bucket": "backup-…",
+  "chunk_prefix": "dest/…/",
+  "chunk_access_key": "…",
+  "chunk_secret_key": "…",
+  "chunk_path_style": true
 }
 ```
 
-Reject if: missing/empty token; `webdav_url` not `https://`; missing user/pass; invalid `remote_folder`.
+Client rejects any transport other than `chunk_store`, missing fields, or invalid URLs. It stores secrets, atomically writes schema v4, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel retains chunk access-key ids for revoke and must not keep chunk secrets after handoff.
 
-Valid `remote_folder`: one segment; trimmed non-empty; not `/` `\`; no `/` `\` `..`; no ASCII controls; must not start with `/` `\`.
+Default `pair_api_base` = `https://backup.rui.cam` (editable + persisted: Windows **CONTROL PLANE URL** on blur + pair; macOS tray **Control plane URL…**).
 
-### After pair
+## Sync protocol (desktop ↔ Laravel metadata)
 
-- `device_token_enc` set ⇒ paired.
-- Server URL, user, password, destination read-only; no destination browse.
-- `persist_settings` must not overwrite `remote_folder` from UI.
-- Only change folder/credentials: **re-pair**.
-- Pairing cannot start unless `watch_folder` is a real local directory; the user must Choose a folder first when XD default backup folder is missing.
-- **`restart_sync_engine()`** required after approval (`src/ui/utils.rs`) — save alone is insufficient.
+Authenticated with `Authorization: Bearer <device_token>`. Revoked tokens receive `401` and the desktop shows reconnect/re-pair.
 
-Pair popup opens before `/api/pair/start` returns; QR updates when response arrives.
+Minimum surface (names may be refined in Laravel; behavior is normative):
 
-## Sync engine
-
-### Start triggers (`restart_sync_engine`)
-
-Requires: `watch_folder`, `webdav_url`, username, password, `remote_folder`.
-
-| Trigger | Location |
+| Call | Purpose |
 | --- | --- |
-| Launch (configured) | `src/ui/create.rs` `on_create` |
-| Pair approved | `src/ui/messages.rs` `on_app_pair_result` |
-| Choose folder / toggles | `src/ui/commands.rs` `persist_settings*` |
+| `GET /api/sync/cursor` | Current destination change cursor / generation |
+| `GET /api/sync/changes?since=` | Metadata changes since cursor (upserts, renames, tombstones) |
+| `POST /api/sync/commit` | Propose file revision: path, `file_id`, chunk hash list, size, content hash, client mtime, base revision |
+| `POST /api/sync/chunks/present` | Ask which chunk hashes the store already has |
+| `POST /api/sync/restore` (admin/desktop optional) | Materialize a historical revision as the new live tip (LWW commit) |
 
-Empty or missing watch folder before pair → `xd::default_watch_folder()` when available; otherwise Connect/Reconnect is disabled until the user chooses a valid backup folder with Choose. Approval handling still re-checks the folder defensively; if it is no longer valid, local pairing is not saved and sync does not start.
+Chunk bytes go **only** to the object store with the device chunk credentials (PUT/GET). Laravel may use a scanner/admin key to verify presence and serve the shelf; it does not proxy bulk desktop transfers.
 
-### Startup (`sync_startup`)
+### Desktop sync loop
 
-1. Load local manifest `{watch_folder}/.backupsynctool-manifest.json` (empty if missing).
-2. Log file count.
+On launch (if paired), after approval, and after watch-path save:
 
-| Local manifest file | `sync_remote_changes` off | on |
-| --- | --- | --- |
-| Missing | Upload **all** local files | Download remote manifest baseline if entries exist |
-| Present | PROPFIND + upload changed/missing on server | + download when remote differs |
+1. Ensure local sync DB exists.
+2. Scan / watch the selected folder.
+3. For local changes: chunk → `chunks/present` → upload missing chunks → `sync/commit`.
+4. Pull `sync/changes` and apply remote revisions (download missing chunks, write files, apply deletes/renames).
+5. Persist cursor. Retry with backoff on offline; offline is not credential failure.
+6. UI states: unpaired, pairing, syncing, idle, offline, auth/revoke error, hard failure.
 
-### Ongoing
+All approved devices may create, edit, rename, and delete. There is no `can_delete_files` flag.
 
-- Watcher: recursive `notify`, debounce, ignore `.backupsynctool-manifest.json` and `.tmp.driveupload/` trees.
-- Upload scheduling: files under 50 MB use `parallel_uploads`; files ≥ 50 MB upload one after another.
-- Upload progress: `put_file_with_progress` reports byte progress during PUT; logs `Upload progress: {relative}|{0-100}` (throttled ~250ms / 1%) so Recent Activity shows a per-file bar. Parallel uploads key rows by full relative path so same basenames do not overwrite each other. Overall sync % is byte-weighted across the batch.
-- Local manifest: updated **only after successful PUT** per path.
-- Remote manifest: rewritten from **PROPFIND** (`save_remote_manifest_from_server`), never full local scan; the small remote manifest also acts as the lightweight server-change marker.
-- Skip upload (manifest exists): local unchanged since last success **and** server file size matches (`remote_file_states`).
-- `heal_missing_uploads`: every 24h re-upload missing/size-mismatch on server.
-- Remote marker poll when `sync_remote_changes` true: every 10s for 5 minutes after startup or upload activity, then every 30s while idle. Marker changes trigger downloads without a recursive scan.
-- Full remote scan fallback when `sync_remote_changes` true: every 60s recursive `PROPFIND` to discover files added outside the app or without a fresh remote manifest.
-- Manual **Refresh** button: paired server action that performs one immediate remote pull check, including recursive `PROPFIND`, and downloads server changes without enabling continuous remote polling.
+## Laravel operator surface
 
-Upload URL:
+- Pairing approve/deny with QR/`approve_url`.
+- Device list + revoke.
+- Destination list and per-customer shelf (browse live tree + 30-day history).
+- Backup health derived from metadata (last activity, file counts, stale devices).
+- Storage driver configured only in Laravel env (`BACKUP_STORAGE_DRIVER` + driver secrets).
 
-```text
-{webdav_url}/{remote_folder}/{relative_path}
-```
+## Storage drivers
 
-### WebDAV errors
+Laravel binds a `DeviceStorageProvisioner`:
 
-| HTTP | Behavior |
+| Driver | Role |
 | --- | --- |
-| **401** | `WebDavError::AuthFailed` → pause sync, **Reconnect required**, pair again |
-| **403** on MKCOL | Treat as exists (with 405); continue to PUT |
-| Other | Log; do not show “Credentials Invalid” for Storage Box MKCOL 403 |
+| `spaces` | Launch driver. One bucket per customer; DigitalOcean API mints/deletes a per-bucket key per device |
+| `garage` | Self-hosted S3-compatible; Admin API creates bucket/key/allow/delete |
+| `minio` | Local dev/e2e harness only (shared root key). Not for production: MinIO community edition is in maintenance mode |
+| `b2` | Not wired. Candidate managed driver if Spaces cost grows |
 
-No `/api/device/credential-refresh/*` — re-pair only.
+Desktop speaks a single chunk-store profile from approval. Adding a vendor is a Laravel provisioner change, not a desktop settings change.
 
-Auth header: `Basic base64(username:password)`.
+Tests may use local MinIO/Garage fixtures or fakes; the wire contract stays the same.
 
-## UI rules
+### Storage choice (research 2026-09-28)
 
-- Raw Win32; owner-draw children must be **direct** children of main window (`WM_DRAWITEM`).
-- No **Save** — auto-save folder choice + checkboxes.
-- Main layout (**Stitch mockup — connection + sync band**): white connection card — PC node with icon above the local path, with compact **Open** and **Choose** actions below; WebDAV node with icon above the Storage Box host and approved remote folder below, plus paired server actions **Refresh** and **Reconnect Server**. If no valid local folder exists, hide Open, Refresh, and Connect/Reconnect and show one **Choose folder** action. No centre column. The divider sits below the bridge action row. Server icon carries a green ✓ or red ✕ badge.
-- **Sync band** (below connection card, when paired): **All synced** + 100% green bar when idle; **Syncing** + blue bar with **%** and **ETA** when uploading/downloading; **Checking…** when scanning.
-- **Recent activity**: header **RECENT ACTIVITY LOG** + **Showing last 200 events**; info rows show clock time on the right; file rows show **Done** or per-file **%** from byte progress during upload.
-- Bridge icons: baked PNGs at **120×120** (3× logical tile) in `assets/bridge-pc.png` and `assets/bridge-server.png`; SVG sources kept in `assets/svg-backups/`. Downscaled to 40×40 at draw time with HALFTONE.
-- **Typography** (Segoe UI, pixel heights): 13px body; 12px captions/paths/activity status; 12px semibold bridge names and sync head; 11px bold section headings; 13px buttons; 12px links. Muted text `#666666`.
-- Notices: `notify_user()` / `notify_user_status()` — no `MessageBox` except manual update Yes/No when auto-update is off.
-- Labels: backup folder path shown in bridge (Choose to change); if no XD/default folder exists, show "Choose backup folder" instead of pretending `C:\XDSoftware\backups` exists. Connect/Reconnect stays disabled until that path is a real directory. The paired server node shows the approved destination folder, with host, approval time, and credential metadata in the tooltip.
-- Colours: window `#F0F0F0`, bridge card `#FFFFFF`, accent `#2B4FA3` → `COLORREF(0x00A34F2B)`.
+| Option | Verdict |
+| --- | --- |
+| DigitalOcean Spaces | **Launch.** Driver exists. $5/mo incl. 250 GiB + 1 TB egress, then ~$20/TB. Limits: 100 buckets, 200 keys per account (ask support to raise; presigned URLs remove the key limit) |
+| Backblaze B2 | Cheaper managed option (~$6.95/TB) if data grows. Needs a driver |
+| Own Hetzner dedicated server + ZFS + Garage | Cheapest per TB above ~15–20 TB; operator maintains disks/OS and a second copy |
+| Hetzner Object Storage | Rejected for now: no API to mint keys, 100-bucket cap, 64 KB minimum billable object, ~100 ms small-object latency and NBG1 throttling incidents in 2026 |
+| Hetzner Storage Box | Not a primary store (SFTP/WebDAV, 10 connections per box). Fine as an off-site copy |
+| Proxying bytes through Laravel | Rejected: PHP workers and Cloudflare Tunnel become the bottleneck; Cloudflare Free/Pro caps request bodies at 100 MB |
 
-## Logs
 
-Always on: `logs/YYYY-MM-DD.log` next to exe.
+## Build and release
 
-## Auto-update
+Only `./build-macos.sh`, `.\build-windows.ps1`, and `./release.sh`.
 
-```text
-GET https://api.github.com/repos/ruibeard/backup-sync-tool/releases/latest
-```
+| Script | Contract |
+| --- | --- |
+| `./build-macos.sh` | Build/sign/package macOS app; launch unless `--no-launch` |
+| `.\build-windows.ps1` | Build Win7-compatible desktop into `dist\windows\`; `-NoLaunch` skips run |
+| `./release.sh` | Requires staged Windows dist; bump/tag/upload without moving tags |
 
-Download release asset → swap exe → restart.
+Never launch from `target/debug` or `target/release`. Auto-update replaces the whole tested desktop bundle (one binary; no separate engine).
 
-`auto_update` defaults to `true`. When enabled, a detected newer release starts the download/install flow immediately and restarts the app. When disabled, the app shows the manual **Update** action and asks for Yes/No before installing.
+Windows 7 is a release blocker for Windows artifacts. macOS build/signing is independent.
 
-Asset selection:
+### Operator smoke
 
-- Prefer `backupsynctool.exe`.
-- Public releases must publish one Windows 7-compatible `backupsynctool.exe`.
-- Do not publish separate Win7 and Win10 exe assets unless the updater is changed to handle channels intentionally.
+1. Laravel `APP_URL` matches desktop Control plane URL.
+2. Pair Win7, current Windows, and macOS to one disposable destination.
+3. Verify two-way creates, edits, renames, offline edits, and deletes from every device.
+4. Concurrent edit → last-writer-wins; loser converges to winner; loser revision visible in 30-day history.
+5. Revoke one device → uploads/metadata calls fail; other devices and data remain.
+6. Laravel shelf shows files and recent activity without SSH/Filestash.
+7. No public chunk-store admin API exposure beyond the intended S3 endpoint.
 
-## Build & launch
+## Code layout (desktop)
 
-From repo root (config beside root `backupsynctool.exe`):
+| Path | Scope |
+| --- | --- |
+| `src/sync/` | Shared sync engine: chunker, chunk store client, metadata API client, local state, FS watcher |
+| `src/pairing.rs`, `src/config.rs`, `src/secret.rs`, `src/updater.rs`, `src/app.rs`, `src/paths.rs`, `src/logs.rs` | Shared core |
+| `src/win/` | Windows shell: Win32 UI (`ui.rs` + `ui/` shards), tray, XD licence detection |
+| `src/macos/` | macOS shell: menubar, status window, LaunchAgent daemon, `host.rs` sync host |
 
-```powershell
-.\build-local.ps1    # build Windows 7-compatible x64 exe, copy to root, launch
-.\release.ps1        # version bump, build same compatible exe, tag, push
-```
+## Implementation status (2026-09-28)
 
-Never run from `target/debug` or `target/release` for local testing.
+### Done
 
-Windows 7 support is handled by making the single x64 exe use the Windows 7-compatible build target:
+- Laravel (`box-rui-cam` `live-sync`): `chunk_store` pairing + provisioner (fake, Garage, Spaces, MinIO), sync APIs (cursor / changes / chunks/present / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
+- Desktop: schema v4 pairing (Win + Mac), in-process sync engine with SigV4 PUT/GET, FastCDC chunking, FS watcher with mtime/size skip.
+- Local MinIO e2e: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh`.
+- Cleanup: Syncthing/WebDAV leftovers, the no-op installation repair feature and dead code removed; Windows code moved to `src/win/`.
 
-- Build target: `x86_64-win7-windows-msvc`.
-- Build command is in `build-local.ps1`; it uses nightly Rust with `rust-src` and `-Z build-std=std,panic_abort`.
-- The script copies the built exe to root `backupsynctool.exe` for local launch.
-- `release.ps1` uses the same compatible target and publishes the normal root `backupsynctool.exe`.
-- Import verification must reject known Windows 8+ startup imports: `GetSystemTimePreciseAsFileTime`, `WaitOnAddress`, `WakeByAddressAll`, `WakeByAddressSingle`, `ProcessPrng`.
-- Final validation must include a launch test on Windows 7 SP1 x64, not only Windows 10/11.
+### Roadmap (in order)
 
-## Security
+1. **Engine speed.** Today the engine pushes one file and one chunk at a time, commits per file, and sees remote changes only on a 15 s poll.
+   - Parallel chunk PUT/GET (8–16 workers).
+   - Batch `chunks/present` and `commit` across files.
+   - Long-poll `GET /api/sync/changes?since=&wait=25` so remote edits arrive at once (under Cloudflare's 100 s proxy timeout).
+   - Report progress through `AppCommand::EngineStatus` / `Activity` (defined, never sent today) so both UIs show real status.
+2. **Presigned chunk URLs.** Laravel keeps one store key and signs short-lived PUT/GET URLs scoped to the destination prefix (`chunks/present` returns PUT URLs for missing chunks; a batch endpoint returns GET URLs). Desktop drops chunk credentials (schema v5). Revoke = disable device token. Bytes never pass through Laravel or Cloudflare.
+3. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator).
+4. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
+5. CI job for the e2e script. Swap the dev harness from MinIO to single-node Garage.
 
-Desktop lock = accident prevention, not anti-tamper. Hard isolation = per-customer scoped WebDAV credentials on server.
+## Out of scope
 
-## Out of scope (desktop protocol)
-
-- Laravel upload proxy
-- Credential refresh API
-- SSE/WebSocket credential delivery
-- Client encryption beyond HTTPS + DPAPI at rest
-
-## Implementation checklist (changes)
-
-- [ ] Paired? → `device_token_enc`
-- [ ] After pair → `restart_sync_engine()`
-- [ ] Do not trust UI for `remote_folder` / credentials
-- [ ] 401 only → auth failure
-- [ ] Local manifest: success PUT only
-- [ ] Remote manifest: PROPFIND only
-- [ ] First run, no manifest, download off → upload all local files
+- WebDAV and shared folder passwords
+- Syncthing / CT 105 / sync provisioner
+- Filestash as a product dependency
+- Migrating old WebDAV or Garage customer data automatically
+- Conflict-copy UX
+- Per-device deletion permissions
+- Desktop storage-vendor picker

@@ -1,6 +1,6 @@
 [package]
 name = "backupsynctool"
-version = "2026.0.7"
+version = "2026.1.1"
 edition = "2021"
 
 [[bin]]
@@ -8,7 +8,35 @@ name = "backupsynctool"
 path = "src/main.rs"
 
 [dependencies]
-# Win32 API bindings — only features we actually use
+bytemuck = "1"
+
+# JSON config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client (blocking, no async runtime)
+ureq = { version = "2", features = ["tls"] }
+
+# Chunk hashing for the sync engine
+sha2 = "0.10"
+hex = "0.4"
+
+# Base64 for DPAPI blob serialisation
+base64 = "0.22"
+rsa = "0.9"
+unicode-normalization = "0.1"
+
+# Local QR code generation for device pairing
+qrcodegen = "1"
+
+# PNG decode for bridge/status icons (assets/bridge-*.png)
+image = { version = "0.25", default-features = false, features = ["png"] }
+hmac = "0.12"
+notify = { version = "6", features = ["macos_fsevent"] }
+fastcdc = "4"
+
+# Win32 API bindings — Windows targets only
+[target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -23,31 +51,61 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
 ] }
 
-bytemuck = "1"
-
-# JSON config
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# HTTP client (blocking, no async runtime)
-ureq = { version = "2", features = ["tls"] }
-quick-xml = "0.31"
-
-# File watching
-notify = { version = "8.2.0" }
-
-# Base64 for DPAPI blob serialisation
-base64 = "0.22"
-rsa = "0.9"
-unicode-normalization = "0.1"
-
-# Local QR code generation for device pairing
-qrcodegen = "1"
-
-# Bridge icons rendered from mockups.html emoji tiles
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Keychain + menubar (macOS)
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+tray-icon = { version = "0.24", default-features = false }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSThread",
+    "NSData",
+    "NSURL",
+    "NSGeometry",
+    "NSValue",
+    "NSArray",
+    "NSDictionary",
+    "NSAttributedString",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSRunningApplication",
+    "NSResponder",
+    "NSAlert",
+    "NSImage",
+    "NSImageView",
+    "NSView",
+    "NSWindow",
+    "NSPanel",
+    "NSButton",
+    "NSButtonCell",
+    "NSTextField",
+    "NSControl",
+    "NSCell",
+    "NSColor",
+    "NSFont",
+    "NSWorkspace",
+    "NSGraphics",
+    "NSBox",
+    "NSScrollView",
+    "NSClipView",
+    "NSScroller",
+    "NSProgressIndicator",
+    "NSParagraphStyle",
+    "NSVisualEffectView",
+    "NSScreen",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSAttributedString",
+    "objc2-quartz-core",
+] }
+dispatch = "0.2"
 
 [profile.release]
 opt-level = "z"       # optimise for size
@@ -56,6 +114,6 @@ codegen-units = 1     # single codegen unit for max LTO
 strip = true          # strip debug symbols
 panic = "abort"       # no unwinding machinery
 
-[build-dependencies]
-# embed manifest + icon into the .exe
+# embed manifest + icon into the .exe (Windows host/target only)
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
