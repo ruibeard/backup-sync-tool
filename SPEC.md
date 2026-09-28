@@ -185,8 +185,11 @@ Minimum surface (names may be refined in Laravel; behavior is normative):
 | `GET /api/sync/cursor` | Current destination change cursor / generation |
 | `GET /api/sync/changes?since=` | Metadata changes since cursor (upserts, renames, tombstones) |
 | `POST /api/sync/commit` | Propose file revision: path, `file_id`, chunk hash list, size, content hash, client mtime, base revision |
+| `POST /api/sync/commit/batch` | Up to 200 commits in order; `results[i]` is item `i`'s commit or `{error}` (one bad item does not stop the rest) |
 | `POST /api/sync/chunks/present` | Ask which chunk hashes the store already has |
 | `POST /api/sync/restore` (admin/desktop optional) | Materialize a historical revision as the new live tip (LWW commit) |
+
+Sync routes are rate-limited per device (`throttle:sync`, 600/min), not per IP: behind the Cloudflare tunnel many devices can share one IP.
 
 Chunk bytes go **only** to the object store with the device chunk credentials (PUT/GET). Laravel may use a scanner/admin key to verify presence and serve the shelf; it does not proxy bulk desktop transfers.
 
@@ -195,11 +198,14 @@ Chunk bytes go **only** to the object store with the device chunk credentials (P
 On launch (if paired), after approval, and after watch-path save:
 
 1. Ensure local sync DB exists.
-2. Scan / watch the selected folder.
-3. For local changes: chunk → `chunks/present` → upload missing chunks → `sync/commit`.
-4. Pull `sync/changes` and apply remote revisions (download missing chunks, write files, apply deletes/renames).
-5. Persist cursor. Retry with backoff on offline; offline is not credential failure.
-6. UI states: unpaired, pairing, syncing, idle, offline, auth/revoke error, hard failure.
+2. Scan / watch the selected folder. FS events wake the loop at once (after a 0.5 s settle); otherwise it polls `sync/cursor` every 4 s.
+3. Push local changes in batches (≤200 files, ~256 MB): stream-chunk files (never read whole into memory) → one `chunks/present` → upload missing chunks with 8 parallel workers → one `sync/commit/batch`. Local deletes go in `commit/batch` too.
+4. When the server cursor is ahead, pull `sync/changes` pages: fetch the needed chunks in parallel into a local cache (reusing matching chunks from the old local copy), then apply changes in cursor order. Only the last change per file in a page is applied.
+5. Only the pull advances the local cursor (a commit's cursor can jump past another device's change). A failing remote change is retried 3 times, then skipped. Chunk PUT/GET retry transient store errors in place.
+6. Skip unchanged files by size + nanosecond mtime (whole seconds miss same-size edits made right after a sync).
+7. Report status and activity through `AppCommand::EngineStatus` / `Activity`; auth failure sends `EngineFailed` (pair again). Offline is not credential failure.
+
+Remote changes are not long-polled: on PHP-FPM each waiting device would hold a worker for the whole wait. A 4 s poll of the cheap cursor endpoint gives ~2 s average latency.
 
 All approved devices may create, edit, rename, and delete. There is no `can_delete_files` flag.
 
@@ -277,20 +283,18 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 - Laravel (`box-rui-cam` `live-sync`): `chunk_store` pairing + provisioner (fake, Garage, Spaces, MinIO), sync APIs (cursor / changes / chunks/present / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
 - Desktop: schema v4 pairing (Win + Mac), in-process sync engine with SigV4 PUT/GET, FastCDC chunking, FS watcher with mtime/size skip.
+- Engine speed: batched `chunks/present` + `commit/batch`, 8 parallel chunk transfers, streamed chunking, local chunk reuse on download, 4 s cursor poll, status and activity sent to both UIs.
+- Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`). 262 files + 9 MiB seed in ~1.9 s (release build, single-threaded PHP dev server).
 - Local MinIO e2e: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh`.
 - Cleanup: Syncthing/WebDAV leftovers, the no-op installation repair feature and dead code removed; Windows code moved to `src/win/`.
 
 ### Roadmap (in order)
 
-1. **Engine speed.** Today the engine pushes one file and one chunk at a time, commits per file, and sees remote changes only on a 15 s poll.
-   - Parallel chunk PUT/GET (8–16 workers).
-   - Batch `chunks/present` and `commit` across files.
-   - Long-poll `GET /api/sync/changes?since=&wait=25` so remote edits arrive at once (under Cloudflare's 100 s proxy timeout).
-   - Report progress through `AppCommand::EngineStatus` / `Activity` (defined, never sent today) so both UIs show real status.
-2. **Presigned chunk URLs.** Laravel keeps one store key and signs short-lived PUT/GET URLs scoped to the destination prefix (`chunks/present` returns PUT URLs for missing chunks; a batch endpoint returns GET URLs). Desktop drops chunk credentials (schema v5). Revoke = disable device token. Bytes never pass through Laravel or Cloudflare.
-3. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator).
-4. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
-5. CI job for the e2e script. Swap the dev harness from MinIO to single-node Garage.
+1. **Presigned chunk URLs.** Laravel keeps one store key and signs short-lived PUT/GET URLs scoped to the destination prefix (`chunks/present` returns PUT URLs for missing chunks; a batch endpoint returns GET URLs). Desktop drops chunk credentials (schema v5). Revoke = disable device token. Bytes never pass through Laravel or Cloudflare.
+2. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator).
+3. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
+4. CI job for `dev/e2e/two-device-sync.sh`; then drop the Docker MinIO harness.
+5. Re-pair catch-up: a fresh device replays the whole change log page by page. Add a server snapshot of live tips if large destinations make that slow.
 
 ## Out of scope
 

@@ -127,9 +127,10 @@ impl SyncHost {
             return Err(error);
         }
 
-        let engine = SyncEngine::start(self.config.clone()).inspect_err(|error| {
-            let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
-        })?;
+        let engine = SyncEngine::start(self.config.clone(), self.app.commands.clone())
+            .inspect_err(|error| {
+                let _ = self.app.send(AppCommand::EngineFailed(error.clone()));
+            })?;
         self.reconnect_required.store(false, Ordering::Relaxed);
         self.engine = Some(engine);
         logs::append(&format!(

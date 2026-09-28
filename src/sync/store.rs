@@ -53,6 +53,8 @@ impl ChunkStoreClient {
                 .timeout_connect(Duration::from_secs(8))
                 .timeout_read(Duration::from_secs(60))
                 .timeout_write(Duration::from_secs(60))
+                // Keep one warm connection per transfer worker.
+                .max_idle_connections_per_host(16)
                 .build(),
         }
     }

@@ -326,7 +326,7 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
         let _ = st.app.send(crate::app::AppCommand::EngineStarting);
     }
 
-    let engine = crate::sync::SyncEngine::start(cfg.clone())?;
+    let engine = crate::sync::SyncEngine::start(cfg.clone(), stmut(hwnd).app.commands.clone())?;
     stmut(hwnd).sync_engine = Some(engine);
     stmut(hwnd).sync_status_text = "Syncing...".into();
     stmut(hwnd).sync_status_state = UiSyncState::Syncing as usize;

@@ -27,6 +27,12 @@ Technical contract: [SPEC.md](SPEC.md) (schema v4, roadmap and status).
 .\build-windows.ps1 -NoLaunch
 ```
 
+Two-device sync test (needs `rclone`, `php`, `jq` and `../box-rui-cam`; no Docker):
+
+```bash
+./dev/e2e/two-device-sync.sh
+```
+
 | Platform | UI | Protected secrets |
 | --- | --- | --- |
 | Windows 7–11 | Native Win32 tray app | Device token + chunk keys via DPAPI |

@@ -29,12 +29,52 @@ pub struct RemoteChange {
 }
 
 #[derive(Debug, Clone)]
+pub struct ChangesPage {
+    /// Server tip cursor for the destination.
+    pub cursor: u64,
+    pub changes: Vec<RemoteChange>,
+}
+
+/// One file in a `commit/batch` request.
+#[derive(Debug, Clone)]
+pub struct CommitItem {
+    pub path: String,
+    pub size: u64,
+    pub content_sha256: String,
+    pub chunk_hashes: Vec<String>,
+    pub file_id: Option<String>,
+    pub base_revision: Option<u64>,
+    pub deleted: bool,
+}
+
+impl CommitItem {
+    fn to_json(&self) -> serde_json::Value {
+        let mut body = json!({
+            "path": self.path,
+            "size": self.size,
+            "content_sha256": if self.content_sha256.is_empty() {
+                serde_json::Value::Null
+            } else {
+                json!(self.content_sha256)
+            },
+            "chunk_hashes": self.chunk_hashes,
+            "deleted": self.deleted,
+        });
+        if let Some(id) = &self.file_id {
+            body["file_id"] = json!(id);
+        }
+        if let Some(rev) = self.base_revision {
+            body["base_revision"] = json!(rev);
+        }
+        body
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct CommitResult {
     pub file_id: String,
     pub path: String,
     pub revision: u64,
-    pub cursor: u64,
-    pub deleted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +112,7 @@ impl SyncApiClient {
                 .timeout_connect(Duration::from_secs(8))
                 .timeout_read(Duration::from_secs(30))
                 .timeout_write(Duration::from_secs(30))
+                .max_idle_connections_per_host(4)
                 .build(),
         }
     }
@@ -82,11 +123,15 @@ impl SyncApiClient {
         Ok(body.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0))
     }
 
-    pub fn changes(&self, since: u64) -> Result<Vec<RemoteChange>, ApiError> {
+    pub fn changes(&self, since: u64) -> Result<ChangesPage, ApiError> {
         let url = format!("{}/api/sync/changes?since={since}", self.base);
         let parsed = self.get_json(&url)?;
+        let cursor = parsed.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0);
         let Some(items) = parsed.get("changes").and_then(|v| v.as_array()) else {
-            return Ok(Vec::new());
+            return Ok(ChangesPage {
+                cursor,
+                changes: Vec::new(),
+            });
         };
         let mut out = Vec::new();
         for item in items {
@@ -116,7 +161,10 @@ impl SyncApiClient {
                 payload,
             });
         }
-        Ok(out)
+        Ok(ChangesPage {
+            cursor,
+            changes: out,
+        })
     }
 
     pub fn chunks_present(
@@ -147,53 +195,42 @@ impl SyncApiClient {
         Ok((present, missing))
     }
 
-    pub fn commit_file(
+    /// Commit files in order. Each entry is that item's result or its error.
+    pub fn commit_batch(
         &self,
-        path: &str,
-        size: u64,
-        content_sha256: &str,
-        chunk_hashes: &[String],
-        file_id: Option<&str>,
-        base_revision: Option<u64>,
-        deleted: bool,
-    ) -> Result<CommitResult, ApiError> {
-        let url = format!("{}/api/sync/commit", self.base);
-        let mut body = json!({
-            "path": path,
-            "size": size,
-            "content_sha256": if content_sha256.is_empty() {
-                serde_json::Value::Null
-            } else {
-                json!(content_sha256)
-            },
-            "chunk_hashes": chunk_hashes,
-            "deleted": deleted,
-        });
-        if let Some(id) = file_id {
-            body["file_id"] = json!(id);
-        }
-        if let Some(rev) = base_revision {
-            body["base_revision"] = json!(rev);
-        }
+        items: &[CommitItem],
+    ) -> Result<Vec<Result<CommitResult, String>>, ApiError> {
+        let url = format!("{}/api/sync/commit/batch", self.base);
+        let body = json!({ "items": items.iter().map(CommitItem::to_json).collect::<Vec<_>>() });
         let parsed = self.post_json(&url, &body.to_string())?;
-        Ok(CommitResult {
-            file_id: parsed
-                .get("file_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            path: parsed
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or(path)
-                .to_string(),
-            revision: parsed.get("revision").and_then(|v| v.as_u64()).unwrap_or(0),
-            cursor: parsed.get("cursor").and_then(|v| v.as_u64()).unwrap_or(0),
-            deleted: parsed
-                .get("deleted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(deleted),
-        })
+        let results = parsed
+            .get("results")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| ApiError::Other("commit/batch: missing results".into()))?;
+        if results.len() != items.len() {
+            return Err(ApiError::Other(format!(
+                "commit/batch: {} results for {} items",
+                results.len(),
+                items.len()
+            )));
+        }
+        let parsed: Vec<_> = results
+            .iter()
+            .zip(items)
+            .map(|(r, item)| parse_commit_result(r, &item.path))
+            .collect();
+        // Tips are stored by position; a reordered response would swap files.
+        for (result, item) in parsed.iter().zip(items) {
+            if let Ok(result) = result {
+                if result.path != item.path {
+                    return Err(ApiError::Other(format!(
+                        "commit/batch: result for {} came back as {}",
+                        item.path, result.path
+                    )));
+                }
+            }
+        }
+        Ok(parsed)
     }
 
     fn get_json(&self, url: &str) -> Result<serde_json::Value, ApiError> {
@@ -216,6 +253,26 @@ impl SyncApiClient {
             .map_err(map_ureq)?;
         read_json(resp)
     }
+}
+
+fn parse_commit_result(value: &serde_json::Value, path: &str) -> Result<CommitResult, String> {
+    if let Some(error) = value.get("error").and_then(|v| v.as_str()) {
+        return Err(error.to_string());
+    }
+    let file_id = value
+        .get("file_id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "commit result without file_id".to_string())?;
+    Ok(CommitResult {
+        file_id: file_id.to_string(),
+        path: value
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(path)
+            .to_string(),
+        revision: value.get("revision").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
 }
 
 fn parse_payload(value: serde_json::Value) -> ChangePayload {
@@ -268,5 +325,15 @@ mod tests {
         assert_eq!(payload.content_sha256.as_deref(), Some("aa"));
         assert_eq!(payload.chunk_hashes, vec!["bb".to_string()]);
         assert_eq!(payload.updated_by_device_uuid.as_deref(), Some("dev-1"));
+    }
+
+    #[test]
+    fn commit_result_maps_item_errors() {
+        let ok =
+            serde_json::json!({ "file_id": "f1", "path": "a.txt", "revision": 2, "cursor": 9 });
+        let err = serde_json::json!({ "error": "Invalid path." });
+        let parsed = parse_commit_result(&ok, "a.txt").unwrap();
+        assert_eq!((parsed.file_id.as_str(), parsed.revision), ("f1", 2));
+        assert_eq!(parse_commit_result(&err, "x").unwrap_err(), "Invalid path.");
     }
 }

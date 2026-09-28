@@ -21,9 +21,10 @@ pub struct FileTip {
     pub size: u64,
     #[serde(default)]
     pub content_sha256: String,
-    /// Local mtime seconds (UNIX). Used to skip unchanged files without re-reading.
+    /// Local mtime in nanoseconds (UNIX). Used to skip unchanged files without
+    /// re-reading; whole seconds miss same-size edits made right after a sync.
     #[serde(default)]
-    pub mtime_secs: u64,
+    pub mtime_ns: u64,
 }
 
 impl SyncState {
@@ -45,11 +46,11 @@ impl SyncState {
         Ok(())
     }
 
-    pub fn path_for_file_id(&self, file_id: &str) -> Option<&str> {
+    pub fn tip_for_file_id(&self, file_id: &str) -> Option<(&str, &FileTip)> {
         self.files
             .iter()
             .find(|(_, tip)| tip.file_id == file_id)
-            .map(|(path, _)| path.as_str())
+            .map(|(path, tip)| (path.as_str(), tip))
     }
 
     pub fn upsert_tip(&mut self, path: &str, tip: FileTip) {
@@ -92,7 +93,7 @@ mod tests {
                 revision: 1,
                 size: 1,
                 content_sha256: "aa".into(),
-                mtime_secs: 0,
+                mtime_ns: 0,
             },
         );
         state.upsert_tip(
@@ -102,12 +103,12 @@ mod tests {
                 revision: 2,
                 size: 1,
                 content_sha256: "aa".into(),
-                mtime_secs: 0,
+                mtime_ns: 0,
             },
         );
         assert!(!state.files.contains_key("old.txt"));
         assert_eq!(state.files["new.txt"].revision, 2);
-        assert_eq!(state.path_for_file_id("f1"), Some("new.txt"));
+        assert_eq!(state.tip_for_file_id("f1").map(|(p, _)| p), Some("new.txt"));
     }
 
     #[test]
@@ -129,7 +130,7 @@ mod tests {
                 revision: 3,
                 size: 10,
                 content_sha256: "abcd".into(),
-                mtime_secs: 42,
+                mtime_ns: 42,
             },
         );
         state.save(&path).unwrap();
