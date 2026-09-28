@@ -4,7 +4,7 @@
 
 Greenfield product. WebDAV, Syncthing, CT 105 hub provisioning, and shared storage passwords are out of scope. Existing prod stacks are ignored; desktops will be replaced by hand later.
 
-Branches: `main` (both repos) is the legacy WebDAV production build and stays untouched. This product lives on `live-sync` in `backup-sync-tool` and `box-rui-cam`. `box-rui-cam` `main` auto-deploys through Forge, so `live-sync` must not merge there until the operator smoke passes on a separate server.
+Branches: `main` (both repos) is the legacy WebDAV production build and stays untouched. This product lives on `live-sync` in `backup-sync-tool` and `box-rui-cam`. `box-rui-cam` `live-sync` deploys to production (`backup.rui.cam`) through Forge, so every push there is a production deploy.
 
 ## Product decisions (locked 2026-07-20)
 
@@ -212,7 +212,7 @@ Laravel's `StorageProvisioner` creates destinations; `ChunkUrlSigner` signs chun
 
 | Driver | Role |
 | --- | --- |
-| `spaces` | Launch driver. One bucket per customer; `SPACES_KEY` creates buckets, signs URLs and reads the shelf. No per-device keys, so the 200-key account limit does not apply |
+| `spaces` | Launch driver. One shared bucket (`SPACES_BUCKET`, no dots); each customer is `dest/{uuid}/` inside it. `SPACES_KEY` signs URLs and reads the shelf. No per-device keys, so the 200-key account limit does not apply |
 | `garage` | Self-hosted S3-compatible; Admin API creates the bucket; the scanner key signs URLs |
 | `minio` | Local dev/e2e harness only (root key). Not for production: MinIO community edition is in maintenance mode |
 | `b2` | Not wired. Candidate managed driver if Spaces cost grows |
@@ -225,7 +225,7 @@ Tests may use local MinIO/Garage fixtures or fakes; the wire contract stays the 
 
 | Option | Verdict |
 | --- | --- |
-| DigitalOcean Spaces | **Launch.** Driver exists. $5/mo incl. 250 GiB + 1 TB egress, then ~$20/TB. Limit: 100 buckets per account (ask support to raise). The 200-key limit does not apply: devices get signed URLs |
+| DigitalOcean Spaces | **Launch.** Driver exists. $5/mo incl. 250 GiB + 1 TB egress, then ~$20/TB. One shared bucket, so the 100-bucket account limit does not apply. The 200-key limit does not apply: devices get signed URLs |
 | Backblaze B2 | Cheaper managed option (~$6.95/TB) if data grows. Needs a driver |
 | Own Hetzner dedicated server + ZFS + Garage | Cheapest per TB above ~15–20 TB; operator maintains disks/OS and a second copy |
 | Hetzner Object Storage | Rejected for now: 100-bucket cap, 64 KB minimum billable object, ~100 ms small-object latency and NBG1 throttling incidents in 2026 |
@@ -274,13 +274,13 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 - Desktop: schema v5 pairing (Win + Mac), in-process sync engine, FastCDC chunking, FS watcher with mtime/size skip.
 - Engine speed: batched `chunks/present` + `commit/batch`, 8 parallel chunk transfers, streamed chunking, local chunk reuse on download, 4 s cursor poll, status and activity sent to both UIs.
 - Signed chunk URLs (schema v5): devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
-- Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`); the desktop gets no S3 key. 262 files + 9 MiB seed in ~3.2 s (debug build, single-threaded PHP dev server).
+- Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`); the desktop gets no S3 key. `E2E_API=https://backup.rui.cam` runs the same test against a deployed control plane and its real store: no local stack, and an admin approves the two printed codes into one new customer folder. 262 files + 9 MiB seed in ~3.2 s (debug build, single-threaded PHP dev server).
 - Local MinIO e2e: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh` (Laravel signs, test PUTs/GETs through the URLs).
 - Cleanup: Syncthing/WebDAV leftovers, the no-op installation repair feature and dead code removed; Windows code moved to `src/win/`.
 
 ### Roadmap (in order)
 
-1. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). `SpacesClient::createBucket` uses the AWS SDK, which `composer.json` does not require (it is only in the local `vendor/`); sign CreateBucket like `MinioBucketClient` or add the package.
+1. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). Spaces uses one shared bucket (`SPACES_BUCKET`, made once by hand); each destination is `dest/{uuid}/` inside it, so approval creates no bucket.
 2. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
 3. CI job for `dev/e2e/two-device-sync.sh`; then drop the Docker MinIO harness.
 4. Re-pair catch-up: a fresh device replays the whole change log page by page. Add a server snapshot of live tips if large destinations make that slow.
