@@ -82,7 +82,7 @@ fn run_daemon() {
         if host.auth_failed() {
             host.stop_sync();
             logs::append(
-                "daemon: chunk store credentials rejected — stopped. Re-pair, then relaunch.",
+                "daemon: sync credentials rejected — stopped. Re-pair, then relaunch.",
             );
             break;
         }

@@ -1,6 +1,6 @@
 //! Persistent desktop configuration.
 //!
-//! Schema v5 is chunk_store with signed chunk URLs (no store keys on the
+//! Schema v5 is chunk_store with signed file URLs (no store keys on the
 //! device). Older schemas keep watch_folder / pair_api_base hints but
 //! require fresh pairing.
 

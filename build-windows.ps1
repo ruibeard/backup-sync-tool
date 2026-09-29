@@ -1,4 +1,4 @@
-# Build Win7-compatible app (in-process chunk sync engine) -> root + dist\windows\
+# Build Win7-compatible app (in-process file sync engine) -> root + dist\windows\
 param([switch]$NoLaunch)
 $ErrorActionPreference = 'Stop'
 $env:PATH += ";$env:USERPROFILE\.cargo\bin"

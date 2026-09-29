@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS: release .app (in-process chunk sync engine) -> dist/macos/
+# macOS: release .app (in-process file sync engine) -> dist/macos/
 # Flags: --install --no-launch --package --identity=X
 set -euo pipefail
 cd "$(dirname "$0")"

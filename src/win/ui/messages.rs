@@ -109,7 +109,7 @@ unsafe fn on_app_connected(hwnd: HWND, wp: WPARAM) -> LRESULT {
 unsafe fn on_app_auth_failed(hwnd: HWND) -> LRESULT {
     let st = stmut(hwnd);
     let _ = st.app.send(crate::app::AppCommand::EngineFailed(
-        "Chunk store credentials were rejected.".into(),
+        "Sync credentials were rejected.".into(),
     ));
     if st.auth_failure_notified {
         return LRESULT(0);

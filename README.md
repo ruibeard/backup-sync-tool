@@ -2,7 +2,7 @@
 
 Native Windows and macOS clients for a small self-hosted Dropbox: live two-way folder sync with QR pairing, per-device credentials, revoke, and a Laravel admin shelf.
 
-Laravel is the control and metadata plane (pairing, file revisions, 30-day history, browse/health). File bytes are content-addressed chunks in an S3-compatible object store. Desktops hold no store keys: Laravel signs short-lived chunk URLs. The desktop never picks the storage vendor. Conflicts are last-writer-wins.
+Laravel is the control and metadata plane (pairing, file revisions, 30-day history, browse/health). File bytes are stored whole, under their real name and path, in an S3-compatible object store (bucket versioning keeps history). Desktops hold no store keys: Laravel signs short-lived file URLs. The desktop never picks the storage vendor. Conflicts are last-writer-wins.
 
 Technical contract: [SPEC.md](SPEC.md) (schema v5, roadmap and status).
 

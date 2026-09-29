@@ -6,15 +6,15 @@ Status and roadmap: `SPEC.md` → **Implementation status**. Work happens on bra
 
 ## Architecture (live sync)
 
-Small self-hosted Dropbox: Laravel owns pairing + sync metadata + 30-day history + file shelf. Desktop owns the Rust sync engine. Chunk bytes live in an S3-compatible object store behind a Laravel storage driver. Last-writer-wins.
+Small self-hosted Dropbox: Laravel owns pairing + sync metadata + 30-day history + file shelf. Desktop owns the Rust sync engine. File bytes live, whole and under their real path, in an S3-compatible object store behind a Laravel storage driver. Last-writer-wins.
 
 | System | Where |
 | --- | --- |
 | Control + metadata | Laravel — public `APP_URL`. Desktop `pair_api_base` must match (default `https://backup.rui.cam`; editable + persisted) |
 | Sync app | this repo — shared core + `src/sync/` engine; Windows shell in `src/win/`, macOS shell in `src/macos/` |
-| Chunk store | Object store via `BACKUP_STORAGE_DRIVER` (`spaces` for launch; `garage` self-hosted later; `minio` local tests only) |
+| Object store | Driver via `BACKUP_STORAGE_DRIVER` (`spaces` for launch; `garage` self-hosted later; `minio` local tests only) |
 
-Desktop does not choose or expose the storage vendor. Approval returns `transport: "chunk_store"` plus device token and chunk credentials.
+Desktop does not choose or expose the storage vendor. Approval returns `transport: "chunk_store"` plus device token. It carries no store keys.
 
 **Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy.
 
@@ -23,7 +23,7 @@ Desktop does not choose or expose the storage vendor. Approval returns `transpor
 After builds, operator (not agent) smokes Control plane URL:
 
 1. Laravel `APP_URL` = public control-plane base.
-2. Windows: `.\build-windows.ps1` → **CONTROL PLANE URL** = that `APP_URL` → pair → two-way sync against chunk store.
+2. Windows: `.\build-windows.ps1` → **CONTROL PLANE URL** = that `APP_URL` → pair → two-way sync against the object store.
 3. Mac: `./build-macos.sh` → tray **Control plane URL…** → same → pair → two-way sync.
 4. Confirm Laravel shelf sees files; revoke one device; fix any `control_plane_url mismatch` in logs.
 
@@ -50,7 +50,7 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 - HTTP uses blocking `ureq`; no async runtime or AWS SDK.
 - Config is `backupsynctool.json` next to the exe on Windows and under app support on macOS.
 - Device token: Windows DPAPI in `src/secret.rs` (entropy `webdavsync-v1`); macOS Keychain via `security … -A` (no Keychain password prompts on ad-hoc rebuilds).
-- Sync is the in-process Rust engine (chunk + metadata protocol in `SPEC.md`). Do not reintroduce Syncthing, WebDAV, or a second transfer stack.
+- Sync is the in-process Rust engine (whole-file + metadata protocol in `SPEC.md`). Do not reintroduce Syncthing, WebDAV, or a second transfer stack.
 - Tray: closing hides; double-click reopens.
 - Auto-update replaces one tested desktop bundle.
 - Config schema must be v5; older schemas require new pairing.
@@ -66,7 +66,7 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 - Approval must contain `transport: "chunk_store"`, `device_uuid`, `device_token`, `destination_uuid`, and `destination_label`. It carries no store keys.
 - Desktop validates, protects the token, atomically saves schema v5, and starts the sync loop.
 - Default `pair_api_base` = `https://backup.rui.cam`; editable + persisted. Optional Laravel `control_plane_url` on pair/start → mismatch log if different.
-- Metadata calls use the device token. Chunk PUT/GET use signed URLs from `chunks/present` / `chunks/download`, straight to the object store. Never log those URLs.
+- Metadata calls use the device token. File PUT/GET use signed URLs from `files/upload` / `files/download`, straight to the object store. Never log those URLs.
 - Logs always on under `logs/` next to the exe on Windows and app support on macOS.
 
 ## Sync Errors

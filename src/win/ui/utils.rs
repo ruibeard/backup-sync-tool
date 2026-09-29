@@ -301,7 +301,7 @@ unsafe fn ensure_or_prompt_watch_folder(hwnd: HWND) -> bool {
     }
 }
 
-/// Start/restart the in-process chunk sync engine for the Windows UI.
+/// Start/restart the in-process file sync engine for the Windows UI.
 unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     read_ctrls(hwnd, stmut(hwnd));
     if let Some(cancel) = stmut(hwnd).sync_cancel.take() {
@@ -331,7 +331,7 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     stmut(hwnd).sync_status_text = "Syncing...".into();
     stmut(hwnd).sync_status_state = UiSyncState::Syncing as usize;
     logs::append(&format!(
-        "Chunk sync started for {} -> {}",
+        "File sync started for {} -> {}",
         cfg.watch_folder, cfg.destination_label
     ));
     Ok(())

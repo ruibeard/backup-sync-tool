@@ -1,6 +1,6 @@
 # Backup Sync Tool — Technical Spec v5
 
-**Architecture: live sync** — a small self-hosted Dropbox built from a metadata plane (Laravel) and a chunk plane (object store).
+**Architecture: live sync** — a small self-hosted Dropbox built from a metadata plane (Laravel) and a file plane (object store). Files are stored whole, under their real name and path.
 
 Greenfield product. WebDAV, Syncthing, CT 105 hub provisioning, and shared storage passwords are out of scope. Existing prod stacks are ignored; desktops will be replaced by hand later.
 
@@ -31,7 +31,7 @@ Branches: `main` (both repos) is the legacy WebDAV production build and stays un
 | HTTP | Blocking `ureq` | same |
 | Desktop secrets | Device token in DPAPI (no store keys) | Keychain (`cam.rui.backupsynctool`) |
 | Control / metadata | Laravel at editable `pair_api_base` | same |
-| Chunk bytes | Signed URLs from Laravel, straight to the object store | same |
+| File bytes | Signed URLs from Laravel, straight to the object store | same |
 
 There is no bundled Syncthing, no WebDAV client, no Electron/webview/egui/nwg, no async runtime, and no AWS SDK. XD licence detection remains Windows-only.
 
@@ -39,36 +39,36 @@ There is no bundled Syncthing, no WebDAV client, no Electron/webview/egui/nwg, n
 
 | System | Responsibility |
 | --- | --- |
-| Laravel | Pairing/QR approve, device tokens, revoke, sync metadata (files, revisions, chunks, change cursor), 30-day version history, operator file shelf / backup health |
-| Object store | Opaque content-addressed chunk bytes only |
-| Desktop | Watch selected folder, chunk/hash, upload/download missing chunks, apply last-writer-wins updates, report status |
+| Laravel | Pairing/QR approve, device tokens, revoke, sync metadata (files, revisions, change cursor), 30-day version history, operator file shelf / backup health |
+| Object store | Whole files under their real name and path; bucket versioning keeps history |
+| Desktop | Watch selected folder, hash, upload changed files, download remote changes, apply last-writer-wins updates, report status |
 
 `pair_api_base` is Laravel only. Desktop never chooses or exposes the storage vendor; Laravel’s `BACKUP_STORAGE_DRIVER` decides.
 
 ```text
-[Win/Mac app] --pair / sync metadata / signed chunk URLs--> [Laravel]
+[Win/Mac app] --pair / sync metadata / signed file URLs--> [Laravel]
        |                                                        |
-       | PUT/GET chunks with signed URLs (no device key)        | one store key: buckets, signing, shelf
+       | PUT/GET files with signed URLs (no device key)        | one store key: buckets, signing, shelf
        v                                                        v
                          [Object store driver]
 ```
 
 ## Data model
 
-### Content-addressed chunks
+### Whole files by real name
 
-- Files are split with content-defined chunking (FastCDC or equivalent).
-- Each chunk is addressed by SHA-256.
-- Object key layout (driver-normalized): `{destination_prefix}/chunks/{sha256[0:2]}/{sha256}`.
-- Identical bytes across files/devices store once per destination.
+- Each file is one object. No chunking, no hash-named objects.
+- Object key layout: `{bucket}/{destination.name}/{relative/path}` (forward slashes, no leading slash, no `..`), for example `box.rui.cam/ruis-macbook-pro-10/Invoices/2026/inv-001.pdf`. The bucket can be browsed, copied and recovered by hand.
+- History is S3 bucket versioning. Each PUT makes a new object version, returned in the `x-amz-version-id` response header and stored as the revision's `version_id`. A store without versioning (local rclone e2e) returns no header: `version_id` is null and the latest object is used.
+- One signed PUT carries the whole file (max 5 GiB). The desktop skips bigger files with a log line.
 
 ### File revision (metadata, Laravel)
 
-A live file is an ordered list of chunk hashes plus:
+A live file is one object plus:
 
 - stable `file_id` (UUID; survives renames)
 - relative path within the customer destination
-- size, mtime (client hint), content sha256 of the full file
+- size, mtime (client hint), content sha256 of the full file, `version_id` (object version, nullable)
 - `revision` (monotonic per `file_id`)
 - `updated_at` (server time)
 - `updated_by_device_uuid`
@@ -79,18 +79,18 @@ A live file is an ordered list of chunk hashes plus:
 When two devices mutate the same `file_id` (or same path for a new file) concurrently:
 
 1. Laravel accepts the write with the higher server-assigned `revision` / later commit timestamp as authoritative.
-2. The losing revision is retained as history for 30 days, then pruned with unreferenced chunks.
+2. The losing revision is retained as history for 30 days, then pruned.
 3. Desktops do **not** create `.sync-conflict` copies.
 4. The losing device replaces its local bytes with the winner on next pull.
 
-Renames update path metadata for the same `file_id`. Deletes set a tombstone and propagate to all devices; tombstones and prior revisions remain recoverable in Laravel for 30 days.
+Renames update path metadata for the same `file_id`: the desktop uploads the bytes at the new path and commits, and Laravel deletes the old key. Deletes remove the object (a delete marker under versioning) and set a tombstone and propagate to all devices; tombstones and prior revisions remain recoverable in Laravel for 30 days.
 
 ### Destinations and devices
 
 - One `BackupDestination` (customer) owns one object-store prefix/bucket assignment.
 - Each approved device receives a distinct device UUID and device token. It gets no object-store key.
-- Laravel keeps one store key per install. It signs short-lived (1 h) chunk PUT/GET URLs, scoped to the destination prefix, for a valid device token.
-- Revoke: mark the device revoked. Its token then gets `401`, so it gets no more chunk URLs. URLs already signed expire within 1 h. Do not delete customer files.
+- Laravel keeps one store key per install. It signs short-lived (1 h) PUT/GET URLs, each for one object key under the destination prefix, for a valid device token.
+- Revoke: mark the device revoked. Its token then gets `401`, so it gets no more file URLs. URLs already signed expire within 1 h. Do not delete customer files.
 - Re-pair of the same machine creates a new device row/token and revokes the previous active row for that machine.
 
 ## Configuration
@@ -121,7 +121,7 @@ Paths:
 | Local sync DB | `%LOCALAPPDATA%\BackupSyncTool\sync\` | `~/Library/Application Support/BackupSyncTool/sync/` |
 | Logs | `logs\` beside executable | `~/Library/Application Support/BackupSyncTool/logs` |
 
-On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt for a Keychain password. On Windows, DPAPI uses the established application entropy (`webdavsync-v1`). Never log device tokens or signed chunk URLs.
+On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt for a Keychain password. On Windows, DPAPI uses the established application entropy (`webdavsync-v1`). Never log device tokens or signed file URLs.
 
 ## Pairing contract
 
@@ -158,7 +158,7 @@ Admin approval selects/creates a `BackupDestination` and the device, then return
 }
 ```
 
-Client rejects any transport other than `chunk_store` or missing fields. It protects the device token, atomically writes schema v5, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel keeps only the token hash.
+The wire string `chunk_store` is historical: it now means whole-file sync through signed URLs, and stays so devices need no re-pair. Client rejects any transport other than `chunk_store` or missing fields. It protects the device token, atomically writes schema v5, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel keeps only the token hash.
 
 Default `pair_api_base` = `https://backup.rui.cam` (editable + persisted: Windows **CONTROL PLANE URL** on blur + pair; macOS tray **Control plane URL…**).
 
@@ -172,15 +172,15 @@ Minimum surface (names may be refined in Laravel; behavior is normative):
 | --- | --- |
 | `GET /api/sync/cursor` | Current destination change cursor / generation |
 | `GET /api/sync/changes?since=` | Metadata changes since cursor (upserts, renames, tombstones) |
-| `POST /api/sync/commit` | Propose file revision: path, `file_id`, chunk hash list, size, content hash, client mtime, base revision |
+| `POST /api/sync/commit` | Propose file revision: path, `file_id`, size, content hash, `version_id` (from the PUT response), client mtime, base revision |
 | `POST /api/sync/commit/batch` | Up to 200 commits in order; `results[i]` is item `i`'s commit or `{error}` (one bad item does not stop the rest) |
-| `POST /api/sync/chunks/present` | Up to 2000 hashes → `present`, `missing`, and `upload_urls` (hash → signed PUT URL for each missing chunk) |
-| `POST /api/sync/chunks/download` | Up to 2000 hashes → `urls` (hash → signed GET URL) |
-| `POST /api/sync/restore` (admin/desktop optional) | Materialize a historical revision as the new live tip (LWW commit) |
+| `POST /api/sync/files/upload` | `{files:[{path,size,content_sha256}]}` (1..200) → `{urls, expires_in}`: one signed PUT URL per file, same order |
+| `POST /api/sync/files/download` | `{files:[{path,version_id\|null}]}` (1..500) → `{urls, expires_in}`: one signed GET URL per file, same order; with a `version_id` the URL asks for that version |
+| `POST /api/sync/restore` (admin/desktop optional) | Server-side CopyObject of an old `version_id` onto the live key, then commit with the new version (422 if the old revision has no version) |
 
 Sync routes are rate-limited per device (`throttle:sync`, 600/min), not per IP: behind the Cloudflare tunnel many devices can share one IP.
 
-Chunk bytes go **only** to the object store, through the signed URLs (SigV4 query auth, `UNSIGNED-PAYLOAD`, 1 h). Laravel does not proxy bulk desktop transfers, so bytes never pass through PHP or Cloudflare. The desktop checks every downloaded chunk against its SHA-256. Both responses carry `expires_in`.
+File bytes go **only** to the object store, through the signed URLs (SigV4 query auth, `UNSIGNED-PAYLOAD`, 1 h). Laravel does not proxy bulk desktop transfers, so bytes never pass through PHP or Cloudflare. The desktop checks every downloaded file against its SHA-256. `commit`/`commit/batch` side effects: a delete removes the object, and a `file_id` committed under a new path removes the old key. S3 errors there are logged and never fail the commit. A `changes` payload is `{size, content_sha256, version_id, deleted, updated_by_device_uuid}`.
 
 ### Desktop sync loop
 
@@ -188,9 +188,9 @@ On launch (if paired), after approval, and after watch-path save:
 
 1. Ensure local sync DB exists.
 2. Scan / watch the selected folder. FS events wake the loop at once (after a 0.5 s settle); otherwise it polls `sync/cursor` every 4 s.
-3. Push local changes in batches (≤200 files, ~256 MB): stream-chunk files (never read whole into memory) → one `chunks/present` (returns PUT URLs) → upload missing chunks with 8 parallel workers → one `sync/commit/batch`. Local deletes go in `commit/batch` too.
-4. When the server cursor is ahead, pull `sync/changes` pages: get GET URLs from `chunks/download` in groups of 500 just before use, fetch the chunks in parallel into a local cache (reusing matching chunks from the old local copy), then apply changes in cursor order. Only the last change per file in a page is applied. An expired URL fails like any transfer error; the next loop signs fresh ones.
-5. Only the pull advances the local cursor (a commit's cursor can jump past another device's change). A failing remote change is retried 3 times, then skipped. Chunk PUT/GET retry transient store errors in place.
+3. Push local changes in batches (≤200 files, ~256 MB): stream-hash files (never read whole into memory) → one `files/upload` (returns PUT URLs) → PUT each file streaming from disk with `Content-Length`, 8 parallel workers, and keep `x-amz-version-id` → one `sync/commit/batch` with `version_id`. A file that changed during the upload is not committed and retries next loop. A rename is an upload at the new path plus a commit; Laravel deletes the old key. Local deletes go in `commit/batch` too.
+4. When the server cursor is ahead, pull `sync/changes` pages: skip a change when the local file already has its SHA-256; otherwise get GET URLs from `files/download` in groups (≤500 files, ~256 MB) just before use, stream the files in parallel into `.{cursor}.bst-tmp` files in the target folder (the scanner and watcher ignore `*.bst-tmp`), verify the SHA-256, then apply changes in cursor order with an atomic rename over the target. Only the last change per file in a page is applied. An expired URL fails like any transfer error; the next loop signs fresh ones.
+5. Only the pull advances the local cursor (a commit's cursor can jump past another device's change). A failing remote change is retried 3 times, then skipped. File PUT/GET retry transient store errors in place.
 6. Skip unchanged files by size + nanosecond mtime (whole seconds miss same-size edits made right after a sync).
 7. Report status and activity through `AppCommand::EngineStatus` / `Activity`; auth failure sends `EngineFailed` (pair again). Offline is not credential failure.
 
@@ -208,11 +208,11 @@ All approved devices may create, edit, rename, and delete. There is no `can_dele
 
 ## Storage drivers
 
-Laravel's `StorageProvisioner` creates destinations; `ChunkUrlSigner` signs chunk URLs with the driver's one key:
+Laravel's `StorageProvisioner` creates destinations; `ObjectStoreClient` signs file URLs with the driver's one key:
 
 | Driver | Role |
 | --- | --- |
-| `spaces` | Launch driver. One shared bucket (`SPACES_BUCKET`, no dots); each customer is `dest/{uuid}/` inside it. `SPACES_KEY` signs URLs and reads the shelf. No per-device keys, so the 200-key account limit does not apply |
+| `spaces` | Launch driver. One shared bucket (`SPACES_BUCKET`, no dots); each customer is `{destination.name}/` inside it, with bucket versioning on (`php artisan storage:versioning`). `SPACES_KEY` signs URLs and reads the shelf. No per-device keys, so the 200-key account limit does not apply |
 | `garage` | Self-hosted S3-compatible; Admin API creates the bucket; the scanner key signs URLs |
 | `minio` | Local dev/e2e harness only (root key). Not for production: MinIO community edition is in maintenance mode |
 | `b2` | Not wired. Candidate managed driver if Spaces cost grows |
@@ -255,13 +255,13 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 4. Concurrent edit → last-writer-wins; loser converges to winner; loser revision visible in 30-day history.
 5. Revoke one device → uploads/metadata calls fail; other devices and data remain.
 6. Laravel shelf shows files and recent activity without SSH/Filestash.
-7. No public chunk-store admin API exposure beyond the intended S3 endpoint.
+7. No public object-store admin API exposure beyond the intended S3 endpoint.
 
 ## Code layout (desktop)
 
 | Path | Scope |
 | --- | --- |
-| `src/sync/` | Shared sync engine: chunker, signed-URL chunk transfers, metadata API client, local state, FS watcher |
+| `src/sync/` | Shared sync engine: signed-URL whole-file transfers, metadata API client, local state, FS watcher |
 | `src/pairing.rs`, `src/config.rs`, `src/secret.rs`, `src/updater.rs`, `src/app.rs`, `src/paths.rs`, `src/logs.rs` | Shared core |
 | `src/win/` | Windows shell: Win32 UI (`ui.rs` + `ui/` shards), tray, XD licence detection |
 | `src/macos/` | macOS shell: menubar, status window, LaunchAgent daemon, `host.rs` sync host |
@@ -270,17 +270,17 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 ### Done
 
-- Laravel (`box-rui-cam` `live-sync`): `chunk_store` pairing + provisioner (fake, Garage, Spaces, MinIO), sync APIs (cursor / changes / chunks/present / chunks/download / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
-- Desktop: schema v5 pairing (Win + Mac), in-process sync engine, FastCDC chunking, FS watcher with mtime/size skip.
-- Engine speed: batched `chunks/present` + `commit/batch`, 8 parallel chunk transfers, streamed chunking, local chunk reuse on download, 4 s cursor poll, status and activity sent to both UIs.
-- Signed chunk URLs (schema v5): devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
+- Laravel (`box-rui-cam` `live-sync`): `chunk_store` pairing + provisioner (fake, Garage, Spaces, MinIO), sync APIs (cursor / changes / files/upload / files/download / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
+- Desktop: schema v5 pairing (Win + Mac), in-process sync engine, whole-file sync by real name and path, FS watcher with mtime/size skip.
+- Engine speed: batched `files/upload` + `commit/batch`, 8 parallel streaming file transfers, streamed hashing, skip download when the local hash matches, 4 s cursor poll, status and activity sent to both UIs.
+- Signed file URLs (schema v5): devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
 - Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`); the desktop gets no S3 key. `E2E_API=https://backup.rui.cam` runs the same test against a deployed control plane and its real store: no local stack, and an admin approves the two printed codes into one new customer folder. 262 files + 9 MiB seed in ~3.2 s (debug build, single-threaded PHP dev server).
 - Local MinIO e2e: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh` (Laravel signs, test PUTs/GETs through the URLs).
 - Cleanup: Syncthing/WebDAV leftovers, the no-op installation repair feature and dead code removed; Windows code moved to `src/win/`.
 
 ### Roadmap (in order)
 
-1. **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). Spaces uses one shared bucket (`SPACES_BUCKET`, made once by hand); each destination is `dest/{uuid}/` inside it, so approval creates no bucket.
+1. **Whole-file e2e** (local rclone, then production) and turn on bucket versioning on the Space (`php artisan storage:versioning`). Then **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). Spaces uses one shared bucket (`SPACES_BUCKET`, made once by hand); each destination is `{destination.name}/` inside it, so approval creates no bucket.
 2. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
 3. CI job for `dev/e2e/two-device-sync.sh`; then drop the Docker MinIO harness.
 4. Re-pair catch-up: a fresh device replays the whole change log page by page. Add a server snapshot of live tips if large destinations make that slow.

@@ -2,7 +2,6 @@
 
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -12,7 +11,7 @@ pub struct ChangePayload {
     #[serde(default)]
     pub content_sha256: Option<String>,
     #[serde(default)]
-    pub chunk_hashes: Vec<String>,
+    pub version_id: Option<String>,
     #[serde(default)]
     pub deleted: bool,
     #[serde(default)]
@@ -36,13 +35,22 @@ pub struct ChangesPage {
     pub changes: Vec<RemoteChange>,
 }
 
+/// One file in a `files/upload` request.
+#[derive(Debug, Clone)]
+pub struct UploadRequest {
+    pub path: String,
+    pub size: u64,
+    pub content_sha256: String,
+}
+
 /// One file in a `commit/batch` request.
 #[derive(Debug, Clone)]
 pub struct CommitItem {
     pub path: String,
     pub size: u64,
     pub content_sha256: String,
-    pub chunk_hashes: Vec<String>,
+    /// Object version from the PUT response (`x-amz-version-id`), if any.
+    pub version_id: Option<String>,
     pub file_id: Option<String>,
     pub base_revision: Option<u64>,
     pub deleted: bool,
@@ -58,7 +66,7 @@ impl CommitItem {
             } else {
                 json!(self.content_sha256)
             },
-            "chunk_hashes": self.chunk_hashes,
+            "version_id": self.version_id,
             "deleted": self.deleted,
         });
         if let Some(id) = &self.file_id {
@@ -168,18 +176,37 @@ impl SyncApiClient {
         })
     }
 
-    /// Chunks the store lacks, each with a signed PUT URL.
-    pub fn missing_chunks(&self, hashes: &[String]) -> Result<HashMap<String, String>, ApiError> {
-        let url = format!("{}/api/sync/chunks/present", self.base);
-        let parsed = self.post_json(&url, &json!({ "hashes": hashes }).to_string())?;
-        signed_urls(&parsed, "upload_urls")
+    /// Signed PUT URLs, one per file, in request order.
+    pub fn upload_urls(&self, files: &[UploadRequest]) -> Result<Vec<String>, ApiError> {
+        let url = format!("{}/api/sync/files/upload", self.base);
+        let body = json!({
+            "files": files
+                .iter()
+                .map(|f| json!({
+                    "path": f.path,
+                    "size": f.size,
+                    "content_sha256": f.content_sha256,
+                }))
+                .collect::<Vec<_>>()
+        });
+        let parsed = self.post_json(&url, &body.to_string())?;
+        signed_urls(&parsed, files.len())
     }
 
-    /// Signed GET URLs for chunks to download.
-    pub fn download_urls(&self, hashes: &[String]) -> Result<HashMap<String, String>, ApiError> {
-        let url = format!("{}/api/sync/chunks/download", self.base);
-        let parsed = self.post_json(&url, &json!({ "hashes": hashes }).to_string())?;
-        signed_urls(&parsed, "urls")
+    /// Signed GET URLs, one per `(path, version_id)`, in request order.
+    pub fn download_urls(
+        &self,
+        files: &[(String, Option<String>)],
+    ) -> Result<Vec<String>, ApiError> {
+        let url = format!("{}/api/sync/files/download", self.base);
+        let body = json!({
+            "files": files
+                .iter()
+                .map(|(path, version_id)| json!({ "path": path, "version_id": version_id }))
+                .collect::<Vec<_>>()
+        });
+        let parsed = self.post_json(&url, &body.to_string())?;
+        signed_urls(&parsed, files.len())
     }
 
     /// Commit files in order. Each entry is that item's result or its error.
@@ -262,18 +289,23 @@ fn parse_commit_result(value: &serde_json::Value, path: &str) -> Result<CommitRe
     })
 }
 
-fn signed_urls(
-    parsed: &serde_json::Value,
-    field: &str,
-) -> Result<HashMap<String, String>, ApiError> {
+/// Read `urls` from a response; it must hold exactly `expected` strings.
+fn signed_urls(parsed: &serde_json::Value, expected: usize) -> Result<Vec<String>, ApiError> {
     let urls = parsed
-        .get(field)
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| ApiError::Other(format!("response without {field}")))?;
-    Ok(urls
+        .get("urls")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ApiError::Other("response without urls".into()))?;
+    let urls: Vec<String> = urls
         .iter()
-        .filter_map(|(hash, url)| Some((hash.clone(), url.as_str()?.to_string())))
-        .collect())
+        .filter_map(|u| u.as_str().map(str::to_string))
+        .collect();
+    if urls.len() != expected {
+        return Err(ApiError::Other(format!(
+            "expected {expected} signed URLs, got {}",
+            urls.len()
+        )));
+    }
+    Ok(urls)
 }
 
 fn parse_payload(value: serde_json::Value) -> ChangePayload {
@@ -317,25 +349,48 @@ mod tests {
         let value = serde_json::json!({
             "size": 12,
             "content_sha256": "aa",
-            "chunk_hashes": ["bb"],
+            "version_id": "v1",
             "deleted": false,
             "updated_by_device_uuid": "dev-1"
         });
         let payload = parse_payload(value);
         assert_eq!(payload.size, 12);
         assert_eq!(payload.content_sha256.as_deref(), Some("aa"));
-        assert_eq!(payload.chunk_hashes, vec!["bb".to_string()]);
+        assert_eq!(payload.version_id.as_deref(), Some("v1"));
         assert_eq!(payload.updated_by_device_uuid.as_deref(), Some("dev-1"));
     }
 
     #[test]
-    fn signed_urls_need_the_field_and_map_hashes() {
-        let body = serde_json::json!({ "upload_urls": { "aa": "https://s/aa?sig", "bb": 1 } });
-        let urls = signed_urls(&body, "upload_urls").unwrap();
-        assert_eq!(urls.len(), 1);
-        assert_eq!(urls["aa"], "https://s/aa?sig");
-        // Old servers without signed URLs must fail loudly, not upload nothing.
-        assert!(signed_urls(&serde_json::json!({ "missing": [] }), "upload_urls").is_err());
+    fn signed_urls_keep_order_and_count() {
+        let body = serde_json::json!({ "urls": ["https://s/a?sig", "https://s/b?sig"], "expires_in": 3600 });
+        assert_eq!(
+            signed_urls(&body, 2).unwrap(),
+            vec!["https://s/a?sig".to_string(), "https://s/b?sig".to_string()]
+        );
+        // A short or missing list must fail loudly, not upload the wrong file.
+        assert!(signed_urls(&body, 3).is_err());
+        assert!(signed_urls(&serde_json::json!({ "missing": [] }), 0).is_err());
+    }
+
+    #[test]
+    fn commit_item_json_carries_version_id() {
+        let item = CommitItem {
+            path: "a/b.txt".into(),
+            size: 3,
+            content_sha256: "aa".into(),
+            version_id: Some("v9".into()),
+            file_id: None,
+            base_revision: None,
+            deleted: false,
+        };
+        let body = item.to_json();
+        assert_eq!(body["version_id"], "v9");
+        assert!(body.get("chunk_hashes").is_none());
+        let none = CommitItem {
+            version_id: None,
+            ..item
+        };
+        assert!(none.to_json()["version_id"].is_null());
     }
 
     #[test]

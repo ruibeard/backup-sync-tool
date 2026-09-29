@@ -1,4 +1,4 @@
-//! Headless sync host for the macOS menubar / daemon (chunk sync engine).
+//! Headless sync host for the macOS menubar / daemon (file sync engine).
 
 use crate::app::{
     AppCommand, AppController, AppHandle, AppSnapshot, ConnectionState, PairingState, WorkState,
@@ -134,7 +134,7 @@ impl SyncHost {
         self.reconnect_required.store(false, Ordering::Relaxed);
         self.engine = Some(engine);
         logs::append(&format!(
-            "Chunk sync started: destination={}",
+            "File sync started: destination={}",
             self.config.destination_uuid
         ));
         Ok(())
@@ -191,7 +191,7 @@ impl SyncHost {
         self.stop_sync();
         self.apply_pair_approval(status)?;
         self.restart_sync()?;
-        logs::append("Pairing complete; chunk sync started.");
+        logs::append("Pairing complete; file sync started.");
         Ok(())
     }
 

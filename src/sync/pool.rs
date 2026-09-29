@@ -1,4 +1,4 @@
-//! Small scoped worker pool for parallel hashing and chunk transfers.
+//! Small scoped worker pool for parallel hashing and file transfers.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;

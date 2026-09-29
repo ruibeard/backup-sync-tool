@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Two-device live sync proof, no Docker:
 #   rclone S3 server (local dir) + Laravel on a scratch SQLite DB + desktop engine test.
-#   Devices get signed chunk URLs from Laravel; only Laravel knows the S3 key.
+#   Devices get signed file URLs from Laravel; only Laravel knows the S3 key.
 # Needs: rclone, php, jq, cargo, and box-rui-cam next to this repo (or LARAVEL_ROOT).
 #
 # E2E_API=https://backup.rui.cam runs the same test against a deployed control plane

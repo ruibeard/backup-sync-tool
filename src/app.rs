@@ -1,6 +1,6 @@
 //! Shared application state for the native Windows and macOS shells.
 //!
-//! The in-process chunk sync engine owns transfer scheduling. Native controls
+//! The in-process file sync engine owns transfer scheduling. Native controls
 //! send `AppCommand`s and render immutable `AppSnapshot`s; they never model a
 //! transport queue or attempt individual-file retries.
 
@@ -108,7 +108,7 @@ pub enum AppCommand {
     },
     CancelPairing,
     EngineStarting,
-    /// Update work phase after the in-process chunk engine starts or settles.
+    /// Update work phase after the in-process file sync engine starts or settles.
     Work(WorkState),
     EngineStatus {
         connected: bool,
