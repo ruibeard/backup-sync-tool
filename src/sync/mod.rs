@@ -1,14 +1,12 @@
-//! In-process sync engine (file metadata + whole files in an object store).
+//! In-process sync engine. The bucket is the file index.
 //!
-//! Each loop pushes local changes in batches (hash, one `files/upload`, parallel
-//! streaming PUT, one `commit/batch` per batch), then pulls remote changes when
-//! the server cursor moved (parallel streaming GET into temp files next to the
-//! targets, then atomic rename in cursor order). Only the pull advances the
-//! local cursor, so changes from other devices are never skipped.
+//! Each round lists the customer folder (one call), compares it and the local
+//! folder with what this device last synced, and moves only what differs:
+//! parallel streaming PUT/GET/DELETE on presigned URLs that Laravel signs.
+//! The server keeps no file records, so nothing can drift from the bucket.
 //!
 //! Files are stored whole under their real name and path. The device holds no
-//! store keys: every PUT/GET uses a short-lived URL that Laravel signs for one
-//! object key.
+//! store keys.
 
 mod client;
 mod pool;
@@ -19,10 +17,11 @@ mod watch;
 use crate::app::AppCommand;
 use crate::config::{self, Config};
 use crate::logs;
-use client::{ApiError, CommitItem, RemoteChange, SyncApiClient, UploadRequest};
-use state::{state_path_for_destination, FileTip, SyncState};
+use client::{ApiError, Method, RemoteFile, SyncApiClient};
+use state::{state_path, SyncState, Synced};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -32,28 +31,50 @@ use std::time::{Duration, UNIX_EPOCH};
 use store::{hash_file, FileStore, MAX_FILE_BYTES};
 use watch::FolderWatcher;
 
-/// Temp files (downloads in progress) end with this. The scanner and the
-/// watcher ignore them.
+/// Temp files (downloads in progress) end with this.
 const TEMP_SUFFIX: &str = ".bst-tmp";
 
-/// How often the engine asks the server for remote changes when idle.
+/// OS files that never sync: Finder, Spotlight, Explorer and Office lock files.
+const IGNORED_NAMES: &[&str] = &[
+    ".DS_Store",
+    ".localized",
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+    ".TemporaryItems",
+    "Icon\r",
+    "Thumbs.db",
+    "desktop.ini",
+    "$RECYCLE.BIN",
+];
+
+/// True for our temp files and OS junk. Scan, watcher and pull all skip them.
+fn is_ignored(name: &str) -> bool {
+    name.ends_with(TEMP_SUFFIX)
+        || name.starts_with("._")
+        || name.starts_with("~$")
+        || IGNORED_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
+}
+
+/// True when any segment of a relative path is ignored.
+fn is_ignored_path(rel: &str) -> bool {
+    rel.split('/').any(is_ignored)
+}
+
+/// How often the engine lists the bucket when idle.
 const REMOTE_POLL: Duration = Duration::from_secs(4);
 const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 /// Let writes settle after a file-system event before scanning.
 const FS_SETTLE: Duration = Duration::from_millis(500);
 const TRANSFER_WORKERS: usize = 8;
 const HASH_WORKERS: usize = 4;
-/// Files per `commit/batch` (server cap is 200).
+/// Files per signing request (server cap is 500).
 const BATCH_FILES: usize = 200;
-/// Soft cap on bytes hashed and uploaded (or downloaded) per batch.
+/// Soft cap on bytes per batch. URLs are signed per batch, just before use,
+/// so they stay fresh on slow links.
 const BATCH_BYTES: u64 = 256 * 1024 * 1024;
-/// Download URLs are signed per group, just before use, so they stay fresh on slow links.
-/// `files/download` accepts up to 500 files.
-const DOWNLOAD_GROUP: usize = 500;
 /// Extra attempts for one file PUT/GET before it counts as failed.
 const TRANSFER_RETRIES: u32 = 2;
-/// A remote change that fails this many times is skipped so later changes still apply.
-const MAX_APPLY_ATTEMPTS: u32 = 3;
 /// Activity lists each file up to this count, then one summary line.
 const MAX_ACTIVITY_LINES: usize = 10;
 
@@ -155,7 +176,6 @@ impl Reporter {
 }
 
 struct Ctx<'a> {
-    device_uuid: &'a str,
     root: PathBuf,
     api: SyncApiClient,
     store: FileStore,
@@ -178,20 +198,6 @@ struct Outcome {
     retry: bool,
 }
 
-impl Outcome {
-    fn merge(&mut self, other: Outcome) {
-        self.changed |= other.changed;
-        self.retry |= other.retry;
-    }
-}
-
-/// Tracks repeated failures of the first unapplied remote change.
-#[derive(Default)]
-struct ApplyRetry {
-    cursor: u64,
-    attempts: u32,
-}
-
 fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
     let device_token = match crate::secret::decrypt(&cfg.device_token_enc) {
         Ok(v) => v,
@@ -202,9 +208,8 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
         }
     };
 
-    let state_path = state_path_for_destination(&cfg.destination_uuid);
+    let state_path = state_path(&cfg.device_uuid);
     let ctx = Ctx {
-        device_uuid: &cfg.device_uuid,
         root: PathBuf::from(cfg.watch_folder.trim()),
         api: SyncApiClient::new(&cfg.pair_api_base, &device_token),
         store: FileStore::new(),
@@ -213,7 +218,6 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
     };
 
     let mut state = SyncState::load(&state_path);
-    let mut apply_retry = ApplyRetry::default();
     let dirty = Arc::new(AtomicBool::new(true));
     let _watcher = FolderWatcher::start(&ctx.root, Arc::clone(&dirty));
 
@@ -221,336 +225,582 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
         if dirty.load(Ordering::Acquire) {
             sleep_interruptible(&stop, None, FS_SETTLE);
         }
-
-        let remote_cursor = match ctx.api.cursor() {
-            Ok(cursor) => cursor,
+        // A file-system event forces a local scan; a quiet poll scans only
+        // when the bucket listing differs from the last sync.
+        let scan = dirty.swap(false, Ordering::AcqRel);
+        match sync_round(&ctx, &mut state, scan, &mut reporter) {
+            Ok(outcome) => {
+                if outcome.changed {
+                    if let Err(err) = state.save(&state_path) {
+                        logs::append(&format!("sync: state save failed: {err}"));
+                    }
+                }
+                reporter.status(true, "idle", state.files.len(), 0, 0);
+                if outcome.retry {
+                    dirty.store(true, Ordering::Release);
+                }
+            }
             Err(ApiError::Auth(err)) => {
-                logs::append(&format!("sync: auth error on cursor: {err}"));
+                logs::append(&format!("sync: auth error: {err}"));
+                let _ = state.save(&state_path);
                 reporter.failed("This computer was disconnected. Pair it again.");
                 return;
             }
             Err(err) => {
-                logs::append(&format!("sync: cursor failed: {err}"));
+                logs::append(&format!("sync: round failed: {err}"));
                 reporter.status(false, "offline", state.files.len(), 0, 0);
-                sleep_interruptible(&stop, Some(&dirty), ERROR_BACKOFF);
+                dirty.store(true, Ordering::Release);
+                sleep_interruptible(&stop, None, ERROR_BACKOFF);
                 continue;
             }
-        };
-
-        let mut outcome = Outcome::default();
-        if dirty.swap(false, Ordering::AcqRel) {
-            match push_local_changes(&ctx, &mut state, &mut reporter) {
-                Ok(pushed) => outcome.merge(pushed),
-                Err(ApiError::Auth(msg)) => {
-                    logs::append(&format!("sync: auth error on push: {msg}"));
-                    let _ = state.save(&state_path);
-                    reporter.failed("This computer was disconnected. Pair it again.");
-                    return;
-                }
-                Err(err) => {
-                    logs::append(&format!("sync: push failed: {err}"));
-                    outcome.changed = true;
-                    outcome.retry = true;
-                }
-            }
         }
-
-        if remote_cursor > state.cursor {
-            match pull_remote_changes(&ctx, &mut state, &mut reporter, &mut apply_retry) {
-                Ok(pulled) => outcome.merge(pulled),
-                Err(ApiError::Auth(err)) => {
-                    logs::append(&format!("sync: auth error on pull: {err}"));
-                    let _ = state.save(&state_path);
-                    reporter.failed("This computer was disconnected. Pair it again.");
-                    return;
-                }
-                Err(err) => {
-                    logs::append(&format!("sync: pull failed: {err}"));
-                    outcome.changed = true;
-                }
-            }
-        }
-
-        if outcome.changed {
-            if let Err(err) = state.save(&state_path) {
-                logs::append(&format!("sync: state save failed: {err}"));
-            }
-        }
-        reporter.status(true, "idle", state.files.len(), 0, 0);
-        // Wake at once on FS events; otherwise poll the server cursor.
+        // Wake at once on FS events; otherwise list the bucket again.
         sleep_interruptible(&stop, Some(&dirty), REMOTE_POLL);
-        if outcome.retry {
-            dirty.store(true, Ordering::Release);
-        }
     }
     let _ = state.save(&state_path);
 }
 
-struct Candidate {
-    rel: String,
-    abs: PathBuf,
+/// Local file facts taken during the scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Local {
     size: u64,
     mtime_ns: u64,
 }
 
-fn push_local_changes(
+/// What to do with one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    Skip,
+    Upload,
+    Download,
+    DeleteRemote,
+    DeleteLocal,
+    /// Neither side has the file any more.
+    Forget,
+    /// Both sides have it: hash the local file. Equal bytes just update the
+    /// state; different bytes take `if_different`.
+    Compare(Different),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Different {
+    /// Only the local side changed.
+    Upload,
+    /// Both sides changed (or the file is new to this device): newer wins.
+    NewerWins,
+}
+
+/// Three-way compare of one path: local file, bucket object and the state
+/// from the last sync. `keep_local` stops "gone from the bucket" from
+/// deleting local files (an empty listing that follows a full one).
+fn decide(
+    tip: Option<&Synced>,
+    local: Option<Local>,
+    remote: Option<&RemoteFile>,
+    keep_local: bool,
+) -> Decision {
+    let local_changed = |t: &Synced, l: Local| (l.size, l.mtime_ns) != (t.size, t.mtime_ns);
+    match (local, remote, tip) {
+        (Some(_), Some(_), None) => Decision::Compare(Different::NewerWins),
+        (Some(l), Some(r), Some(t)) => match (local_changed(t, l), r.etag != t.etag) {
+            (false, false) => Decision::Skip,
+            (false, true) => Decision::Download,
+            (true, false) => Decision::Compare(Different::Upload),
+            (true, true) => Decision::Compare(Different::NewerWins),
+        },
+        (Some(_), None, None) => Decision::Upload,
+        (Some(l), None, Some(t)) => {
+            if local_changed(t, l) || keep_local {
+                Decision::Upload
+            } else {
+                Decision::DeleteLocal
+            }
+        }
+        (None, Some(_), None) => Decision::Download,
+        (None, Some(r), Some(t)) => {
+            if r.etag == t.etag {
+                Decision::DeleteRemote
+            } else {
+                Decision::Download
+            }
+        }
+        (None, None, Some(_)) => Decision::Forget,
+        (None, None, None) => Decision::Skip,
+    }
+}
+
+/// True when the listing differs from the state: a quiet round then has
+/// something to do even without a local change.
+fn remote_differs(remote: &HashMap<String, RemoteFile>, state: &SyncState) -> bool {
+    remote.len() != state.files.len()
+        || remote
+            .iter()
+            .any(|(path, file)| state.files.get(path).map(|t| &t.etag) != Some(&file.etag))
+}
+
+struct Upload {
+    rel: String,
+    abs: PathBuf,
+    local: Local,
+}
+
+struct Download {
+    rel: String,
+    remote: RemoteFile,
+    /// Local file seen at plan time. A change before the rename cancels it.
+    local: Option<Local>,
+}
+
+#[derive(Default)]
+struct Plan {
+    uploads: Vec<Upload>,
+    downloads: Vec<Download>,
+    remote_deletes: Vec<String>,
+    local_deletes: Vec<String>,
+}
+
+fn sync_round(
     ctx: &Ctx,
     state: &mut SyncState,
+    scan: bool,
     reporter: &mut Reporter,
 ) -> Result<Outcome, ApiError> {
     let mut out = Outcome::default();
     if !ctx.root.is_dir() {
         return Ok(out);
     }
-
-    let local_files = scan_files(&ctx.root).map_err(ApiError::Other)?;
-    let mut candidates = Vec::new();
-    for (rel, abs) in &local_files {
-        let Ok((size, mtime_ns)) = file_fingerprint(abs) else {
-            out.retry = true;
-            continue;
-        };
-        if size > MAX_FILE_BYTES {
-            let first = ctx
-                .oversize_logged
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(rel.clone());
-            if first {
-                logs::append(&format!("sync: skip {rel}: larger than 5 GiB"));
-            }
-            continue;
-        }
-        if let Some(tip) = state.files.get(rel) {
-            if tip.size == size
-                && tip.mtime_ns == mtime_ns
-                && mtime_ns > 0
-                && !tip.content_sha256.is_empty()
-            {
-                continue;
-            }
-        }
-        candidates.push(Candidate {
-            rel: rel.clone(),
-            abs: abs.clone(),
-            size,
-            mtime_ns,
-        });
-    }
-    let deleted: Vec<(String, FileTip)> = state
-        .files
-        .iter()
-        .filter(|(path, _)| !local_files.contains_key(*path))
-        .map(|(path, tip)| (path.clone(), tip.clone()))
+    let remote: HashMap<String, RemoteFile> = ctx
+        .api
+        .list_files()?
+        .into_iter()
+        .filter(|f| !f.path.ends_with('/') && !is_ignored_path(&f.path))
+        .map(|f| (f.path.clone(), f))
         .collect();
-    if candidates.is_empty() && deleted.is_empty() {
+    if !scan && !remote_differs(&remote, state) {
         return Ok(out);
     }
 
-    let mut need_files = (candidates.len() + deleted.len()) as u64;
-    let mut need_bytes: u64 = candidates.iter().map(|c| c.size).sum();
+    let files = scan_files(&ctx.root).map_err(ApiError::Other)?;
+    let plan = make_plan(ctx, state, &files, &remote, &mut out);
+    let mut need_files = (plan.uploads.len()
+        + plan.downloads.len()
+        + plan.remote_deletes.len()
+        + plan.local_deletes.len()) as u64;
+    if need_files == 0 {
+        return Ok(out);
+    }
+    let mut need_bytes = plan.uploads.iter().map(|u| u.local.size).sum::<u64>()
+        + plan.downloads.iter().map(|d| d.remote.size).sum::<u64>();
     reporter.status(true, "syncing", state.files.len(), need_files, need_bytes);
 
-    for batch in batches(&candidates) {
+    let mut progress = |reporter: &mut Reporter, state: &SyncState, files: usize, bytes: u64| {
+        need_files = need_files.saturating_sub(files as u64);
+        need_bytes = need_bytes.saturating_sub(bytes);
+        reporter.status(true, "syncing", state.files.len(), need_files, need_bytes);
+    };
+
+    let sizes: Vec<u64> = plan.uploads.iter().map(|u| u.local.size).collect();
+    for range in chunks(&sizes) {
         if ctx.stopping() {
             return Ok(out);
         }
-        out.merge(push_batch(ctx, state, batch, reporter)?);
-        need_files = need_files.saturating_sub(batch.len() as u64);
-        need_bytes = need_bytes.saturating_sub(batch.iter().map(|c| c.size).sum());
-        reporter.status(true, "syncing", state.files.len(), need_files, need_bytes);
+        let batch = &plan.uploads[range];
+        upload_batch(ctx, state, batch, reporter, &mut out)?;
+        progress(
+            reporter,
+            state,
+            batch.len(),
+            batch.iter().map(|u| u.local.size).sum(),
+        );
     }
 
-    for group in deleted.chunks(BATCH_FILES) {
+    let sizes: Vec<u64> = plan.downloads.iter().map(|d| d.remote.size).collect();
+    for range in chunks(&sizes) {
         if ctx.stopping() {
             return Ok(out);
         }
-        let items: Vec<CommitItem> = group
-            .iter()
-            .map(|(rel, tip)| CommitItem {
-                path: rel.clone(),
-                size: 0,
-                content_sha256: String::new(),
-                version_id: None,
-                file_id: Some(tip.file_id.clone()),
-                base_revision: Some(tip.revision),
-                deleted: true,
-            })
-            .collect();
-        let mut done = Vec::new();
-        for ((rel, _), result) in group.iter().zip(ctx.api.commit_batch(&items)?) {
-            match result {
-                Ok(_) => {
-                    state.remove_path(rel);
-                    done.push(rel.clone());
-                }
-                Err(err) => {
-                    logs::append(&format!("sync: delete {rel} rejected: {err}"));
-                    out.retry = true;
-                }
+        let batch = &plan.downloads[range];
+        download_batch(ctx, state, batch, reporter, &mut out)?;
+        progress(
+            reporter,
+            state,
+            batch.len(),
+            batch.iter().map(|d| d.remote.size).sum(),
+        );
+    }
+
+    for group in plan.remote_deletes.chunks(BATCH_FILES) {
+        if ctx.stopping() {
+            return Ok(out);
+        }
+        delete_remote_batch(ctx, state, group, reporter, &mut out)?;
+        progress(reporter, state, group.len(), 0);
+    }
+
+    let mut removed = Vec::new();
+    for rel in &plan.local_deletes {
+        match remove_local_file(&ctx.root, rel) {
+            Ok(()) => {
+                state.files.remove(rel);
+                removed.push(rel.clone());
+                out.changed = true;
+            }
+            Err(err) => {
+                logs::append(&format!("sync: remove {rel} failed: {err}"));
+                out.retry = true;
             }
         }
-        out.changed |= !done.is_empty();
-        logs::append(&format!("sync: deleted {} file(s)", done.len()));
-        reporter.activity("Deleted", &done);
-        need_files = need_files.saturating_sub(group.len() as u64);
-        reporter.status(true, "syncing", state.files.len(), need_files, need_bytes);
     }
+    reporter.activity("Removed", &removed);
     Ok(out)
 }
 
-/// Split candidates into batches bounded by file count and bytes.
-fn batches(candidates: &[Candidate]) -> Vec<&[Candidate]> {
+/// Decide every path. Paths that only need a state update are applied here.
+fn make_plan(
+    ctx: &Ctx,
+    state: &mut SyncState,
+    files: &HashMap<String, PathBuf>,
+    remote: &HashMap<String, RemoteFile>,
+    out: &mut Outcome,
+) -> Plan {
+    let mut paths: Vec<String> = files
+        .keys()
+        .chain(remote.keys())
+        .chain(state.files.keys())
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    paths.sort();
+    let keep_local = remote.is_empty() && !state.files.is_empty();
+
+    let mut plan = Plan::default();
+    let mut to_compare = Vec::new();
+    for rel in &paths {
+        let abs = files.get(rel);
+        let local = match abs.map(|abs| file_fingerprint(abs)) {
+            None => None,
+            Some(Ok((size, _))) if size > MAX_FILE_BYTES => {
+                let first = ctx
+                    .oversize_logged
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(rel.clone());
+                if first {
+                    logs::append(&format!("sync: skip {rel}: larger than 5 GiB"));
+                }
+                continue;
+            }
+            Some(Ok((size, mtime_ns))) => Some(Local { size, mtime_ns }),
+            Some(Err(_)) => {
+                out.retry = true;
+                continue;
+            }
+        };
+        let tip = state.files.get(rel);
+        match decide(tip, local, remote.get(rel), keep_local) {
+            Decision::Skip => {}
+            Decision::Upload => plan.uploads.push(Upload {
+                rel: rel.clone(),
+                abs: abs.cloned().unwrap_or_default(),
+                local: local.unwrap_or(Local {
+                    size: 0,
+                    mtime_ns: 0,
+                }),
+            }),
+            Decision::Download => plan.downloads.push(Download {
+                rel: rel.clone(),
+                remote: remote[rel].clone(),
+                local,
+            }),
+            Decision::DeleteRemote => plan.remote_deletes.push(rel.clone()),
+            Decision::DeleteLocal => plan.local_deletes.push(rel.clone()),
+            Decision::Forget => {
+                state.files.remove(rel);
+                out.changed = true;
+            }
+            Decision::Compare(different) => to_compare.push((rel, different)),
+        }
+    }
+
+    // Hash the files that exist on both sides, in parallel.
+    let hashes = pool::parallel_map(&to_compare, HASH_WORKERS, |(rel, _)| {
+        if ctx.stopping() {
+            return Err("stopped".to_string());
+        }
+        hash_file(&files[*rel]).map(|(md5, _)| md5)
+    });
+    for ((rel, different), hash) in to_compare.into_iter().zip(hashes) {
+        let Ok(md5) = hash else {
+            out.retry = true;
+            continue;
+        };
+        let local = file_fingerprint(&files[rel]).map(|(size, mtime_ns)| Local { size, mtime_ns });
+        let Ok(local) = local else {
+            out.retry = true;
+            continue;
+        };
+        let remote = &remote[rel];
+        if md5.eq_ignore_ascii_case(&remote.etag) {
+            // Same bytes on both sides: only remember it.
+            state.files.insert(
+                rel.clone(),
+                Synced {
+                    etag: remote.etag.clone(),
+                    size: local.size,
+                    mtime_ns: local.mtime_ns,
+                },
+            );
+            out.changed = true;
+            continue;
+        }
+        let upload = match different {
+            Different::Upload => true,
+            // Last writer wins: the file with the later mtime.
+            Different::NewerWins => parse_rfc3339_ns(&remote.modified)
+                .is_none_or(|remote_ns| local.mtime_ns > remote_ns),
+        };
+        if upload {
+            plan.uploads.push(Upload {
+                rel: rel.clone(),
+                abs: files[rel].clone(),
+                local,
+            });
+        } else {
+            plan.downloads.push(Download {
+                rel: rel.clone(),
+                remote: remote.clone(),
+                local: Some(local),
+            });
+        }
+    }
+    plan
+}
+
+/// Split work into batches bounded by file count and bytes.
+fn chunks(sizes: &[u64]) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut bytes = 0u64;
-    for (i, c) in candidates.iter().enumerate() {
-        let full = i - start >= BATCH_FILES || (i > start && bytes + c.size > BATCH_BYTES);
+    for (i, size) in sizes.iter().enumerate() {
+        let full = i - start >= BATCH_FILES || (i > start && bytes + size > BATCH_BYTES);
         if full {
-            out.push(&candidates[start..i]);
+            out.push(start..i);
             start = i;
             bytes = 0;
         }
-        bytes += c.size;
+        bytes += size;
     }
-    if start < candidates.len() {
-        out.push(&candidates[start..]);
+    if start < sizes.len() {
+        out.push(start..sizes.len());
     }
     out
 }
 
-/// A candidate that was hashed and is waiting for upload.
-struct Hashed<'a> {
-    c: &'a Candidate,
-    sha256: String,
-    size: u64,
-}
-
-fn push_batch(
+fn upload_batch(
     ctx: &Ctx,
     state: &mut SyncState,
-    batch: &[Candidate],
+    batch: &[Upload],
     reporter: &Reporter,
-) -> Result<Outcome, ApiError> {
-    let mut out = Outcome::default();
-
-    // 1. Hash in parallel, streaming each file from disk.
-    let hashed = pool::parallel_map(batch, HASH_WORKERS, |c| {
+    out: &mut Outcome,
+) -> Result<(), ApiError> {
+    let paths: Vec<String> = batch.iter().map(|u| u.rel.clone()).collect();
+    let urls = ctx.api.sign(Method::Put, &paths)?;
+    let jobs: Vec<(&Upload, &String)> = batch.iter().zip(&urls).collect();
+    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |(u, url)| {
         if ctx.stopping() {
             return Err("stopped".to_string());
         }
-        hash_file(&c.abs)
-    });
-    let mut ready = Vec::new();
-    for (c, result) in batch.iter().zip(hashed) {
-        let (sha256, size) = match result {
-            Ok(v) => v,
-            Err(err) => {
-                logs::append(&format!("sync: skip {}: {err}", c.rel));
-                out.retry = true;
-                continue;
+        let etag = with_retries(ctx, || ctx.store.put_file(url, &u.abs))?;
+        // Stored bytes must be the bytes that were planned.
+        match file_fingerprint(&u.abs) {
+            Ok((size, mtime_ns)) if (size, mtime_ns) == (u.local.size, u.local.mtime_ns) => {
+                Ok(etag)
             }
-        };
-        if let Some(tip) = state.files.get(&c.rel) {
-            if tip.content_sha256 == sha256 && tip.size == size {
-                // Bytes unchanged; refresh fingerprint so future scans stay cheap.
-                let mut tip = tip.clone();
-                tip.mtime_ns = c.mtime_ns;
-                tip.size = c.size;
-                state.upsert_tip(&c.rel, tip);
-                out.changed = true;
-                continue;
-            }
-        }
-        ready.push(Hashed { c, sha256, size });
-    }
-    if ready.is_empty() {
-        return Ok(out);
-    }
-
-    // 2. One request for every signed PUT URL of the batch.
-    let requests: Vec<UploadRequest> = ready
-        .iter()
-        .map(|h| UploadRequest {
-            path: h.c.rel.clone(),
-            size: h.size,
-            content_sha256: h.sha256.clone(),
-        })
-        .collect();
-    let urls = ctx.api.upload_urls(&requests)?;
-
-    // 3. Upload in parallel, streaming each file from disk.
-    let jobs: Vec<(&Hashed, &String)> = ready.iter().zip(&urls).collect();
-    let uploads = pool::parallel_map(&jobs, TRANSFER_WORKERS, |(h, url)| {
-        if ctx.stopping() {
-            return Err("stopped".to_string());
-        }
-        let version = with_retries(ctx, || ctx.store.put_file(url, &h.c.abs))?;
-        // Stored bytes must be the bytes that were hashed.
-        match file_fingerprint(&h.c.abs) {
-            Ok(now) if now == (h.c.size, h.c.mtime_ns) => Ok(version),
             _ => Err("changed while syncing".to_string()),
         }
     });
-
-    // 4. Commit every file that reached the store.
-    let mut committable = Vec::new();
-    for ((h, _), result) in jobs.iter().zip(uploads) {
+    let mut done = Vec::new();
+    for ((u, _), result) in jobs.iter().zip(results) {
         match result {
-            Ok(version_id) => committable.push((*h, version_id)),
+            Ok(etag) => {
+                state.files.insert(
+                    u.rel.clone(),
+                    Synced {
+                        etag,
+                        size: u.local.size,
+                        mtime_ns: u.local.mtime_ns,
+                    },
+                );
+                done.push(u.rel.clone());
+            }
             Err(err) => {
-                logs::append(&format!("sync: upload {} failed: {err}", h.c.rel));
+                logs::append(&format!("sync: upload {} failed: {err}", u.rel));
                 out.retry = true;
             }
         }
     }
-    if committable.is_empty() {
-        return Ok(out);
-    }
-    let items: Vec<CommitItem> = committable
-        .iter()
-        .map(|(h, version_id)| {
-            let tip = state.files.get(&h.c.rel);
-            CommitItem {
-                path: h.c.rel.clone(),
-                size: h.size,
-                content_sha256: h.sha256.clone(),
-                version_id: version_id.clone(),
-                file_id: tip.map(|t| t.file_id.clone()),
-                base_revision: tip.map(|t| t.revision),
-                deleted: false,
+    out.changed |= !done.is_empty();
+    logs::append(&format!("sync: uploaded {} file(s)", done.len()));
+    reporter.activity("Uploaded", &done);
+    Ok(())
+}
+
+fn download_batch(
+    ctx: &Ctx,
+    state: &mut SyncState,
+    batch: &[Download],
+    reporter: &Reporter,
+    out: &mut Outcome,
+) -> Result<(), ApiError> {
+    // Temp file next to the target, so the final rename is atomic.
+    let mut ready: Vec<(&Download, PathBuf, PathBuf)> = Vec::new();
+    for d in batch {
+        let prepared = safe_join(&ctx.root, &d.rel).and_then(|abs| {
+            if let Some(parent) = abs.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
             }
-        })
-        .collect();
+            let tmp = temp_path_for(&abs);
+            Ok((abs, tmp))
+        });
+        match prepared {
+            Ok((abs, tmp)) => ready.push((d, abs, tmp)),
+            Err(err) => {
+                logs::append(&format!("sync: skip {}: {err}", d.rel));
+                out.retry = true;
+            }
+        }
+    }
+    if ready.is_empty() {
+        return Ok(());
+    }
+
+    let paths: Vec<String> = ready.iter().map(|(d, _, _)| d.rel.clone()).collect();
+    let urls = ctx.api.sign(Method::Get, &paths)?;
+    let jobs: Vec<_> = ready.iter().zip(&urls).collect();
+    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |((d, _, tmp), url)| {
+        if ctx.stopping() {
+            return Err("stopped".to_string());
+        }
+        // Only a plain MD5 ETag proves the bytes; multipart ETags do not.
+        let md5 = if is_md5_etag(&d.remote.etag) {
+            d.remote.etag.as_str()
+        } else {
+            ""
+        };
+        with_retries(ctx, || ctx.store.get_file(url, tmp, d.remote.size, md5))
+    });
+
     let mut done = Vec::new();
-    for ((h, _), result) in committable.iter().zip(ctx.api.commit_batch(&items)?) {
+    for (((d, abs, tmp), _), result) in jobs.iter().zip(results) {
+        if let Err(err) = result {
+            logs::append(&format!("sync: download {} failed: {err}", d.rel));
+            out.retry = true;
+            continue;
+        }
+        // The user edited the file while it downloaded: keep their edit.
+        let now = file_fingerprint(abs)
+            .ok()
+            .map(|(size, mtime_ns)| Local { size, mtime_ns });
+        if now != d.local {
+            let _ = fs::remove_file(tmp);
+            out.retry = true;
+            continue;
+        }
+        if let Err(err) = fs::rename(tmp, abs) {
+            let _ = fs::remove_file(tmp);
+            logs::append(&format!("sync: place {} failed: {err}", d.rel));
+            out.retry = true;
+            continue;
+        }
+        state.files.insert(
+            d.rel.clone(),
+            Synced {
+                etag: d.remote.etag.clone(),
+                size: d.remote.size,
+                mtime_ns: file_mtime_ns(abs),
+            },
+        );
+        done.push(d.rel.clone());
+    }
+    out.changed |= !done.is_empty();
+    logs::append(&format!("sync: downloaded {} file(s)", done.len()));
+    reporter.activity("Downloaded", &done);
+    Ok(())
+}
+
+fn delete_remote_batch(
+    ctx: &Ctx,
+    state: &mut SyncState,
+    batch: &[String],
+    reporter: &Reporter,
+    out: &mut Outcome,
+) -> Result<(), ApiError> {
+    let urls = ctx.api.sign(Method::Delete, batch)?;
+    let jobs: Vec<(&String, &String)> = batch.iter().zip(&urls).collect();
+    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |(_, url)| {
+        with_retries(ctx, || ctx.store.delete(url))
+    });
+    let mut done = Vec::new();
+    for ((rel, _), result) in jobs.iter().zip(results) {
         match result {
-            Ok(commit) => {
-                state.upsert_tip(
-                    &commit.path,
-                    FileTip {
-                        file_id: commit.file_id,
-                        revision: commit.revision,
-                        size: h.size,
-                        content_sha256: h.sha256.clone(),
-                        mtime_ns: h.c.mtime_ns,
-                    },
-                );
-                done.push(commit.path);
+            Ok(()) => {
+                state.files.remove(*rel);
+                done.push((*rel).clone());
             }
             Err(err) => {
-                logs::append(&format!("sync: commit {} rejected: {err}", h.c.rel));
+                logs::append(&format!("sync: delete {rel} failed: {err}"));
                 out.retry = true;
             }
         }
     }
     out.changed |= !done.is_empty();
     logs::append(&format!(
-        "sync: uploaded and committed {} file(s)",
+        "sync: deleted {} file(s) from the bucket",
         done.len()
     ));
-    reporter.activity("Uploaded", &done);
-    Ok(out)
+    reporter.activity("Deleted", &done);
+    Ok(())
+}
+
+/// A single-part ETag is the 32-hex MD5 of the bytes.
+fn is_md5_etag(etag: &str) -> bool {
+    etag.len() == 32 && etag.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Download temp file: same folder as the target, and a name the scanner and
+/// watcher ignore.
+fn temp_path_for(abs: &Path) -> PathBuf {
+    let name = abs
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    abs.with_file_name(format!(".{name}{TEMP_SUFFIX}"))
+}
+
+/// Nanoseconds since the UNIX epoch for `2026-01-02T03:04:05[.fff]Z`.
+fn parse_rfc3339_ns(text: &str) -> Option<u64> {
+    let text = text.trim().strip_suffix('Z')?;
+    let (date, time) = text.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let (clock, fraction) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = clock.split(':').map(|p| p.parse::<i64>().ok());
+    let (h, min, s) = (t.next()??, t.next()??, t.next()??);
+    let mut nanos = 0i64;
+    for (i, digit) in fraction.chars().take(9).enumerate() {
+        nanos += i64::from(digit.to_digit(10)?) * 10i64.pow(8 - i as u32);
+    }
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3600 + min * 60 + s;
+    u64::try_from(secs * 1_000_000_000 + nanos).ok()
 }
 
 /// Retry a transfer in place: stores return 500/503 and drop connections
@@ -569,365 +819,6 @@ fn with_retries<T>(ctx: &Ctx, mut op: impl FnMut() -> Result<T, String>) -> Resu
     }
 }
 
-fn pull_remote_changes(
-    ctx: &Ctx,
-    state: &mut SyncState,
-    reporter: &mut Reporter,
-    apply_retry: &mut ApplyRetry,
-) -> Result<Outcome, ApiError> {
-    let mut out = Outcome::default();
-    while !ctx.stopping() {
-        let page = ctx.api.changes(state.cursor)?;
-        if page.changes.is_empty() {
-            break;
-        }
-        reporter.status(
-            true,
-            "syncing",
-            state.files.len(),
-            page.cursor.saturating_sub(state.cursor),
-            page.changes.iter().map(|c| c.payload.size).sum(),
-        );
-        out.changed = true;
-        let complete = apply_remote_page(ctx, state, &page.changes, reporter, apply_retry)?;
-        if !complete || state.cursor >= page.cursor {
-            break;
-        }
-    }
-    Ok(out)
-}
-
-/// What the fetch step made of one change that needs bytes.
-enum Fetch {
-    /// The local file already has the wanted content.
-    Local,
-    /// Downloaded and verified into this temp file.
-    Temp(PathBuf),
-    Failed(String),
-}
-
-/// Split a page into ranges. A range holds at most `DOWNLOAD_GROUP` downloads
-/// and about `BATCH_BYTES` of them. `weights[i]` is `Some(size)` when change
-/// `i` needs a download.
-fn pull_groups(weights: &[Option<u64>]) -> Vec<std::ops::Range<usize>> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut count = 0usize;
-    let mut bytes = 0u64;
-    for (i, weight) in weights.iter().enumerate() {
-        let Some(size) = weight else { continue };
-        if count > 0 && (count >= DOWNLOAD_GROUP || bytes + size > BATCH_BYTES) {
-            out.push(start..i);
-            start = i;
-            count = 0;
-            bytes = 0;
-        }
-        count += 1;
-        bytes += size;
-    }
-    if start < weights.len() {
-        out.push(start..weights.len());
-    }
-    out
-}
-
-/// Apply one page of remote changes in cursor order. Returns false when a
-/// change failed and the page stopped early (it is retried next loop).
-fn apply_remote_page(
-    ctx: &Ctx,
-    state: &mut SyncState,
-    changes: &[RemoteChange],
-    reporter: &Reporter,
-    apply_retry: &mut ApplyRetry,
-) -> Result<bool, ApiError> {
-    // Only the last change per file in a page matters.
-    let mut last_for_file: HashMap<&str, u64> = HashMap::new();
-    for change in changes {
-        last_for_file.insert(change.file_id.as_str(), change.cursor);
-    }
-    let superseded = |c: &RemoteChange| last_for_file.get(c.file_id.as_str()) != Some(&c.cursor);
-
-    let wants: Vec<bool> = changes
-        .iter()
-        .map(|c| !superseded(c) && needs_bytes(ctx, state, c))
-        .collect();
-    let weights: Vec<Option<u64>> = changes
-        .iter()
-        .zip(&wants)
-        .map(|(c, want)| want.then_some(c.payload.size))
-        .collect();
-
-    let mut downloaded = Vec::new();
-    let mut removed = Vec::new();
-    let mut complete = true;
-    'groups: for range in pull_groups(&weights) {
-        let group = &changes[range.clone()];
-        let mut fetched = fetch_group(ctx, group, &wants[range])?;
-        for change in group {
-            if ctx.stopping() {
-                complete = false;
-                break 'groups;
-            }
-            let result = if superseded(change) {
-                Ok(None)
-            } else {
-                apply_remote_change(ctx, state, change, &mut fetched)
-            };
-            match result {
-                Ok(done) => {
-                    match done {
-                        Some(Applied::Written) => downloaded.push(change.path.clone()),
-                        Some(Applied::Removed) => removed.push(change.path.clone()),
-                        None => {}
-                    }
-                    state.cursor = state.cursor.max(change.cursor);
-                }
-                Err(err) => {
-                    if apply_retry.cursor != change.cursor {
-                        *apply_retry = ApplyRetry {
-                            cursor: change.cursor,
-                            attempts: 0,
-                        };
-                    }
-                    apply_retry.attempts += 1;
-                    logs::append(&format!(
-                        "sync: apply failed for {} ({}), attempt {}: {err}",
-                        change.path, change.op, apply_retry.attempts
-                    ));
-                    if apply_retry.attempts < MAX_APPLY_ATTEMPTS {
-                        complete = false;
-                        break 'groups;
-                    }
-                    logs::append(&format!(
-                        "sync: skipping change {} after {MAX_APPLY_ATTEMPTS} attempts",
-                        change.cursor
-                    ));
-                    state.cursor = state.cursor.max(change.cursor);
-                }
-            }
-        }
-        remove_temps(&mut fetched);
-    }
-    logs::append(&format!(
-        "sync: pulled {} change(s): {} written, {} removed",
-        changes.len(),
-        downloaded.len(),
-        removed.len()
-    ));
-    reporter.activity("Downloaded", &downloaded);
-    reporter.activity("Removed", &removed);
-    Ok(complete)
-}
-
-/// Prepare the bytes for one group: skip files that already match, then
-/// download the rest in parallel into temp files next to their targets.
-/// The map is keyed by change cursor. `wants[i]` says change `i` needs bytes.
-fn fetch_group(
-    ctx: &Ctx,
-    group: &[RemoteChange],
-    wants: &[bool],
-) -> Result<HashMap<u64, Fetch>, ApiError> {
-    let mut fetched = HashMap::new();
-    let wanted: Vec<&RemoteChange> = group
-        .iter()
-        .zip(wants)
-        .filter(|(_, want)| **want)
-        .map(|(c, _)| c)
-        .collect();
-    if wanted.is_empty() {
-        return Ok(fetched);
-    }
-
-    let matches = pool::parallel_map(&wanted, HASH_WORKERS, |c| local_matches(ctx, c));
-    let mut to_download = Vec::new();
-    for (change, matches) in wanted.into_iter().zip(matches) {
-        if matches {
-            fetched.insert(change.cursor, Fetch::Local);
-            continue;
-        }
-        let prepared = safe_join(&ctx.root, &change.path).and_then(|abs| {
-            if let Some(parent) = abs.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-            }
-            Ok(temp_path_for(&abs, change.cursor))
-        });
-        match prepared {
-            Ok(tmp) => to_download.push((change, tmp)),
-            Err(err) => {
-                fetched.insert(change.cursor, Fetch::Failed(err));
-            }
-        }
-    }
-    if to_download.is_empty() {
-        return Ok(fetched);
-    }
-
-    let requests: Vec<(String, Option<String>)> = to_download
-        .iter()
-        .map(|(c, _)| (c.path.clone(), c.payload.version_id.clone()))
-        .collect();
-    let urls = ctx.api.download_urls(&requests)?;
-    let jobs: Vec<_> = to_download.iter().zip(&urls).collect();
-    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |((change, tmp), url)| {
-        if ctx.stopping() {
-            return Err("stopped".to_string());
-        }
-        let sha = change.payload.content_sha256.as_deref().unwrap_or("");
-        with_retries(ctx, || {
-            ctx.store.get_file(url, tmp, change.payload.size, sha)
-        })
-    });
-    for (((change, tmp), _), result) in jobs.iter().zip(results) {
-        let fetch = match result {
-            Ok(()) => Fetch::Temp(tmp.clone()),
-            Err(err) => {
-                logs::append(&format!("sync: download {} failed: {err}", change.path));
-                Fetch::Failed(err)
-            }
-        };
-        fetched.insert(change.cursor, fetch);
-    }
-    Ok(fetched)
-}
-
-fn remove_temps(fetched: &mut HashMap<u64, Fetch>) {
-    for (_, fetch) in fetched.drain() {
-        if let Fetch::Temp(tmp) = fetch {
-            let _ = fs::remove_file(tmp);
-        }
-    }
-}
-
-/// Download temp file: same folder as the target, unique per change, and a
-/// name the scanner and watcher ignore.
-fn temp_path_for(abs: &Path, cursor: u64) -> PathBuf {
-    abs.with_file_name(format!(".{cursor}{TEMP_SUFFIX}"))
-}
-
-/// The local file at the change's path already holds the wanted bytes.
-fn local_matches(ctx: &Ctx, change: &RemoteChange) -> bool {
-    let want = change.payload.content_sha256.as_deref().unwrap_or("");
-    if want.is_empty() {
-        return false;
-    }
-    let Ok(abs) = safe_join(&ctx.root, &change.path) else {
-        return false;
-    };
-    match fs::metadata(&abs) {
-        Ok(meta) if meta.is_file() && meta.len() == change.payload.size => {}
-        _ => return false,
-    }
-    hash_file(&abs).is_ok_and(|(got, _)| got.eq_ignore_ascii_case(want))
-}
-
-/// This device already knows the same or a newer revision of the file.
-fn is_stale(state: &SyncState, change: &RemoteChange) -> bool {
-    state
-        .tip_for_file_id(&change.file_id)
-        .is_some_and(|(_, tip)| tip.revision >= change.revision)
-}
-
-fn is_delete(change: &RemoteChange) -> bool {
-    change.op.eq_ignore_ascii_case("delete") || change.payload.deleted
-}
-
-fn is_own(ctx: &Ctx, change: &RemoteChange) -> bool {
-    change.payload.updated_by_device_uuid.as_deref() == Some(ctx.device_uuid)
-}
-
-/// Our own commit coming back: the bytes are already on disk.
-fn already_local(ctx: &Ctx, state: &SyncState, change: &RemoteChange) -> bool {
-    is_own(ctx, change)
-        && change.payload.content_sha256.is_some()
-        && state
-            .files
-            .get(&change.path)
-            .map(|t| t.content_sha256.as_str())
-            == change.payload.content_sha256.as_deref()
-}
-
-fn needs_bytes(ctx: &Ctx, state: &SyncState, change: &RemoteChange) -> bool {
-    !is_delete(change) && !is_stale(state, change) && !already_local(ctx, state, change)
-}
-
-enum Applied {
-    Written,
-    Removed,
-}
-
-fn apply_remote_change(
-    ctx: &Ctx,
-    state: &mut SyncState,
-    change: &RemoteChange,
-    fetched: &mut HashMap<u64, Fetch>,
-) -> Result<Option<Applied>, String> {
-    let root = ctx.root.as_path();
-    if root.as_os_str().is_empty() {
-        return Err("watch folder empty".into());
-    }
-    if is_stale(state, change) {
-        return Ok(None);
-    }
-
-    if is_delete(change) {
-        // Our own delete already removed the local file and tip.
-        if is_own(ctx, change) {
-            return Ok(None);
-        }
-        if let Some((old, _)) = state.tip_for_file_id(&change.file_id) {
-            let old = old.to_string();
-            remove_local_file(root, &old)?;
-            state.remove_path(&old);
-        }
-        remove_local_file(root, &change.path)?;
-        state.remove_path(&change.path);
-        return Ok(Some(Applied::Removed));
-    }
-
-    // Rename: same file_id, new path — remove the old local file first.
-    if let Some((old, _)) = state.tip_for_file_id(&change.file_id) {
-        if old != change.path {
-            let old = old.to_string();
-            remove_local_file(root, &old)?;
-            state.remove_path(&old);
-            logs::append(&format!("sync: remote rename {old} -> {}", change.path));
-        }
-    }
-
-    let tip = |mtime_ns| FileTip {
-        file_id: change.file_id.clone(),
-        revision: change.revision,
-        size: change.payload.size,
-        content_sha256: change.payload.content_sha256.clone().unwrap_or_default(),
-        mtime_ns,
-    };
-    let abs = safe_join(root, &change.path)?;
-
-    if already_local(ctx, state, change) {
-        state.upsert_tip(&change.path, tip(file_mtime_ns(&abs)));
-        return Ok(None);
-    }
-    match fetched.remove(&change.cursor) {
-        Some(Fetch::Local) => {
-            state.upsert_tip(&change.path, tip(file_mtime_ns(&abs)));
-            Ok(None)
-        }
-        Some(Fetch::Temp(tmp)) => {
-            // Same folder, so the rename is atomic and replaces the target
-            // (also on Windows).
-            fs::rename(&tmp, &abs).map_err(|e| {
-                let _ = fs::remove_file(&tmp);
-                format!("rename into place: {e}")
-            })?;
-            state.upsert_tip(&change.path, tip(file_mtime_ns(&abs)));
-            Ok(Some(Applied::Written))
-        }
-        Some(Fetch::Failed(err)) => Err(err),
-        None => Err("download was not prepared".into()),
-    }
-}
-
 fn scan_files(root: &Path) -> Result<HashMap<String, PathBuf>, String> {
     let mut out = HashMap::new();
     let mut stack = vec![root.to_path_buf()];
@@ -938,7 +829,7 @@ fn scan_files(root: &Path) -> Result<HashMap<String, PathBuf>, String> {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.ends_with(TEMP_SUFFIX) {
+            if is_ignored(&name) {
                 continue;
             }
             let ft = entry.file_type().map_err(|e| e.to_string())?;
@@ -1055,13 +946,120 @@ mod tests {
         root
     }
 
-    fn candidate(size: u64) -> Candidate {
-        Candidate {
-            rel: String::new(),
-            abs: PathBuf::new(),
-            size,
-            mtime_ns: 0,
+    fn tip(etag: &str) -> Synced {
+        Synced {
+            etag: etag.into(),
+            size: 5,
+            mtime_ns: 100,
         }
+    }
+
+    fn local(mtime_ns: u64) -> Option<Local> {
+        Some(Local { size: 5, mtime_ns })
+    }
+
+    fn remote(etag: &str) -> RemoteFile {
+        RemoteFile {
+            path: "a.txt".into(),
+            size: 5,
+            etag: etag.into(),
+            modified: "2026-01-02T03:04:05.000Z".into(),
+        }
+    }
+
+    #[test]
+    fn decide_compares_three_ways() {
+        let t = tip("e1");
+        let same = remote("e1");
+        let newer = remote("e2");
+        // Nothing changed.
+        assert_eq!(
+            decide(Some(&t), local(100), Some(&same), false),
+            Decision::Skip
+        );
+        // Only the bucket changed.
+        assert_eq!(
+            decide(Some(&t), local(100), Some(&newer), false),
+            Decision::Download
+        );
+        // Only the local file changed: upload unless the bytes are equal.
+        assert_eq!(
+            decide(Some(&t), local(200), Some(&same), false),
+            Decision::Compare(Different::Upload)
+        );
+        // Both changed, or a file this device never synced: newer wins.
+        assert_eq!(
+            decide(Some(&t), local(200), Some(&newer), false),
+            Decision::Compare(Different::NewerWins)
+        );
+        assert_eq!(
+            decide(None, local(100), Some(&same), false),
+            Decision::Compare(Different::NewerWins)
+        );
+        // New on one side only.
+        assert_eq!(decide(None, local(100), None, false), Decision::Upload);
+        assert_eq!(decide(None, None, Some(&same), false), Decision::Download);
+        // Deleted locally: delete in the bucket only if nobody changed it.
+        assert_eq!(
+            decide(Some(&t), None, Some(&same), false),
+            Decision::DeleteRemote
+        );
+        assert_eq!(
+            decide(Some(&t), None, Some(&newer), false),
+            Decision::Download
+        );
+        // Deleted in the bucket: delete locally only if the local file is untouched.
+        assert_eq!(
+            decide(Some(&t), local(100), None, false),
+            Decision::DeleteLocal
+        );
+        assert_eq!(decide(Some(&t), local(200), None, false), Decision::Upload);
+        // An empty listing after a full one never wipes the folder.
+        assert_eq!(decide(Some(&t), local(100), None, true), Decision::Upload);
+        assert_eq!(decide(Some(&t), None, None, false), Decision::Forget);
+    }
+
+    #[test]
+    fn quiet_round_needs_a_listing_change() {
+        let mut state = SyncState::default();
+        state.files.insert("a.txt".into(), tip("e1"));
+        let mut remote_map = HashMap::from([("a.txt".to_string(), remote("e1"))]);
+        assert!(!remote_differs(&remote_map, &state));
+        remote_map.insert("a.txt".into(), remote("e2"));
+        assert!(remote_differs(&remote_map, &state));
+        remote_map.clear();
+        assert!(remote_differs(&remote_map, &state));
+    }
+
+    #[test]
+    fn parses_bucket_timestamps() {
+        assert_eq!(parse_rfc3339_ns("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339_ns("2026-01-02T03:04:05.250Z"),
+            Some(1_767_323_045_250_000_000)
+        );
+        assert_eq!(
+            parse_rfc3339_ns("2024-03-01T00:00:00Z"),
+            Some(1_709_251_200_000_000_000)
+        );
+        assert_eq!(parse_rfc3339_ns("nonsense"), None);
+    }
+
+    #[test]
+    fn only_plain_md5_etags_are_checked() {
+        assert!(is_md5_etag("d41d8cd98f00b204e9800998ecf8427e"));
+        assert!(!is_md5_etag("d41d8cd98f00b204e9800998ecf8427e-3"));
+        assert!(!is_md5_etag(""));
+    }
+
+    #[test]
+    fn chunks_respect_file_and_byte_caps() {
+        let many = vec![1u64; 450];
+        let sizes: Vec<usize> = chunks(&many).iter().map(|r| r.len()).collect();
+        assert_eq!(sizes, vec![200, 200, 50]);
+        let big = [BATCH_BYTES, 1, BATCH_BYTES];
+        assert_eq!(chunks(&big), vec![0..1, 1..2, 2..3]);
+        assert!(chunks(&[]).is_empty());
     }
 
     #[test]
@@ -1091,19 +1089,34 @@ mod tests {
     fn scan_ignores_download_temp_files() {
         let root = temp_root("scan-tmp");
         fs::write(root.join("a.txt"), b"a").unwrap();
-        fs::write(temp_path_for(&root.join("a.txt"), 7), b"partial").unwrap();
+        fs::write(temp_path_for(&root.join("a.txt")), b"partial").unwrap();
         let files = scan_files(&root).unwrap();
-        assert_eq!(files.len(), 1);
-        assert!(files.contains_key("a.txt"));
+        assert_eq!(files.keys().collect::<Vec<_>>(), vec!["a.txt"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_ignores_os_junk() {
+        let root = temp_root("scan-junk");
+        fs::write(root.join("a.txt"), b"a").unwrap();
+        fs::write(root.join(".DS_Store"), b"x").unwrap();
+        fs::write(root.join("._a.txt"), b"x").unwrap();
+        fs::write(root.join("~$report.docx"), b"x").unwrap();
+        fs::create_dir_all(root.join(".Trashes")).unwrap();
+        fs::write(root.join(".Trashes/b.txt"), b"x").unwrap();
+        let files = scan_files(&root).unwrap();
+        assert_eq!(files.keys().collect::<Vec<_>>(), vec!["a.txt"]);
+        assert!(is_ignored_path("docs/.DS_Store"));
+        assert!(!is_ignored_path("docs/a.txt"));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn temp_path_is_next_to_target() {
         let abs = Path::new("/w/docs/a.txt");
-        let tmp = temp_path_for(abs, 12);
+        let tmp = temp_path_for(abs);
         assert_eq!(tmp.parent(), abs.parent());
-        assert!(tmp.to_string_lossy().ends_with(TEMP_SUFFIX));
+        assert!(is_ignored(&tmp.file_name().unwrap().to_string_lossy()));
     }
 
     #[test]
@@ -1111,11 +1124,8 @@ mod tests {
         let root = temp_root("hash");
         let path = root.join("f.txt");
         fs::write(&path, b"abc").unwrap();
-        let (sha, size) = hash_file(&path).unwrap();
-        assert_eq!(
-            sha,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
+        let (md5, size) = hash_file(&path).unwrap();
+        assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
         assert_eq!(size, 3);
         let _ = fs::remove_dir_all(root);
     }
@@ -1132,54 +1142,6 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn pull_groups_respect_count_and_byte_caps() {
-        // No downloads: one group so deletes still apply.
-        assert_eq!(pull_groups(&[None, None]), vec![0..2]);
-        let many: Vec<Option<u64>> = (0..1100).map(|_| Some(1)).collect();
-        let sizes: Vec<usize> = pull_groups(&many).iter().map(|r| r.len()).collect();
-        assert_eq!(sizes, vec![500, 500, 100]);
-        let big = [Some(BATCH_BYTES), None, Some(1), Some(BATCH_BYTES)];
-        assert_eq!(pull_groups(&big), vec![0..2, 2..3, 3..4]);
-    }
-
-    #[test]
-    fn batches_respect_file_and_byte_caps() {
-        let many: Vec<Candidate> = (0..450).map(|_| candidate(1)).collect();
-        let sizes: Vec<usize> = batches(&many).iter().map(|b| b.len()).collect();
-        assert_eq!(sizes, vec![200, 200, 50]);
-
-        let big: Vec<Candidate> =
-            vec![candidate(BATCH_BYTES), candidate(1), candidate(BATCH_BYTES)];
-        let sizes: Vec<usize> = batches(&big).iter().map(|b| b.len()).collect();
-        assert_eq!(sizes, vec![1, 1, 1]);
-    }
-
-    #[test]
-    fn stale_change_is_detected_by_file_id_revision() {
-        let mut state = SyncState::default();
-        state.upsert_tip(
-            "a.txt",
-            FileTip {
-                file_id: "f1".into(),
-                revision: 3,
-                size: 1,
-                content_sha256: "aa".into(),
-                mtime_ns: 1,
-            },
-        );
-        let change = |revision| RemoteChange {
-            cursor: 1,
-            file_id: "f1".into(),
-            path: "a.txt".into(),
-            revision,
-            op: "upsert".into(),
-            payload: Default::default(),
-        };
-        assert!(is_stale(&state, &change(3)));
-        assert!(!is_stale(&state, &change(4)));
-    }
-
     /// Two-device run against a live Laravel + S3 store. Set up by
     /// `dev/e2e/two-device-sync.sh`; ignored in normal test runs.
     #[test]
@@ -1192,8 +1154,7 @@ mod tests {
         let device = |tag: &str| {
             let root = temp_root(&format!("e2e-{tag}"));
             let ctx = Ctx {
-                device_uuid: Box::leak(env(&format!("BST_E2E_{tag}_UUID")).into_boxed_str()),
-                root: root.clone(),
+                root,
                 api: SyncApiClient::new(&env("BST_E2E_API"), &env(&format!("BST_E2E_{tag}_TOKEN"))),
                 store: FileStore::new(),
                 oversize_logged: Mutex::new(HashSet::new()),
@@ -1203,11 +1164,9 @@ mod tests {
         };
         let (a, mut sa) = device("A");
         let (b, mut sb) = device("B");
-        let mut retry = ApplyRetry::default();
-        let sync = |ctx: &Ctx, st: &mut SyncState, rep: &mut Reporter, retry: &mut ApplyRetry| {
-            let pushed = push_local_changes(ctx, st, rep).expect("push");
-            assert!(!pushed.retry, "push wanted a retry");
-            pull_remote_changes(ctx, st, rep, retry).expect("pull");
+        let mut sync = |ctx: &Ctx, st: &mut SyncState| {
+            let out = sync_round(ctx, st, true, &mut reporter).expect("sync");
+            assert!(!out.retry, "sync wanted a retry");
         };
         let same_tree = |x: &Path, y: &Path| {
             let fx = scan_files(x).unwrap();
@@ -1233,7 +1192,7 @@ mod tests {
                 .collect::<Vec<u8>>()
         };
 
-        // 1. A seeds 260 files (more than one commit batch), a large file and an empty file.
+        // 1. A seeds 260 files (more than one batch), a large file and an empty file.
         fs::create_dir_all(a.root.join("docs/deep")).unwrap();
         for i in 0..260 {
             fs::write(
@@ -1245,8 +1204,8 @@ mod tests {
         fs::write(a.root.join("docs/deep/big.bin"), noisy(9 * 1024 * 1024, 7)).unwrap();
         fs::write(a.root.join("empty.txt"), b"").unwrap();
         let started = std::time::Instant::now();
-        sync(&a, &mut sa, &mut reporter, &mut retry);
-        sync(&b, &mut sb, &mut reporter, &mut retry);
+        sync(&a, &mut sa);
+        sync(&b, &mut sb);
         eprintln!("seed 262 files + 9 MiB: {:?}", started.elapsed());
         same_tree(&a.root, &b.root);
         assert_eq!(sa.files.len(), 262);
@@ -1262,17 +1221,22 @@ mod tests {
             b.root.join("docs/renamed.txt"),
         )
         .unwrap();
-        sync(&b, &mut sb, &mut reporter, &mut retry);
-        sync(&a, &mut sa, &mut reporter, &mut retry);
+        sync(&b, &mut sb);
+        sync(&a, &mut sa);
         same_tree(&a.root, &b.root);
         assert!(!a.root.join("docs/n000.txt").exists());
+        assert!(a.root.join("docs/renamed.txt").exists());
 
-        // Every tip matches its file on disk, so the next scan stays cheap.
+        // The state matches the disk and the bucket, so a quiet round does nothing.
+        let listed = a.api.list_files().unwrap();
         for (tag, ctx, st) in [("A", &a, &sa), ("B", &b, &sb)] {
+            assert_eq!(st.files.len(), listed.len(), "{tag} state size");
             for (rel, abs) in scan_files(&ctx.root).unwrap() {
                 let (size, mtime) = file_fingerprint(&abs).unwrap();
-                let tip = st.files.get(&rel).map(|t| (t.size, t.mtime_ns));
-                assert_eq!(tip, Some((size, mtime)), "{tag} tip for {rel}");
+                let synced = &st.files[&rel];
+                assert_eq!((synced.size, synced.mtime_ns), (size, mtime), "{tag} {rel}");
+                let remote = listed.iter().find(|f| f.path == rel).unwrap();
+                assert_eq!(synced.etag, remote.etag, "{tag} {rel} etag");
             }
         }
         // No download temp file is left behind on either side.
@@ -1288,33 +1252,57 @@ mod tests {
                 }
             }
         }
-        // 3. Nothing changed: a second round is a no-op on the server.
-        let before = a.api.cursor().unwrap();
-        sync(&a, &mut sa, &mut reporter, &mut retry);
-        sync(&b, &mut sb, &mut reporter, &mut retry);
-        let extra: Vec<String> = a
-            .api
-            .changes(before)
-            .unwrap()
-            .changes
+        let before: Vec<_> = listed
             .iter()
-            .map(|c| {
-                format!(
-                    "{} {} rev{} by {:?}",
-                    c.op, c.path, c.revision, c.payload.updated_by_device_uuid
-                )
-            })
+            .map(|f| (f.path.clone(), f.etag.clone()))
             .collect();
-        assert!(extra.is_empty(), "no-op round committed: {extra:?}");
+        sync(&a, &mut sa);
+        sync(&b, &mut sb);
+        let after: Vec<_> = a
+            .api
+            .list_files()
+            .unwrap()
+            .iter()
+            .map(|f| (f.path.clone(), f.etag.clone()))
+            .collect();
+        assert_eq!(before, after, "no-op round changed the bucket");
 
-        // 4. Both edit the same file; the later commit (B) wins on both sides.
+        // 3. Both edit the same file; the write that lands later (B's) wins on both sides.
         fs::write(a.root.join("empty.txt"), b"from A").unwrap();
+        sync(&a, &mut sa);
+        std::thread::sleep(Duration::from_millis(1500));
         fs::write(b.root.join("empty.txt"), b"from B").unwrap();
-        push_local_changes(&a, &mut sa, &mut reporter).unwrap();
-        sync(&b, &mut sb, &mut reporter, &mut retry);
-        sync(&a, &mut sa, &mut reporter, &mut retry);
+        sync(&b, &mut sb);
+        sync(&a, &mut sa);
         same_tree(&a.root, &b.root);
         assert_eq!(fs::read(a.root.join("empty.txt")).unwrap(), b"from B");
+
+        // 4. A file put straight into the bucket lands on both devices.
+        let url = a
+            .api
+            .sign(Method::Put, &["manual/by-hand.txt".to_string()])
+            .unwrap();
+        a.store
+            .put_file(&url[0], &{
+                let p = a
+                    .root
+                    .join("..")
+                    .join(format!("hand-{}.txt", std::process::id()));
+                fs::write(&p, b"by hand").unwrap();
+                p
+            })
+            .unwrap();
+        sync(&b, &mut sb);
+        assert_eq!(
+            fs::read(b.root.join("manual/by-hand.txt")).unwrap(),
+            b"by hand"
+        );
+
+        // 5. Delete on A removes the file from the bucket and from B.
+        fs::remove_file(a.root.join("docs/n002.txt")).unwrap();
+        sync(&a, &mut sa);
+        sync(&b, &mut sb);
+        assert!(!b.root.join("docs/n002.txt").exists());
 
         let _ = fs::remove_dir_all(&a.root);
         let _ = fs::remove_dir_all(&b.root);

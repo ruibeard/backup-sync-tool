@@ -38,7 +38,7 @@ impl SyncHost {
             pair_api_base: config.pair_api_base.clone(),
             start_at_login: config.start_with_windows,
             auto_update: config.auto_update,
-            folder_label: config.destination_label.clone(),
+            folder_label: config.customer.clone(),
             ..AppSnapshot::default()
         };
         let (app, events) = AppController::start(initial);
@@ -134,8 +134,8 @@ impl SyncHost {
         self.reconnect_required.store(false, Ordering::Relaxed);
         self.engine = Some(engine);
         logs::append(&format!(
-            "File sync started: destination={}",
-            self.config.destination_uuid
+            "File sync started: customer={}",
+            self.config.customer
         ));
         Ok(())
     }
@@ -198,13 +198,11 @@ impl SyncHost {
     fn apply_pair_approval(&mut self, status: PairStatusResponse) -> Result<(), String> {
         let device_token = required_field(status.device_token, "device token")?;
         let device_uuid = required_field(status.device_uuid, "device UUID")?;
-        let destination_uuid = required_field(status.destination_uuid, "destination UUID")?;
-        let destination_label = required_field(status.destination_label, "destination label")?;
+        let customer = required_field(status.customer, "customer")?;
 
         let mut candidate = self.config.clone();
         candidate.device_uuid = device_uuid;
-        candidate.destination_uuid = destination_uuid;
-        candidate.destination_label = destination_label.clone();
+        candidate.customer = customer;
         candidate.server_approved_at = Some(approval_timestamp_now());
         candidate = config::save_pairing_candidate(candidate, &device_token)?;
         self.config = candidate;

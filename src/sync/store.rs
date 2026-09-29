@@ -1,10 +1,11 @@
 //! Whole-file PUT/GET against signed URLs from the control plane.
 //!
 //! The device holds no store keys. Laravel signs short-lived URLs for one
-//! object key (`{destination}/{relative path}`); bytes go straight to the
-//! object store and never sit whole in memory.
+//! object key (`{customer}/{relative path}`); bytes go straight to the
+//! object store and never sit whole in memory. A single-part object's ETag is
+//! the MD5 of its bytes, so MD5 is the hash used everywhere here.
 
-use sha2::{Digest, Sha256};
+use md5::{Digest, Md5};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -32,9 +33,8 @@ impl FileStore {
         }
     }
 
-    /// Stream `path` to the store with one PUT. Returns the object version
-    /// (`x-amz-version-id`) when the store has versioning on.
-    pub fn put_file(&self, url: &str, path: &Path) -> Result<Option<String>, String> {
+    /// Stream `path` to the store with one PUT. Returns the new ETag.
+    pub fn put_file(&self, url: &str, path: &Path) -> Result<String, String> {
         let file = fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         let len = file
             .metadata()
@@ -51,29 +51,37 @@ impl FileStore {
             // `take` keeps the body at the declared length if the file grows.
             .send(file.take(len))
             .map_err(|e| map_ureq_err("file PUT", e))?;
-        Ok(resp
-            .header("x-amz-version-id")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string))
+        match resp.header("etag").map(|v| v.trim().trim_matches('"')) {
+            Some(etag) if !etag.is_empty() => Ok(etag.to_string()),
+            // The store sent no ETag: hash the file, as the store did.
+            _ => hash_file(path).map(|(md5, _)| md5),
+        }
+    }
+
+    /// Delete one object. A missing object counts as deleted.
+    pub fn delete(&self, url: &str) -> Result<(), String> {
+        match self.agent.delete(url).call() {
+            Ok(_) | Err(ureq::Error::Status(404, _)) => Ok(()),
+            Err(e) => Err(map_ureq_err("file DELETE", e)),
+        }
     }
 
     /// Stream one object into `dest_tmp` and check it against `size` and
-    /// `sha256_hex` (the hash check is skipped when it is empty). On any
+    /// `md5_hex` (the hash check is skipped when it is empty). On any
     /// error the temp file is removed.
     pub fn get_file(
         &self,
         url: &str,
         dest_tmp: &Path,
         size: u64,
-        sha256_hex: &str,
+        md5_hex: &str,
     ) -> Result<(), String> {
         let resp = self
             .agent
             .get(url)
             .call()
             .map_err(|e| map_ureq_err("file GET", e))?;
-        let result = stream_to_file(resp.into_reader(), dest_tmp, size, sha256_hex);
+        let result = stream_to_file(resp.into_reader(), dest_tmp, size, md5_hex);
         if result.is_err() {
             let _ = fs::remove_file(dest_tmp);
         }
@@ -81,18 +89,13 @@ impl FileStore {
     }
 }
 
-/// SHA-256 and size of a file, streamed from disk.
+/// MD5 and size of a file, streamed from disk.
 pub fn hash_file(path: &Path) -> Result<(String, u64), String> {
     let file = fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     copy_hashed(file, std::io::sink()).map_err(|e| format!("read {}: {e}", path.display()))
 }
 
-fn stream_to_file(
-    reader: impl Read,
-    dest: &Path,
-    size: u64,
-    sha256_hex: &str,
-) -> Result<(), String> {
+fn stream_to_file(reader: impl Read, dest: &Path, size: u64, md5_hex: &str) -> Result<(), String> {
     let mut file = fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
     let (got, written) = copy_hashed(reader, &mut file)
         .map_err(|e| format!("file GET into {}: {e}", dest.display()))?;
@@ -100,16 +103,16 @@ fn stream_to_file(
     if written != size {
         return Err(format!("size mismatch: got {written}, expected {size}"));
     }
-    let want = sha256_hex.trim();
+    let want = md5_hex.trim();
     if !want.is_empty() && !got.eq_ignore_ascii_case(want) {
         return Err(format!("file hash mismatch: expected {want}, got {got}"));
     }
     Ok(())
 }
 
-/// Copy `reader` into `writer`, returning the SHA-256 hex and byte count.
+/// Copy `reader` into `writer`, returning the MD5 hex and byte count.
 fn copy_hashed(mut reader: impl Read, mut writer: impl Write) -> std::io::Result<(String, u64)> {
-    let mut hasher = Sha256::new();
+    let mut hasher = Md5::new();
     let mut buf = vec![0u8; 256 * 1024];
     let mut total = 0u64;
     loop {
@@ -200,14 +203,14 @@ mod tests {
     }
 
     #[test]
-    fn put_streams_body_with_content_length_and_returns_version() {
+    fn put_streams_body_with_content_length_and_returns_etag() {
         let dir = temp_dir("put");
         let file = dir.join("a.bin");
         let data: Vec<u8> = (0..300_000u32).map(|n| n as u8).collect();
         fs::write(&file, &data).unwrap();
-        let (url, rx) = serve_once("200 OK", "x-amz-version-id: v-123\r\n", Vec::new());
-        let version = FileStore::new().put_file(&url, &file).unwrap();
-        assert_eq!(version.as_deref(), Some("v-123"));
+        let (url, rx) = serve_once("200 OK", "ETag: \"e-123\"\r\n", Vec::new());
+        let etag = FileStore::new().put_file(&url, &file).unwrap();
+        assert_eq!(etag, "e-123");
         let (head, body) = rx.recv().unwrap();
         assert!(head.to_ascii_lowercase().contains("content-length: 300000"));
         assert!(!head.to_ascii_lowercase().contains("transfer-encoding"));
@@ -216,12 +219,15 @@ mod tests {
     }
 
     #[test]
-    fn put_without_version_header_returns_none() {
+    fn put_without_etag_header_hashes_the_file() {
         let dir = temp_dir("put-nover");
         let file = dir.join("empty.txt");
         fs::write(&file, b"").unwrap();
         let (url, _rx) = serve_once("200 OK", "", Vec::new());
-        assert_eq!(FileStore::new().put_file(&url, &file).unwrap(), None);
+        assert_eq!(
+            FileStore::new().put_file(&url, &file).unwrap(),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -230,7 +236,7 @@ mod tests {
         let dir = temp_dir("get");
         let tmp = dir.join(".1.bst-tmp");
         let body = b"hello world".to_vec();
-        let sha = hex::encode(Sha256::digest(&body));
+        let sha = hex::encode(Md5::digest(&body));
 
         let (url, _rx) = serve_once("200 OK", "", body.clone());
         FileStore::new().get_file(&url, &tmp, 11, &sha).unwrap();

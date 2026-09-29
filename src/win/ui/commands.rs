@@ -342,16 +342,9 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     Ok(value) => value,
                                     Err(err) => break Err(err),
                                 };
-                                let destination_uuid = match required_pair_field(
-                                    status.destination_uuid,
-                                    "destination UUID",
-                                ) {
-                                    Ok(value) => value,
-                                    Err(err) => break Err(err),
-                                };
-                                let destination_label = match required_pair_field(
-                                    status.destination_label,
-                                    "destination label",
+                                let customer = match required_pair_field(
+                                    status.customer,
+                                    "customer",
                                 ) {
                                     Ok(value) => value,
                                     Err(err) => break Err(err),
@@ -360,8 +353,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
                                     pair_id,
                                     device_uuid,
                                     device_token,
-                                    destination_uuid,
-                                    destination_label,
+                                    customer,
                                 };
                                 break Ok(pair);
                             }

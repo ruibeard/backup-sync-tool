@@ -206,8 +206,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     stmut(hwnd).config = prior_config;
 
     candidate_config.device_uuid = pair.device_uuid.clone();
-    candidate_config.destination_uuid = pair.destination_uuid.clone();
-    candidate_config.destination_label = pair.destination_label.clone();
+    candidate_config.customer = pair.customer.clone();
     candidate_config.server_approved_at = Some(approval_timestamp_now());
 
     let candidate_config = match crate::config::save_pairing_candidate(candidate_config, &pair.device_token) {
@@ -228,7 +227,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         st.auth_failure_notified = false;
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32),
-            &hstring(&pair.destination_label),
+            &hstring(&pair.customer),
         );
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32),
@@ -241,7 +240,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     }
     apply_activity_log(
         hwnd,
-        &format!("! Destination approved: {}", pair.destination_label),
+        &format!("! Destination approved: {}", pair.customer),
     );
     match restart_sync_engine(hwnd) {
         Ok(()) => logs::append("Pairing complete; initial sync started."),

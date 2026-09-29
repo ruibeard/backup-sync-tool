@@ -64,7 +64,9 @@ impl FolderWatcher {
                 while !stop_thread.load(Ordering::Acquire) {
                     match rx.recv_timeout(Duration::from_millis(250)) {
                         Ok(Ok(event)) => {
-                            if event_is_interesting(&event.kind) && !only_temp_files(&event.paths) {
+                            if event_is_interesting(&event.kind)
+                                && !only_ignored_files(&event.paths)
+                            {
                                 dirty_thread.store(true, Ordering::Release);
                             }
                         }
@@ -96,12 +98,12 @@ impl Drop for FolderWatcher {
     }
 }
 
-/// Downloads in progress write `*.bst-tmp` files; they are not user changes.
-fn only_temp_files(paths: &[std::path::PathBuf]) -> bool {
+/// Temp files and OS junk are not user changes.
+fn only_ignored_files(paths: &[std::path::PathBuf]) -> bool {
     !paths.is_empty()
         && paths.iter().all(|p| {
             p.file_name()
-                .is_some_and(|n| n.to_string_lossy().ends_with(super::TEMP_SUFFIX))
+                .is_some_and(|n| super::is_ignored(&n.to_string_lossy()))
         })
 }
 
@@ -121,10 +123,11 @@ mod tests {
     fn temp_only_events_are_ignored() {
         let tmp = PathBuf::from("/w/docs/.7.bst-tmp");
         let real = PathBuf::from("/w/docs/a.txt");
-        assert!(only_temp_files(std::slice::from_ref(&tmp)));
+        assert!(only_ignored_files(std::slice::from_ref(&tmp)));
         // A rename from temp to target must still wake the engine.
-        assert!(!only_temp_files(&[tmp, real.clone()]));
-        assert!(!only_temp_files(&[real]));
-        assert!(!only_temp_files(&[]));
+        assert!(!only_ignored_files(&[tmp, real.clone()]));
+        assert!(!only_ignored_files(&[real]));
+        assert!(!only_ignored_files(&[]));
+        assert!(only_ignored_files(&[PathBuf::from("/w/docs/.DS_Store")]));
     }
 }

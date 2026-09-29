@@ -18,9 +18,7 @@ pub struct Config {
     #[serde(default)]
     pub device_uuid: String,
     #[serde(default)]
-    pub destination_uuid: String,
-    #[serde(default)]
-    pub destination_label: String,
+    pub customer: String,
     #[serde(default)]
     pub server_approved_at: Option<String>,
     #[serde(default = "default_true")]
@@ -36,8 +34,7 @@ impl Default for Config {
             pair_api_base: default_pair_api_base(),
             device_token_enc: String::new(),
             device_uuid: String::new(),
-            destination_uuid: String::new(),
-            destination_label: String::new(),
+            customer: String::new(),
             server_approved_at: None,
             start_with_windows: true,
             auto_update: true,
@@ -48,7 +45,7 @@ impl Default for Config {
 pub fn is_paired(cfg: &Config) -> bool {
     !cfg.device_token_enc.trim().is_empty()
         && !cfg.device_uuid.trim().is_empty()
-        && !cfg.destination_uuid.trim().is_empty()
+        && !cfg.customer.trim().is_empty()
 }
 
 fn config_path() -> PathBuf {
@@ -189,7 +186,7 @@ mod tests {
         let cfg = Config {
             device_token_enc: "protected".into(),
             device_uuid: "desktop-1".into(),
-            destination_uuid: "dest-1".into(),
+            customer: "shop-1".into(),
             ..Config::default()
         };
         assert!(is_paired(&cfg));

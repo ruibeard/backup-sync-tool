@@ -37,7 +37,7 @@ unsafe fn on_create(hwnd: HWND) {
         pair_api_base: cfg.pair_api_base.clone(),
         start_at_login: cfg.start_with_windows,
         auto_update: cfg.auto_update,
-        folder_label: cfg.destination_label.clone(),
+        folder_label: cfg.customer.clone(),
         ..crate::app::AppSnapshot::default()
     };
     let (app_controller, app_events) = crate::app::AppController::start(initial_app);
@@ -1153,10 +1153,10 @@ fn server_tooltip_text(cfg: &Config) -> String {
     } else {
         cfg.pair_api_base.trim().to_string()
     };
-    let folder = if cfg.destination_label.trim().is_empty() {
+    let folder = if cfg.customer.trim().is_empty() {
         "waiting for Laravel approval"
     } else {
-        cfg.destination_label.trim()
+        cfg.customer.trim()
     };
     let mut lines = vec![
         format!("Control plane: {control}"),
@@ -1182,16 +1182,16 @@ fn destination_display_text(
     detected_customer: Option<&str>,
 ) -> String {
     if is_paired(cfg) {
-        return cfg.destination_label.clone();
+        return cfg.customer.clone();
     }
-    if remote_folder_from_xd && !cfg.destination_label.trim().is_empty() {
+    if remote_folder_from_xd && !cfg.customer.trim().is_empty() {
         if let Some(customer) = detected_customer.and_then(non_empty_str) {
-            return format!("{customer} ({})", cfg.destination_label);
+            return format!("{customer} ({})", cfg.customer);
         }
-        return cfg.destination_label.clone();
+        return cfg.customer.clone();
     }
-    if !cfg.destination_label.trim().is_empty() {
-        return cfg.destination_label.clone();
+    if !cfg.customer.trim().is_empty() {
+        return cfg.customer.clone();
     }
     "Waiting for pairing approval".to_string()
 }

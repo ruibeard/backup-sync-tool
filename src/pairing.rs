@@ -41,9 +41,7 @@ pub struct PairStatusResponse {
     #[serde(default)]
     pub device_uuid: Option<String>,
     #[serde(default)]
-    pub destination_uuid: Option<String>,
-    #[serde(default)]
-    pub destination_label: Option<String>,
+    pub customer: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

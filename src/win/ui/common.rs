@@ -648,8 +648,7 @@ struct PairResult {
     pair_id: u64,
     device_uuid: String,
     device_token: String,
-    destination_uuid: String,
-    destination_label: String,
+    customer: String,
 }
 
 struct PairStarted {

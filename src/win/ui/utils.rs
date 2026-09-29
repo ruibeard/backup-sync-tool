@@ -23,8 +23,8 @@ unsafe fn update_bridge_display(hwnd: HWND) {
     st.bridge_conn_ok = paired && st.connected && !auth_fail;
     st.bridge_conn_label = if !paired {
         "Not connected".to_string()
-    } else if !st.config.destination_label.trim().is_empty() {
-        st.config.destination_label.trim().to_string()
+    } else if !st.config.customer.trim().is_empty() {
+        st.config.customer.trim().to_string()
     } else if auth_fail {
         "Control plane unavailable".to_string()
     } else {
@@ -332,7 +332,7 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     stmut(hwnd).sync_status_state = UiSyncState::Syncing as usize;
     logs::append(&format!(
         "File sync started for {} -> {}",
-        cfg.watch_folder, cfg.destination_label
+        cfg.watch_folder, cfg.customer
     ));
     Ok(())
 }

@@ -100,7 +100,7 @@ if [[ -n "${E2E_API:-}" ]]; then
   echo "  B: $(jq -r .approve_url <<<"$START_B")"
   A=$(pair_wait "$(jq -r .poll_token <<<"$START_A")") || exit 1
   B=$(pair_wait "$(jq -r .poll_token <<<"$START_B")") || exit 1
-  if [[ "$(jq -r .destination_uuid <<<"$A")" != "$(jq -r .destination_uuid <<<"$B")" ]]; then
+  if [[ "$(jq -r .customer <<<"$A")" != "$(jq -r .customer <<<"$B")" ]]; then
     echo "A and B were approved into different folders"
     exit 1
   fi

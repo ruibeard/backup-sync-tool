@@ -310,7 +310,7 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
         &bridge_server_name(st),
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
-    let conn_color = if is_paired(&st.config) && !st.config.destination_label.trim().is_empty() {
+    let conn_color = if is_paired(&st.config) && !st.config.customer.trim().is_empty() {
         C_BRIDGE_PATH_TXT
     } else if st.bridge_conn_ok {
         C_BRIDGE_CONN_OK
@@ -579,8 +579,8 @@ fn bridge_pc_path(st: &WndState) -> String {
 }
 
 fn bridge_server_name(st: &WndState) -> String {
-    if !st.config.destination_label.trim().is_empty() {
-        return st.config.destination_label.trim().to_string();
+    if !st.config.customer.trim().is_empty() {
+        return st.config.customer.trim().to_string();
     }
     let base = st.config.pair_api_base.trim();
     if base.is_empty() {
