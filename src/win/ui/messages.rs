@@ -205,11 +205,9 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let mut candidate_config = stmut(hwnd).config.clone();
     stmut(hwnd).config = prior_config;
 
-    candidate_config.schema_version = crate::config::CONFIG_SCHEMA_VERSION;
     candidate_config.device_uuid = pair.device_uuid.clone();
     candidate_config.destination_uuid = pair.destination_uuid.clone();
     candidate_config.destination_label = pair.destination_label.clone();
-    candidate_config.transport = "chunk_store".into();
     candidate_config.server_approved_at = Some(approval_timestamp_now());
 
     let candidate_config = match crate::config::save_pairing_candidate(candidate_config, &pair.device_token) {

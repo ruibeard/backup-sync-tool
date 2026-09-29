@@ -20,18 +20,16 @@ use crate::app::AppCommand;
 use crate::config::{self, Config};
 use crate::logs;
 use client::{ApiError, CommitItem, RemoteChange, SyncApiClient, UploadRequest};
-use sha2::{Digest, Sha256};
 use state::{state_path_for_destination, FileTip, SyncState};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, UNIX_EPOCH};
-use store::{FileStore, MAX_FILE_BYTES};
+use store::{hash_file, FileStore, MAX_FILE_BYTES};
 use watch::FolderWatcher;
 
 /// Temp files (downloads in progress) end with this. The scanner and the
@@ -775,7 +773,10 @@ fn fetch_group(
         if ctx.stopping() {
             return Err("stopped".to_string());
         }
-        download_one(ctx, url, tmp, change)
+        let sha = change.payload.content_sha256.as_deref().unwrap_or("");
+        with_retries(ctx, || {
+            ctx.store.get_file(url, tmp, change.payload.size, sha)
+        })
     });
     for (((change, tmp), _), result) in jobs.iter().zip(results) {
         let fetch = match result {
@@ -788,20 +789,6 @@ fn fetch_group(
         fetched.insert(change.cursor, fetch);
     }
     Ok(fetched)
-}
-
-/// Stream one file into `tmp` and check its size. Removes `tmp` on failure.
-fn download_one(ctx: &Ctx, url: &str, tmp: &Path, change: &RemoteChange) -> Result<(), String> {
-    let sha = change.payload.content_sha256.as_deref().unwrap_or("");
-    let written = with_retries(ctx, || ctx.store.get_file(url, tmp, sha))?;
-    if written != change.payload.size {
-        let _ = fs::remove_file(tmp);
-        return Err(format!(
-            "size mismatch: got {written}, expected {}",
-            change.payload.size
-        ));
-    }
-    Ok(())
 }
 
 fn remove_temps(fetched: &mut HashMap<u64, Fetch>) {
@@ -951,9 +938,6 @@ fn scan_files(root: &Path) -> Result<HashMap<String, PathBuf>, String> {
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name == "." || name == ".." {
-                continue;
-            }
             if name.ends_with(TEMP_SUFFIX) {
                 continue;
             }
@@ -1021,25 +1005,6 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
         abs.push(part);
     }
     Ok(abs)
-}
-
-/// SHA-256 and size of a file, streamed from disk.
-fn hash_file(path: &Path) -> Result<(String, u64), String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut size = 0u64;
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        size += n as u64;
-    }
-    Ok((hex::encode(hasher.finalize()), size))
 }
 
 fn file_fingerprint(path: &Path) -> Result<(u64, u64), String> {
@@ -1164,18 +1129,6 @@ mod tests {
         assert!(!root.join("x/y/z.txt").exists());
         // Removing a missing file is fine.
         remove_local_file(&root, "x/y/z.txt").unwrap();
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn rename_over_existing_file_replaces_it() {
-        let root = temp_root("rename");
-        fs::write(root.join("a.txt"), b"old").unwrap();
-        let tmp = temp_path_for(&root.join("a.txt"), 3);
-        fs::write(&tmp, b"new").unwrap();
-        fs::rename(&tmp, root.join("a.txt")).unwrap();
-        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"new");
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1335,7 +1288,7 @@ mod tests {
                 }
             }
         }
-        // 3. Nothing changed: a second round is a no-op on the server."
+        // 3. Nothing changed: a second round is a no-op on the server.
         let before = a.api.cursor().unwrap();
         sync(&a, &mut sa, &mut reporter, &mut retry);
         sync(&b, &mut sb, &mut reporter, &mut retry);

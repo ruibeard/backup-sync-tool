@@ -1,14 +1,15 @@
 //! Persistent desktop configuration.
 //!
-//! Schema v5 is chunk_store with signed file URLs (no store keys on the
-//! device). Older schemas keep watch_folder / pair_api_base hints but
-//! require fresh pairing.
+//! Schema v6 is the file_store pairing (signed file URLs, no store keys on
+//! the device). v5 differs only in the transport name and upgrades in place.
+//! Older schemas keep watch_folder / pair_api_base hints but require fresh
+//! pairing.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-pub const CONFIG_SCHEMA_VERSION: u32 = 5;
+pub const CONFIG_SCHEMA_VERSION: u32 = 6;
 
 static CONFIG_SAVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -62,7 +63,9 @@ pub fn is_paired(cfg: &Config) -> bool {
         && !cfg.device_token_enc.trim().is_empty()
         && !cfg.device_uuid.trim().is_empty()
         && !cfg.destination_uuid.trim().is_empty()
-        && cfg.transport.eq_ignore_ascii_case("chunk_store")
+        && cfg
+            .transport
+            .eq_ignore_ascii_case(crate::pairing::TRANSPORT)
 }
 
 fn config_path() -> PathBuf {
@@ -127,13 +130,28 @@ pub fn normalize_pair_api_base(raw: &str) -> Result<String, String> {
 }
 
 pub fn load() -> Config {
-    let path = config_path();
-    let Ok(data) = std::fs::read_to_string(path) else {
+    let Ok(data) = std::fs::read_to_string(config_path()) else {
         return Config::default();
     };
-    let Ok(mut parsed) = serde_json::from_str::<Config>(&data) else {
-        return Config::default();
+    let (cfg, upgraded) = from_json(&data);
+    if upgraded {
+        let _ = save(&cfg);
+    }
+    cfg
+}
+
+/// Parse a saved config. The flag is true when a v5 pairing was upgraded
+/// in place and should be written back.
+fn from_json(data: &str) -> (Config, bool) {
+    let Ok(mut parsed) = serde_json::from_str::<Config>(data) else {
+        return (Config::default(), false);
     };
+    let upgraded =
+        parsed.schema_version == 5 && parsed.transport.eq_ignore_ascii_case("chunk_store");
+    if upgraded {
+        parsed.schema_version = CONFIG_SCHEMA_VERSION;
+        parsed.transport = crate::pairing::TRANSPORT.into();
+    }
     if parsed.schema_version != CONFIG_SCHEMA_VERSION {
         let mut fresh = Config::default();
         if let Ok(base) = normalize_pair_api_base(&parsed.pair_api_base) {
@@ -142,11 +160,11 @@ pub fn load() -> Config {
         if !parsed.watch_folder.trim().is_empty() {
             fresh.watch_folder = parsed.watch_folder;
         }
-        return fresh;
+        return (fresh, false);
     }
     parsed.pair_api_base =
         normalize_pair_api_base(&parsed.pair_api_base).unwrap_or_else(|_| default_pair_api_base());
-    parsed
+    (parsed, upgraded)
 }
 
 pub fn save(cfg: &Config) -> std::io::Result<()> {
@@ -197,7 +215,7 @@ pub fn save_pairing_candidate(mut candidate: Config, device_token: &str) -> Resu
         crate::secret::CandidateDeviceToken::stage(device_token, &candidate.device_token_enc)?;
     candidate.device_token_enc = staged.protected().to_string();
     candidate.schema_version = CONFIG_SCHEMA_VERSION;
-    candidate.transport = "chunk_store".into();
+    candidate.transport = crate::pairing::TRANSPORT.into();
     save(&candidate).map_err(|error| format!("Pairing succeeded but save failed: {error}"))?;
     let _ = staged.commit();
     Ok(candidate)
@@ -225,29 +243,35 @@ mod tests {
     }
 
     fn load_from_str(data: &str) -> Config {
-        let parsed: Config = serde_json::from_str(data).unwrap();
-        if parsed.schema_version != CONFIG_SCHEMA_VERSION {
-            let mut fresh = Config::default();
-            if let Ok(base) = normalize_pair_api_base(&parsed.pair_api_base) {
-                fresh.pair_api_base = base;
-            }
-            if !parsed.watch_folder.trim().is_empty() {
-                fresh.watch_folder = parsed.watch_folder;
-            }
-            return fresh;
-        }
-        parsed
+        from_json(data).0
     }
 
     #[test]
-    fn complete_v5_assignment_is_paired() {
+    fn complete_assignment_is_paired() {
         let cfg = Config {
             device_token_enc: "protected".into(),
             device_uuid: "desktop-1".into(),
             destination_uuid: "dest-1".into(),
-            transport: "chunk_store".into(),
+            transport: crate::pairing::TRANSPORT.into(),
             ..Config::default()
         };
+        assert!(is_paired(&cfg));
+    }
+
+    #[test]
+    fn v5_chunk_store_pairing_upgrades_in_place() {
+        let json = r#"{
+            "schema_version": 5,
+            "watch_folder": "/backups",
+            "device_token_enc": "x",
+            "device_uuid": "d",
+            "destination_uuid": "dest",
+            "transport": "chunk_store"
+        }"#;
+        let (cfg, upgraded) = from_json(json);
+        assert!(upgraded);
+        assert_eq!(cfg.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(cfg.transport, crate::pairing::TRANSPORT);
         assert!(is_paired(&cfg));
     }
 

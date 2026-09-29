@@ -140,7 +140,7 @@ impl SyncHost {
         Ok(())
     }
 
-    /// POST `/pair/start` for chunk_store pairing.
+    /// POST `/pair/start`.
     pub fn pair_start_request(&self) -> Result<pairing::PairStartResponse, String> {
         if !watch_folder_is_valid(&self.config.watch_folder) {
             return Err("Set a valid watch folder before pairing.".into());
@@ -151,7 +151,8 @@ impl SyncHost {
         let backup_path = self.config.watch_folder.clone();
         let suggested_customer = pairing::build_host_folder_hint(&machine_name, &backup_path);
         logs::append(&format!(
-            "Pair start: machine={machine_name} user={user_name} backup={backup_path} transport=chunk_store suggested={}",
+            "Pair start: machine={machine_name} user={user_name} backup={backup_path} transport={} suggested={}",
+            pairing::TRANSPORT,
             suggested_customer.as_deref().unwrap_or("none")
         ));
         let _ = self.app.send(AppCommand::Connect);
@@ -185,7 +186,7 @@ impl SyncHost {
         result
     }
 
-    /// Persist chunk_store approval and start the in-process sync engine.
+    /// Persist the approval and start the in-process sync engine.
     pub fn pair_apply_and_sync(&mut self, status: PairStatusResponse) -> Result<(), String> {
         let _ = self.app.send(AppCommand::PairApproved);
         self.stop_sync();
@@ -196,8 +197,8 @@ impl SyncHost {
     }
 
     fn apply_pair_approval(&mut self, status: PairStatusResponse) -> Result<(), String> {
-        if !pairing::is_chunk_store_approval(&status) {
-            return Err("Pairing approved without a chunk_store assignment. Pair again.".into());
+        if !pairing::is_file_store_approval(&status) {
+            return Err("Pairing approved without a file_store assignment. Pair again.".into());
         }
         let device_token = required_field(status.device_token, "device token")?;
         let device_uuid = required_field(status.device_uuid, "device UUID")?;
@@ -205,11 +206,9 @@ impl SyncHost {
         let destination_label = required_field(status.destination_label, "destination label")?;
 
         let mut candidate = self.config.clone();
-        candidate.schema_version = config::CONFIG_SCHEMA_VERSION;
         candidate.device_uuid = device_uuid;
         candidate.destination_uuid = destination_uuid;
         candidate.destination_label = destination_label.clone();
-        candidate.transport = "chunk_store".into();
         candidate.server_approved_at = Some(approval_timestamp_now());
         candidate = config::save_pairing_candidate(candidate, &device_token)?;
         self.config = candidate;

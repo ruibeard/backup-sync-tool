@@ -58,16 +58,22 @@ impl FileStore {
             .map(str::to_string))
     }
 
-    /// Stream one object into `dest_tmp` while hashing it, then check the
-    /// hash against `sha256_hex` (skipped when it is empty). Returns the
-    /// bytes written. On any error the temp file is removed.
-    pub fn get_file(&self, url: &str, dest_tmp: &Path, sha256_hex: &str) -> Result<u64, String> {
+    /// Stream one object into `dest_tmp` and check it against `size` and
+    /// `sha256_hex` (the hash check is skipped when it is empty). On any
+    /// error the temp file is removed.
+    pub fn get_file(
+        &self,
+        url: &str,
+        dest_tmp: &Path,
+        size: u64,
+        sha256_hex: &str,
+    ) -> Result<(), String> {
         let resp = self
             .agent
             .get(url)
             .call()
             .map_err(|e| map_ureq_err("file GET", e))?;
-        let result = stream_to_file(resp.into_reader(), dest_tmp, sha256_hex);
+        let result = stream_to_file(resp.into_reader(), dest_tmp, size, sha256_hex);
         if result.is_err() {
             let _ = fs::remove_file(dest_tmp);
         }
@@ -75,32 +81,47 @@ impl FileStore {
     }
 }
 
-fn stream_to_file(mut reader: impl Read, dest: &Path, sha256_hex: &str) -> Result<u64, String> {
+/// SHA-256 and size of a file, streamed from disk.
+pub fn hash_file(path: &Path) -> Result<(String, u64), String> {
+    let file = fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    copy_hashed(file, std::io::sink()).map_err(|e| format!("read {}: {e}", path.display()))
+}
+
+fn stream_to_file(
+    reader: impl Read,
+    dest: &Path,
+    size: u64,
+    sha256_hex: &str,
+) -> Result<(), String> {
     let mut file = fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let (got, written) = copy_hashed(reader, &mut file)
+        .map_err(|e| format!("file GET into {}: {e}", dest.display()))?;
+    file.sync_all().ok();
+    if written != size {
+        return Err(format!("size mismatch: got {written}, expected {size}"));
+    }
+    let want = sha256_hex.trim();
+    if !want.is_empty() && !got.eq_ignore_ascii_case(want) {
+        return Err(format!("file hash mismatch: expected {want}, got {got}"));
+    }
+    Ok(())
+}
+
+/// Copy `reader` into `writer`, returning the SHA-256 hex and byte count.
+fn copy_hashed(mut reader: impl Read, mut writer: impl Write) -> std::io::Result<(String, u64)> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 256 * 1024];
-    let mut written = 0u64;
+    let mut total = 0u64;
     loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("file GET body: {e}"))?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
-        file.write_all(&buf[..n])
-            .map_err(|e| format!("write {}: {e}", dest.display()))?;
-        written += n as u64;
+        writer.write_all(&buf[..n])?;
+        total += n as u64;
     }
-    file.sync_all().ok();
-    let want = sha256_hex.trim();
-    if !want.is_empty() {
-        let got = hex::encode(hasher.finalize());
-        if !got.eq_ignore_ascii_case(want) {
-            return Err(format!("file hash mismatch: expected {want}, got {got}"));
-        }
-    }
-    Ok(written)
+    Ok((hex::encode(hasher.finalize()), total))
 }
 
 fn map_ureq_err(op: &str, err: ureq::Error) -> String {
@@ -205,23 +226,27 @@ mod tests {
     }
 
     #[test]
-    fn get_checks_hash_and_cleans_temp_on_mismatch() {
+    fn get_checks_size_and_hash_and_cleans_temp_on_mismatch() {
         let dir = temp_dir("get");
         let tmp = dir.join(".1.bst-tmp");
         let body = b"hello world".to_vec();
         let sha = hex::encode(Sha256::digest(&body));
 
         let (url, _rx) = serve_once("200 OK", "", body.clone());
-        let n = FileStore::new().get_file(&url, &tmp, &sha).unwrap();
-        assert_eq!(n, 11);
+        FileStore::new().get_file(&url, &tmp, 11, &sha).unwrap();
         assert_eq!(fs::read(&tmp).unwrap(), body);
         fs::remove_file(&tmp).unwrap();
 
-        let (url, _rx) = serve_once("200 OK", "", body);
+        let (url, _rx) = serve_once("200 OK", "", body.clone());
         let err = FileStore::new()
-            .get_file(&url, &tmp, &"0".repeat(64))
+            .get_file(&url, &tmp, 11, &"0".repeat(64))
             .unwrap_err();
         assert!(err.contains("hash mismatch"), "{err}");
+        assert!(!tmp.exists());
+
+        let (url, _rx) = serve_once("200 OK", "", body);
+        let err = FileStore::new().get_file(&url, &tmp, 12, "").unwrap_err();
+        assert!(err.contains("size mismatch"), "{err}");
         assert!(!tmp.exists());
         let _ = fs::remove_dir_all(dir);
     }
@@ -231,7 +256,7 @@ mod tests {
         let dir = temp_dir("err");
         let tmp = dir.join("x.bst-tmp");
         let (url, _rx) = serve_once("404 Not Found", "", Vec::new());
-        let err = FileStore::new().get_file(&url, &tmp, "").unwrap_err();
+        let err = FileStore::new().get_file(&url, &tmp, 0, "").unwrap_err();
         assert!(err.contains("missing in store"));
         assert!(!err.contains("127.0.0.1"));
         let _ = fs::remove_dir_all(dir);

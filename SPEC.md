@@ -13,9 +13,7 @@ Branches: `main` (both repos) is the legacy WebDAV production build and stays un
 | Sync model | Full multi-device live two-way from day one |
 | Conflicts | Last-writer-wins (no conflict copies) |
 | Metadata host | Laravel (pairing, sync metadata API, admin shelf, revoke) |
-| Bytes host | S3-compatible object store via storage driver |
-| Launch driver | `spaces` (DigitalOcean Spaces; driver already in Laravel) |
-| Other drivers | `garage` (self-hosted, larger scale later), `b2` — Laravel-side only; `minio` is a local test harness only |
+| Bytes host | One S3-compatible bucket: DigitalOcean Spaces in production, any S3 server (rclone) locally |
 | Version retention | 30 days |
 | Browse UI | Laravel file shelf only (no Filestash requirement) |
 | Legacy WebDAV | Does not exist for this product |
@@ -43,14 +41,14 @@ There is no bundled Syncthing, no WebDAV client, no Electron/webview/egui/nwg, n
 | Object store | Whole files under their real name and path; bucket versioning keeps history |
 | Desktop | Watch selected folder, hash, upload changed files, download remote changes, apply last-writer-wins updates, report status |
 
-`pair_api_base` is Laravel only. Desktop never chooses or exposes the storage vendor; Laravel’s `BACKUP_STORAGE_DRIVER` decides.
+`pair_api_base` is Laravel only. Desktop never chooses or exposes the storage vendor; Laravel’s `SPACES_*` env decides.
 
 ```text
 [Win/Mac app] --pair / sync metadata / signed file URLs--> [Laravel]
        |                                                        |
-       | PUT/GET files with signed URLs (no device key)        | one store key: buckets, signing, shelf
+       | PUT/GET files with signed URLs (no device key)        | one store key: signing, shelf, history
        v                                                        v
-                         [Object store driver]
+                     [S3 bucket: {customer}/{path}]
 ```
 
 ## Data model
@@ -105,7 +103,7 @@ Only `schema_version: 5` is accepted as paired. Any v4 (store keys on the device
   "device_token_enc": "DPAPI-or-keychain-handle",
   "device_uuid": "desktop-uuid",
   "destination_uuid": "customer-destination-uuid",
-  "transport": "chunk_store",
+  "transport": "file_store",
   "destination_label": "XDPT.59655-Palmeira-Minimercado",
   "server_approved_at": "1784050000",
   "start_with_windows": true,
@@ -137,11 +135,11 @@ On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt
   "xd_license_number": "XDPT.59655",
   "xd_customer_name": "Palmeira Minimercado",
   "suggested_customer": "XDPT.59655-Palmeira-Minimercado",
-  "supported_transports": ["chunk_store"]
+  "supported_transports": ["file_store"]
 }
 ```
 
-`machine_name` and `supported_transports: ["chunk_store"]` are required. Detected values are untrusted display hints.
+`machine_name` and `supported_transports: ["file_store"]` are required. Detected values are untrusted display hints.
 
 Response includes `code`, `approve_url` (QR target), `poll_token`, `poll_interval_ms`, and `control_plane_url` (`APP_URL`, no trailing slash). Desktop logs `control_plane_url mismatch` if it disagrees with configured `pair_api_base`.
 
@@ -150,7 +148,7 @@ Admin approval selects/creates a `BackupDestination` and the device, then return
 ```json
 {
   "status": "approved",
-  "transport": "chunk_store",
+  "transport": "file_store",
   "device_uuid": "desktop-uuid",
   "device_token": "one-time-device-token",
   "destination_uuid": "customer-destination-uuid",
@@ -158,7 +156,7 @@ Admin approval selects/creates a `BackupDestination` and the device, then return
 }
 ```
 
-The wire string `chunk_store` is historical: it now means whole-file sync through signed URLs, and stays so devices need no re-pair. Client rejects any transport other than `chunk_store` or missing fields. It protects the device token, atomically writes schema v5, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel keeps only the token hash.
+Client rejects any transport other than `file_store` or missing fields. It protects the device token, atomically writes schema v6 (a v5 `chunk_store` config upgrades in place, no re-pair), and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel keeps only the token hash.
 
 Default `pair_api_base` = `https://backup.rui.cam` (editable + persisted: Windows **CONTROL PLANE URL** on blur + pair; macOS tray **Control plane URL…**).
 
@@ -204,29 +202,20 @@ All approved devices may create, edit, rename, and delete. There is no `can_dele
 - Device list + revoke.
 - Destination list and per-customer shelf (browse live tree + 30-day history).
 - Backup health derived from metadata (last activity, file counts, stale devices).
-- Storage driver configured only in Laravel env (`BACKUP_STORAGE_DRIVER` + driver secrets).
+- Object store configured only in Laravel env (`SPACES_*`).
 
-## Storage drivers
+## Object store
 
-Laravel's `StorageProvisioner` creates destinations; `ObjectStoreClient` signs file URLs with the driver's one key:
+One bucket (`SPACES_BUCKET`, made once by hand; dots are fine, URLs are path style). Each customer is `{destination.name}/` inside it, so approval creates no bucket. `SPACES_KEY` signs device file URLs and reads, deletes and restores for the shelf. No per-device keys, so the 200-key account limit does not apply. File history is bucket versioning plus a 30-day expiry of old versions: run `php artisan storage:versioning` once with a key that may change bucket settings.
 
-| Driver | Role |
-| --- | --- |
-| `spaces` | Launch driver. One shared bucket (`SPACES_BUCKET`, no dots); each customer is `{destination.name}/` inside it, with bucket versioning on (`php artisan storage:versioning`). `SPACES_KEY` signs URLs and reads the shelf. No per-device keys, so the 200-key account limit does not apply |
-| `garage` | Self-hosted S3-compatible; Admin API creates the bucket; the scanner key signs URLs |
-| `minio` | Local dev/e2e harness only (root key). Not for production: MinIO community edition is in maintenance mode |
-| `b2` | Not wired. Candidate managed driver if Spaces cost grows |
-
-Desktop only follows signed URLs. Adding a vendor is a Laravel change, not a desktop change.
-
-Tests may use local MinIO/Garage fixtures or fakes; the wire contract stays the same.
+Locally, `SPACES_ENDPOINT` points at any S3 server (the e2e uses rclone). Desktop only follows signed URLs, so a vendor change is a Laravel env change.
 
 ### Storage choice (research 2026-09-28)
 
 | Option | Verdict |
 | --- | --- |
-| DigitalOcean Spaces | **Launch.** Driver exists. $5/mo incl. 250 GiB + 1 TB egress, then ~$20/TB. One shared bucket, so the 100-bucket account limit does not apply. The 200-key limit does not apply: devices get signed URLs |
-| Backblaze B2 | Cheaper managed option (~$6.95/TB) if data grows. Needs a driver |
+| DigitalOcean Spaces | **Launch.** $5/mo incl. 250 GiB + 1 TB egress, then ~$20/TB. One shared bucket, so the 100-bucket account limit does not apply. The 200-key limit does not apply: devices get signed URLs |
+| Backblaze B2 | Cheaper managed option (~$6.95/TB) if data grows. S3-compatible, so an env change |
 | Own Hetzner dedicated server + ZFS + Garage | Cheapest per TB above ~15–20 TB; operator maintains disks/OS and a second copy |
 | Hetzner Object Storage | Rejected for now: 100-bucket cap, 64 KB minimum billable object, ~100 ms small-object latency and NBG1 throttling incidents in 2026 |
 | Hetzner Storage Box | Not a primary store (SFTP/WebDAV, 10 connections per box). Fine as an off-site copy |
@@ -270,19 +259,18 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 ### Done
 
-- Laravel (`box-rui-cam` `live-sync`): `chunk_store` pairing + provisioner (fake, Garage, Spaces, MinIO), sync APIs (cursor / changes / files/upload / files/download / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
-- Desktop: schema v5 pairing (Win + Mac), in-process sync engine, whole-file sync by real name and path, FS watcher with mtime/size skip.
+- Laravel (`box-rui-cam` `live-sync`): `file_store` pairing, one shared bucket, sync APIs (cursor / changes / files/upload / files/download / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
+- Desktop: schema v6 pairing (Win + Mac), in-process sync engine, whole-file sync by real name and path, FS watcher with mtime/size skip.
 - Engine speed: batched `files/upload` + `commit/batch`, 8 parallel streaming file transfers, streamed hashing, skip download when the local hash matches, 4 s cursor poll, status and activity sent to both UIs.
-- Signed file URLs (schema v5): devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
+- Signed file URLs: devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
 - Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`); the desktop gets no S3 key. `E2E_API=https://backup.rui.cam` runs the same test against a deployed control plane and its real store: no local stack, and an admin approves the two printed codes into one new customer folder. 262 files + 9 MiB seed in ~3.2 s (debug build, single-threaded PHP dev server).
-- Local MinIO e2e: `dev/minio/bootstrap.sh` + `dev/minio/e2e-chunk-roundtrip.sh` (Laravel signs, test PUTs/GETs through the URLs).
 - Cleanup: Syncthing/WebDAV leftovers, the no-op installation repair feature and dead code removed; Windows code moved to `src/win/`.
 
 ### Roadmap (in order)
 
 1. **Whole-file e2e** (local rclone, then production) and turn on bucket versioning on the Space (`php artisan storage:versioning`). Then **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). Spaces uses one shared bucket (`SPACES_BUCKET`, made once by hand); each destination is `{destination.name}/` inside it, so approval creates no bucket.
 2. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
-3. CI job for `dev/e2e/two-device-sync.sh`; then drop the Docker MinIO harness.
+3. CI job for `dev/e2e/two-device-sync.sh`.
 4. Re-pair catch-up: a fresh device replays the whole change log page by page. Add a server snapshot of live tips if large destinations make that slow.
 
 ## Out of scope

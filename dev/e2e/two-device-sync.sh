@@ -25,16 +25,16 @@ start_local_stack() {
   local s3_access=e2e-access s3_secret=e2e-secret s3="http://127.0.0.1:$S3_PORT"
   API="http://127.0.0.1:$API_PORT"
 
-  mkdir -p "$WORK/s3"
+  # rclone serves each top-level directory as a bucket; Laravel never creates buckets.
+  mkdir -p "$WORK/s3/backup-dev"
   rclone serve s3 --auth-key "$s3_access,$s3_secret" --addr "127.0.0.1:$S3_PORT" "$WORK/s3" >"$WORK/rclone.log" 2>&1 &
   PIDS+=($!)
 
   # Process env wins over box-rui-cam/.env (Laravel's dotenv is immutable).
   export APP_ENV=local APP_URL="$API" DB_CONNECTION=sqlite DB_DATABASE="$WORK/e2e.sqlite" \
     CACHE_STORE=array SESSION_DRIVER=array QUEUE_CONNECTION=sync \
-    BACKUP_STORAGE_DRIVER=minio MINIO_ENABLED=true MINIO_BUCKET=backup-dev \
-    MINIO_S3_ENDPOINT="$s3" MINIO_S3_PUBLIC_ENDPOINT="$s3" \
-    MINIO_ROOT_USER="$s3_access" MINIO_ROOT_PASSWORD="$s3_secret"
+    SPACES_ENDPOINT="$s3" SPACES_REGION=us-east-1 SPACES_BUCKET=backup-dev \
+    SPACES_KEY="$s3_access" SPACES_SECRET="$s3_secret"
   touch "$WORK/e2e.sqlite"
   (cd "$LARAVEL_ROOT" && php artisan migrate --force -q)
   # server.php serves from the working directory, so run it inside public/.
@@ -72,7 +72,7 @@ PHP
 
 pair_start() {
   curl -fsS -X POST "$API/api/pair/start" -H 'Content-Type: application/json' -H 'Accept: application/json' \
-    -d "{\"machine_name\":\"E2E-$1\",\"supported_transports\":[\"chunk_store\"]}"
+    -d "{\"machine_name\":\"E2E-$1\",\"supported_transports\":[\"file_store\"]}"
 }
 
 # Poll until approved (the payload is handed out once), up to 15 minutes.

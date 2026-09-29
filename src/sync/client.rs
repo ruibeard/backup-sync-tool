@@ -385,7 +385,6 @@ mod tests {
         };
         let body = item.to_json();
         assert_eq!(body["version_id"], "v9");
-        assert!(body.get("chunk_hashes").is_none());
         let none = CommitItem {
             version_id: None,
             ..item

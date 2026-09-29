@@ -6,6 +6,9 @@ use std::time::Duration;
 use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 
+/// Pairing transport: whole files through signed URLs (no store keys on the device).
+pub const TRANSPORT: &str = "file_store";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PairStartRequest {
     pub machine_name: String,
@@ -158,7 +161,7 @@ pub fn start_pairing_cancellable(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
-        supported_transports: vec!["chunk_store".to_string()],
+        supported_transports: vec![TRANSPORT.to_string()],
     };
     let body = serde_json::to_string(&req).map_err(|err| {
         PairingError::new(
@@ -362,11 +365,11 @@ fn validate_start_response(start: &PairStartResponse) -> Result<(), PairingError
     Ok(())
 }
 
-pub fn is_chunk_store_approval(status: &PairStatusResponse) -> bool {
+pub fn is_file_store_approval(status: &PairStatusResponse) -> bool {
     status
         .transport
         .as_deref()
-        .is_some_and(|transport| transport.eq_ignore_ascii_case("chunk_store"))
+        .is_some_and(|transport| transport.eq_ignore_ascii_case(TRANSPORT))
 }
 
 #[cfg(test)]
@@ -374,7 +377,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_start_serializes_chunk_store_transport() {
+    fn pair_start_serializes_file_store_transport() {
         let req = PairStartRequest {
             machine_name: "PC".into(),
             windows_user: "u".into(),
@@ -384,12 +387,12 @@ mod tests {
             xd_license_number: Some("XDPT.1".into()),
             xd_customer_name: Some("Customer".into()),
             suggested_customer: Some("XDPT.1-Customer".into()),
-            supported_transports: vec!["chunk_store".into()],
+            supported_transports: vec![TRANSPORT.into()],
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(
             json["supported_transports"],
-            serde_json::json!(["chunk_store"])
+            serde_json::json!(["file_store"])
         );
         assert_eq!(json["xd_license_number"], "XDPT.1");
     }
@@ -418,22 +421,22 @@ mod tests {
     }
 
     #[test]
-    fn chunk_store_approval_requires_transport_field() {
+    fn file_store_approval_requires_transport_field() {
         let approved = PairStatusResponse {
             status: "approved".into(),
             device_token: Some("t".into()),
             device_uuid: Some("device-uuid".into()),
-            transport: Some("chunk_store".into()),
+            transport: Some(TRANSPORT.into()),
             destination_uuid: Some("dest".into()),
             destination_label: Some("Customer 1".into()),
         };
-        assert!(is_chunk_store_approval(&approved));
+        assert!(is_file_store_approval(&approved));
 
         let not_ok = PairStatusResponse {
             transport: None,
             ..approved
         };
-        assert!(!is_chunk_store_approval(&not_ok));
+        assert!(!is_file_store_approval(&not_ok));
     }
 
     #[test]
