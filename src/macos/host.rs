@@ -151,8 +151,7 @@ impl SyncHost {
         let backup_path = self.config.watch_folder.clone();
         let suggested_customer = pairing::build_host_folder_hint(&machine_name, &backup_path);
         logs::append(&format!(
-            "Pair start: machine={machine_name} user={user_name} backup={backup_path} transport={} suggested={}",
-            pairing::TRANSPORT,
+            "Pair start: machine={machine_name} user={user_name} backup={backup_path} suggested={}",
             suggested_customer.as_deref().unwrap_or("none")
         ));
         let _ = self.app.send(AppCommand::Connect);
@@ -197,9 +196,6 @@ impl SyncHost {
     }
 
     fn apply_pair_approval(&mut self, status: PairStatusResponse) -> Result<(), String> {
-        if !pairing::is_file_store_approval(&status) {
-            return Err("Pairing approved without a file_store assignment. Pair again.".into());
-        }
         let device_token = required_field(status.device_token, "device token")?;
         let device_uuid = required_field(status.device_uuid, "device UUID")?;
         let destination_uuid = required_field(status.destination_uuid, "destination UUID")?;

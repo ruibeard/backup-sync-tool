@@ -14,7 +14,7 @@ Small self-hosted Dropbox: Laravel owns pairing + sync metadata + 30-day history
 | Sync app | this repo — shared core + `src/sync/` engine; Windows shell in `src/win/`, macOS shell in `src/macos/` |
 | Object store | One S3 bucket from Laravel `SPACES_*` env (DigitalOcean Spaces in production; rclone in the local e2e) |
 
-Desktop does not choose or expose the storage vendor. Approval returns `transport: "file_store"` plus device token. It carries no store keys.
+Desktop does not choose or expose the storage vendor. Approval returns a device token. It carries no store keys.
 
 **Never access Forge** (no tokens, deploy, or production `.env`). Operator owns Laravel live env/deploy.
 
@@ -53,7 +53,6 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 - Sync is the in-process Rust engine (whole-file + metadata protocol in `SPEC.md`). Do not reintroduce Syncthing, WebDAV, or a second transfer stack.
 - Tray: closing hides; double-click reopens.
 - Auto-update replaces one tested desktop bundle.
-- Config schema must be v5; older schemas require new pairing.
 - Every approved device may create, edit, rename, and delete. No `can_delete_files`.
 - Conflicts are last-writer-wins; no `.sync-conflict` copies.
 - Version/tombstone retention is 30 days in Laravel.
@@ -62,9 +61,9 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 ## Sync And Pairing (must match SPEC.md)
 
 - Start sync on launch (if configured), after pair approval, and after saving a watch path.
-- Pair start sends `supported_transports: ["file_store"]` (plus machine/XD hints).
-- Approval must contain `transport: "file_store"`, `device_uuid`, `device_token`, `destination_uuid`, and `destination_label`. It carries no store keys.
-- Desktop validates, protects the token, atomically saves schema v6, and starts the sync loop.
+- Pair start sends machine and XD hints.
+- Approval must contain `device_uuid`, `device_token`, `destination_uuid`, and `destination_label`. It carries no store keys.
+- Desktop validates, protects the token, atomically saves the config, and starts the sync loop.
 - Default `pair_api_base` = `https://backup.rui.cam`; editable + persisted. Optional Laravel `control_plane_url` on pair/start → mismatch log if different.
 - Metadata calls use the device token. File PUT/GET use signed URLs from `files/upload` / `files/download`, straight to the object store. Never log those URLs.
 - Logs always on under `logs/` next to the exe on Windows and app support on macOS.

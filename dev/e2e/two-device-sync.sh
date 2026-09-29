@@ -72,7 +72,7 @@ PHP
 
 pair_start() {
   curl -fsS -X POST "$API/api/pair/start" -H 'Content-Type: application/json' -H 'Accept: application/json' \
-    -d "{\"machine_name\":\"E2E-$1\",\"supported_transports\":[\"file_store\"]}"
+    -d "{\"machine_name\":\"E2E-$1\"}"
 }
 
 # Poll until approved (the payload is handed out once), up to 15 minutes.

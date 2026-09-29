@@ -330,12 +330,6 @@ unsafe fn do_pair_device(hwnd: HWND) {
                             match status.status.as_str() {
                             "approved" => {
                                 approval_received = true;
-                                if !crate::pairing::is_file_store_approval(&status) {
-                                    break Err(
-                                        "Pairing approved without a file_store assignment. Pair again."
-                                            .to_string(),
-                                    );
-                                }
                                 let device_token =
                                     match required_pair_field(status.device_token, "device token") {
                                         Ok(value) => value,

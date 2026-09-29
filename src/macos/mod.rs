@@ -81,9 +81,7 @@ fn run_daemon() {
         thread::sleep(Duration::from_secs(30));
         if host.auth_failed() {
             host.stop_sync();
-            logs::append(
-                "daemon: sync credentials rejected — stopped. Re-pair, then relaunch.",
-            );
+            logs::append("daemon: sync credentials rejected — stopped. Re-pair, then relaunch.");
             break;
         }
     }

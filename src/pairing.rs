@@ -6,9 +6,6 @@ use std::time::Duration;
 use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 
-/// Pairing transport: whole files through signed URLs (no store keys on the device).
-pub const TRANSPORT: &str = "file_store";
-
 #[derive(Debug, Clone, Serialize)]
 pub struct PairStartRequest {
     pub machine_name: String,
@@ -24,14 +21,13 @@ pub struct PairStartRequest {
     pub xd_customer_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_customer: Option<String>,
-    pub supported_transports: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PairStartResponse {
     pub code: String,
     pub approve_url: String,
-    /// Laravel APP_URL for this install (optional for older servers).
+    /// Laravel APP_URL for this install.
     #[serde(default)]
     pub control_plane_url: Option<String>,
     pub poll_token: String,
@@ -44,8 +40,6 @@ pub struct PairStatusResponse {
     pub device_token: Option<String>,
     #[serde(default)]
     pub device_uuid: Option<String>,
-    #[serde(default)]
-    pub transport: Option<String>,
     #[serde(default)]
     pub destination_uuid: Option<String>,
     #[serde(default)]
@@ -161,7 +155,6 @@ pub fn start_pairing_cancellable(
         xd_license_number,
         xd_customer_name,
         suggested_customer,
-        supported_transports: vec![TRANSPORT.to_string()],
     };
     let body = serde_json::to_string(&req).map_err(|err| {
         PairingError::new(
@@ -365,19 +358,12 @@ fn validate_start_response(start: &PairStartResponse) -> Result<(), PairingError
     Ok(())
 }
 
-pub fn is_file_store_approval(status: &PairStatusResponse) -> bool {
-    status
-        .transport
-        .as_deref()
-        .is_some_and(|transport| transport.eq_ignore_ascii_case(TRANSPORT))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn pair_start_serializes_file_store_transport() {
+    fn pair_start_serializes_host_details() {
         let req = PairStartRequest {
             machine_name: "PC".into(),
             windows_user: "u".into(),
@@ -387,13 +373,8 @@ mod tests {
             xd_license_number: Some("XDPT.1".into()),
             xd_customer_name: Some("Customer".into()),
             suggested_customer: Some("XDPT.1-Customer".into()),
-            supported_transports: vec![TRANSPORT.into()],
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(
-            json["supported_transports"],
-            serde_json::json!(["file_store"])
-        );
         assert_eq!(json["xd_license_number"], "XDPT.1");
     }
 
@@ -418,25 +399,6 @@ mod tests {
         .unwrap();
         assert!(hint.len() <= 63);
         assert!(!hint.ends_with('-'));
-    }
-
-    #[test]
-    fn file_store_approval_requires_transport_field() {
-        let approved = PairStatusResponse {
-            status: "approved".into(),
-            device_token: Some("t".into()),
-            device_uuid: Some("device-uuid".into()),
-            transport: Some(TRANSPORT.into()),
-            destination_uuid: Some("dest".into()),
-            destination_label: Some("Customer 1".into()),
-        };
-        assert!(is_file_store_approval(&approved));
-
-        let not_ok = PairStatusResponse {
-            transport: None,
-            ..approved
-        };
-        assert!(!is_file_store_approval(&not_ok));
     }
 
     #[test]

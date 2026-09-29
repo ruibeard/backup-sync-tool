@@ -1,8 +1,8 @@
-# Backup Sync Tool — Technical Spec v5
+# Backup Sync Tool — Technical Spec
 
 **Architecture: live sync** — a small self-hosted Dropbox built from a metadata plane (Laravel) and a file plane (object store). Files are stored whole, under their real name and path.
 
-Greenfield product. WebDAV, Syncthing, CT 105 hub provisioning, and shared storage passwords are out of scope. Existing prod stacks are ignored; desktops will be replaced by hand later.
+Greenfield product. There is no old data and no old client to keep compatible.
 
 Branches: `main` (both repos) is the legacy WebDAV production build and stays untouched. This product lives on `live-sync` in `backup-sync-tool` and `box-rui-cam`. `box-rui-cam` `live-sync` deploys to production (`backup.rui.cam`) through Forge, so every push there is a production deploy.
 
@@ -16,7 +16,6 @@ Branches: `main` (both repos) is the legacy WebDAV production build and stays un
 | Bytes host | One S3-compatible bucket: DigitalOcean Spaces in production, any S3 server (rclone) locally |
 | Version retention | 30 days |
 | Browse UI | Laravel file shelf only (no Filestash requirement) |
-| Legacy WebDAV | Does not exist for this product |
 | Windows | Win7 SP1 x64 through Win11 — hard release requirement |
 | macOS | Separate native client; Win7 constraints do not apply to macOS builds |
 
@@ -85,7 +84,7 @@ Renames update path metadata for the same `file_id`: the desktop uploads the byt
 
 ### Destinations and devices
 
-- One `BackupDestination` (customer) owns one object-store prefix/bucket assignment.
+- One `BackupDestination` (customer) is one folder `{name}/` in the shared bucket.
 - Each approved device receives a distinct device UUID and device token. It gets no object-store key.
 - Laravel keeps one store key per install. It signs short-lived (1 h) PUT/GET URLs, each for one object key under the destination prefix, for a valid device token.
 - Revoke: mark the device revoked. Its token then gets `401`, so it gets no more file URLs. URLs already signed expire within 1 h. Do not delete customer files.
@@ -93,17 +92,15 @@ Renames update path metadata for the same `file_id`: the desktop uploads the byt
 
 ## Configuration
 
-Only `schema_version: 5` is accepted as paired. Any v4 (store keys on the device), v3 Syncthing, v2 S3, WebDAV, or older config may keep watch folder / `pair_api_base` hints but requires fresh pairing.
+The desktop is paired when the config has a device token, device UUID and destination UUID.
 
 ```json
 {
-  "schema_version": 5,
   "pair_api_base": "https://backup.rui.cam",
   "watch_folder": "C:\\XDSoftware\\backups",
   "device_token_enc": "DPAPI-or-keychain-handle",
   "device_uuid": "desktop-uuid",
   "destination_uuid": "customer-destination-uuid",
-  "transport": "file_store",
   "destination_label": "XDPT.59655-Palmeira-Minimercado",
   "server_approved_at": "1784050000",
   "start_with_windows": true,
@@ -134,12 +131,11 @@ On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt
   "detected_backup_path": "C:\\XDSoftware\\backups",
   "xd_license_number": "XDPT.59655",
   "xd_customer_name": "Palmeira Minimercado",
-  "suggested_customer": "XDPT.59655-Palmeira-Minimercado",
-  "supported_transports": ["file_store"]
+  "suggested_customer": "XDPT.59655-Palmeira-Minimercado"
 }
 ```
 
-`machine_name` and `supported_transports: ["file_store"]` are required. Detected values are untrusted display hints.
+`machine_name` is required. Detected values are untrusted display hints.
 
 Response includes `code`, `approve_url` (QR target), `poll_token`, `poll_interval_ms`, and `control_plane_url` (`APP_URL`, no trailing slash). Desktop logs `control_plane_url mismatch` if it disagrees with configured `pair_api_base`.
 
@@ -148,7 +144,6 @@ Admin approval selects/creates a `BackupDestination` and the device, then return
 ```json
 {
   "status": "approved",
-  "transport": "file_store",
   "device_uuid": "desktop-uuid",
   "device_token": "one-time-device-token",
   "destination_uuid": "customer-destination-uuid",
@@ -156,7 +151,7 @@ Admin approval selects/creates a `BackupDestination` and the device, then return
 }
 ```
 
-Client rejects any transport other than `file_store` or missing fields. It protects the device token, atomically writes schema v6 (a v5 `chunk_store` config upgrades in place, no re-pair), and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel keeps only the token hash.
+Client rejects missing fields. It protects the device token, atomically writes the config, and starts the sync engine. Failed/cancelled/rejected pairing must not replace an active assignment. Laravel keeps only the token hash.
 
 Default `pair_api_base` = `https://backup.rui.cam` (editable + persisted: Windows **CONTROL PLANE URL** on blur + pair; macOS tray **Control plane URL…**).
 
@@ -259,16 +254,15 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 ### Done
 
-- Laravel (`box-rui-cam` `live-sync`): `file_store` pairing, one shared bucket, sync APIs (cursor / changes / files/upload / files/download / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
-- Desktop: schema v6 pairing (Win + Mac), in-process sync engine, whole-file sync by real name and path, FS watcher with mtime/size skip.
+- Laravel (`box-rui-cam` `live-sync`): pairing, one shared bucket, sync APIs (cursor / changes / files/upload / files/download / commit / restore), last-writer-wins, 30-day prune, shelf with history, restore and download.
+- Desktop: pairing (Win + Mac), in-process sync engine, whole-file sync by real name and path, FS watcher with mtime/size skip.
 - Engine speed: batched `files/upload` + `commit/batch`, 8 parallel streaming file transfers, streamed hashing, skip download when the local hash matches, 4 s cursor poll, status and activity sent to both UIs.
 - Signed file URLs: devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
 - Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`); the desktop gets no S3 key. `E2E_API=https://backup.rui.cam` runs the same test against a deployed control plane and its real store: no local stack, and an admin approves the two printed codes into one new customer folder. 262 files + 9 MiB seed in ~3.2 s (debug build, single-threaded PHP dev server).
-- Cleanup: Syncthing/WebDAV leftovers, the no-op installation repair feature and dead code removed; Windows code moved to `src/win/`.
 
 ### Roadmap (in order)
 
-1. **Whole-file e2e** (local rclone, then production) and turn on bucket versioning on the Space (`php artisan storage:versioning`). Then **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). Spaces uses one shared bucket (`SPACES_BUCKET`, made once by hand); each destination is `{destination.name}/` inside it, so approval creates no bucket.
+1. **Whole-file e2e** (local rclone, then production) and turn on bucket versioning on the Space (`php artisan storage:versioning`). Then **Spaces live e2e** against a real Space; then the two-device last-writer-wins smoke and the Win7 packaged smoke (operator). Spaces uses one shared bucket (`SPACES_BUCKET`, made once by hand); each destination is `{destination.name}/` inside it.
 2. **One pairing flow.** Windows uses `start_pairing_cancellable` / `poll_pairing_cancellable`; macOS uses `start_pairing_result` / `poll_pairing_result` and its own status handling. Move both to the cancellable flow and one status mapper in `pairing.rs`.
 3. CI job for `dev/e2e/two-device-sync.sh`.
 4. Re-pair catch-up: a fresh device replays the whole change log page by page. Add a server snapshot of live tips if large destinations make that slow.
