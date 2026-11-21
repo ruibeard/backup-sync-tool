@@ -25,7 +25,7 @@ git add Cargo.toml
 [[ -n "$(git status --porcelain Cargo.lock)" ]] && git add Cargo.lock
 git commit -m "release: $TAG"
 
-./build-macos.sh --package
+./build-macos.sh --package --notarize
 [[ -n "$(git status --porcelain Cargo.lock)" ]] && { git add Cargo.lock; git commit -m "chore: sync Cargo.lock for $TAG"; }
 
 MAC="$(ls dist/macos/backupsynctool-macos-*.tar.gz | head -1)"

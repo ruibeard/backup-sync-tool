@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # macOS: release .app (in-process file sync engine) -> dist/macos/
-# Flags: --install --no-launch --package --identity=X
+# Flags: --install --no-launch --package --identity=X --notarize
+# --notarize: Developer ID identity + hardened runtime, then notarytool + staple.
+#   Needs a stored profile: xcrun notarytool store-credentials "$NOTARY_PROFILE" (default: notary)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -8,7 +10,8 @@ VER="$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)"
 OUT=dist/macos
 APP="$OUT/Backup Sync Tool.app"
 ID=cam.rui.backupsynctool
-INSTALL=0 LAUNCH=1 PACKAGE=0
+INSTALL=0 LAUNCH=1 PACKAGE=0 NOTARIZE=0
+NOTARY_PROFILE="${NOTARY_PROFILE:-notary}"
 SIGN="${MACOS_SIGN_IDENTITY:--}"
 
 for a in "$@"; do
@@ -17,8 +20,14 @@ for a in "$@"; do
     --no-launch) LAUNCH=0 ;;
     --package|-p) PACKAGE=1; LAUNCH=0 ;;
     --identity=*) SIGN="${a#--identity=}" ;;
+    --notarize) NOTARIZE=1 ;;
   esac
 done
+
+if [[ $NOTARIZE -eq 1 && "$SIGN" == "-" ]]; then
+  SIGN="$(security find-identity -v -p codesigning | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+  [[ -n "$SIGN" ]] || { echo "error: --notarize needs a Developer ID Application identity" >&2; exit 1; }
+fi
 
 mkdir -p "$OUT"
 
@@ -58,9 +67,24 @@ cat > "$APP/Contents/Info.plist" <<EOF
 EOF
 
 xattr -cr "$APP" 2>/dev/null || true
-codesign --force --sign "$SIGN" --timestamp=none "$APP/Contents/MacOS/backupsynctool"
-codesign --force --sign "$SIGN" --identifier "$ID" --timestamp=none "$APP"
+if [[ $NOTARIZE -eq 1 ]]; then
+  SIGN_ARGS=(--options runtime --timestamp)
+else
+  SIGN_ARGS=(--timestamp=none)
+fi
+codesign --force --sign "$SIGN" "${SIGN_ARGS[@]}" "$APP/Contents/MacOS/backupsynctool"
+codesign --force --sign "$SIGN" --identifier "$ID" "${SIGN_ARGS[@]}" "$APP"
 codesign --verify --strict --verbose=2 "$APP"
+
+if [[ $NOTARIZE -eq 1 ]]; then
+  ZIP="$OUT/notarize.zip"
+  rm -f "$ZIP"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+  rm -f "$ZIP"
+  xcrun stapler staple "$APP"
+  spctl --assess --type execute --verbose=2 "$APP"
+fi
 
 LAUNCH_APP="$(cd "$OUT" && pwd)/Backup Sync Tool.app"
 if [[ $PACKAGE -eq 1 ]]; then
