@@ -357,25 +357,26 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
 
     let (head, pct, bar_color, detail, eta) = if syncing {
         let app = st.app.snapshot();
-        let file_total = app.global_files;
-        let file_done = file_total.saturating_sub(app.need_files);
-        let pct = if file_total > 0 {
-            file_done.saturating_mul(100) / file_total
-        } else {
-            0
-        };
-        let detail = if app.need_bytes > 0 {
+        let pct = app.progress_pct();
+        let mut detail = if app.need_bytes > 0 {
             format!(
-                "{} file(s) · {} remaining",
+                "{} file(s) · {} left",
                 app.need_files,
                 format_transfer_bytes(app.need_bytes)
             )
-        } else if file_total > 0 {
-            format!("{file_done} of {file_total} files")
+        } else if app.need_files > 0 {
+            format!("{} file(s) left", app.need_files)
         } else {
             String::new()
         };
-        ("Syncing".to_string(), pct, C_BLUE, detail, String::new())
+        if app.transfer.rate_bps > 0 {
+            detail.push_str(&format!(
+                " · {}/s",
+                format_transfer_bytes(app.transfer.rate_bps)
+            ));
+        }
+        let eta = app.eta_secs().map(crate::app::format_eta).unwrap_or_default();
+        ("Syncing".to_string(), pct, C_BLUE, detail, eta)
     } else if checking {
         (
             "Checking…".to_string(),

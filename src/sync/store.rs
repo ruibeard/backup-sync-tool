@@ -9,6 +9,8 @@ use md5::{Digest, Md5};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use ureq::Agent;
 
@@ -18,6 +20,22 @@ pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct FileStore {
     agent: Agent,
+    /// Bytes sent or received so far, across all workers (for speed and progress).
+    moved: Arc<AtomicU64>,
+}
+
+/// Adds every byte read to a shared counter.
+struct Counting<R> {
+    inner: R,
+    moved: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for Counting<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.moved.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
 }
 
 impl FileStore {
@@ -30,6 +48,19 @@ impl FileStore {
                 // Keep one warm connection per transfer worker.
                 .max_idle_connections_per_host(16)
                 .build(),
+            moved: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Total bytes moved by this store since it was made. Only goes up.
+    pub fn bytes_moved(&self) -> u64 {
+        self.moved.load(Ordering::Relaxed)
+    }
+
+    fn counting<R: Read>(&self, inner: R) -> Counting<R> {
+        Counting {
+            inner,
+            moved: Arc::clone(&self.moved),
         }
     }
 
@@ -49,7 +80,7 @@ impl FileStore {
             .set("Content-Type", "application/octet-stream")
             .set("Content-Length", &len.to_string())
             // `take` keeps the body at the declared length if the file grows.
-            .send(file.take(len))
+            .send(self.counting(file.take(len)))
             .map_err(|e| map_ureq_err("file PUT", e))?;
         match resp.header("etag").map(|v| v.trim().trim_matches('"')) {
             Some(etag) if !etag.is_empty() => Ok(etag.to_string()),
@@ -81,7 +112,7 @@ impl FileStore {
             .get(url)
             .call()
             .map_err(|e| map_ureq_err("file GET", e))?;
-        let result = stream_to_file(resp.into_reader(), dest_tmp, size, md5_hex);
+        let result = stream_to_file(self.counting(resp.into_reader()), dest_tmp, size, md5_hex);
         if result.is_err() {
             let _ = fs::remove_file(dest_tmp);
         }

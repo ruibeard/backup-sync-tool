@@ -56,6 +56,12 @@ pub struct StatusSnapshot {
     pub global_files: u64,
     pub need_files: u64,
     pub need_bytes: u64,
+    /// Bytes per second while files move.
+    pub rate_bps: u64,
+    /// Percent done in this round.
+    pub pct: u64,
+    /// "12 min left", or empty.
+    pub eta: String,
     pub version: String,
     pub update_available: bool,
 }
@@ -355,11 +361,19 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
 
     let n = s.activity_lines.len();
     let activity_summary = if s.need_files > 0 || s.need_bytes > 0 {
-        format!(
-            "{} file(s) remaining · {}",
+        let mut text = format!(
+            "{}% · {} file(s) · {} left",
+            s.pct,
             s.need_files,
             format_bytes(s.need_bytes)
-        )
+        );
+        if s.rate_bps > 0 {
+            text.push_str(&format!(" · {}/s", format_bytes(s.rate_bps)));
+        }
+        if !s.eta.is_empty() {
+            text.push_str(&format!(" · {}", s.eta));
+        }
+        text
     } else {
         format!(
             "{} local / {} global · {n} recent event(s)",

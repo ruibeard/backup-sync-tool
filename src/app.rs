@@ -44,6 +44,15 @@ pub enum WorkState {
     PausedForReconnect,
 }
 
+/// Size of the current sync round and its live speed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Transfer {
+    pub total_files: u64,
+    pub total_bytes: u64,
+    /// Bytes per second, averaged over the last few seconds.
+    pub rate_bps: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSnapshot {
     pub connection: ConnectionState,
@@ -60,8 +69,39 @@ pub struct AppSnapshot {
     pub global_files: u64,
     pub need_files: u64,
     pub need_bytes: u64,
+    pub transfer: Transfer,
     pub activity: VecDeque<String>,
     pub last_event_id: u64,
+}
+
+impl AppSnapshot {
+    /// Percent done in this sync round: by bytes, or by files when no bytes move.
+    pub fn progress_pct(&self) -> u64 {
+        let t = self.transfer;
+        (t.total_bytes.saturating_sub(self.need_bytes) * 100)
+            .checked_div(t.total_bytes)
+            .or_else(|| {
+                (t.total_files.saturating_sub(self.need_files) * 100).checked_div(t.total_files)
+            })
+            .unwrap_or(0)
+    }
+
+    /// Seconds left at the current speed.
+    pub fn eta_secs(&self) -> Option<u64> {
+        let rate = self.transfer.rate_bps;
+        (rate > 0 && self.need_bytes > 0).then(|| self.need_bytes / rate)
+    }
+}
+
+/// "45 s left", "12 min left", "2 h 5 min left".
+pub fn format_eta(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs} s left")
+    } else if secs < 3600 {
+        format!("{} min left", secs.div_ceil(60))
+    } else {
+        format!("{} h {} min left", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 impl Default for AppSnapshot {
@@ -81,6 +121,7 @@ impl Default for AppSnapshot {
             global_files: 0,
             need_files: 0,
             need_bytes: 0,
+            transfer: Transfer::default(),
             activity: VecDeque::new(),
             last_event_id: 0,
         }
@@ -116,6 +157,7 @@ pub enum AppCommand {
         local_files: u64,
         need_files: u64,
         need_bytes: u64,
+        transfer: Transfer,
     },
     Activity(String),
     EngineFailed(String),
@@ -249,6 +291,7 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
             local_files,
             need_files,
             need_bytes,
+            transfer,
         } => {
             state.hub_connected = connected;
             state.connection = if connected {
@@ -261,6 +304,7 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
             state.global_files = local_files;
             state.need_files = need_files;
             state.need_bytes = need_bytes;
+            state.transfer = transfer;
             state.pairing = PairingState::Idle;
             state.work = match state.folder_state.as_str() {
                 "scanning" => WorkState::Scanning,
@@ -272,6 +316,7 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
         AppCommand::Activity(line) => {
             if state.activity.back() != Some(&line) {
                 state.activity.push_back(line);
+                state.last_event_id += 1;
                 while state.activity.len() > MAX_RECENT_ACTIVITY {
                     state.activity.pop_front();
                 }
@@ -301,6 +346,11 @@ mod tests {
                 local_files: 5,
                 need_files: 3,
                 need_bytes: 4096,
+                transfer: Transfer {
+                    total_files: 10,
+                    total_bytes: 8192,
+                    rate_bps: 1000,
+                },
             },
             &mpsc::channel().0,
         );
@@ -308,6 +358,25 @@ mod tests {
         assert_eq!(state.work, WorkState::Syncing);
         assert_eq!(state.need_files, 3);
         assert_eq!(state.need_bytes, 4096);
+    }
+
+    #[test]
+    fn progress_and_eta_use_bytes() {
+        let state = AppSnapshot {
+            need_files: 5,
+            need_bytes: 2_000,
+            transfer: Transfer {
+                total_files: 10,
+                total_bytes: 8_000,
+                rate_bps: 100,
+            },
+            ..AppSnapshot::default()
+        };
+        assert_eq!(state.progress_pct(), 75);
+        assert_eq!(state.eta_secs(), Some(20));
+        assert_eq!(format_eta(20), "20 s left");
+        assert_eq!(format_eta(600), "10 min left");
+        assert_eq!(format_eta(7500), "2 h 5 min left");
     }
 
     #[test]
@@ -319,5 +388,6 @@ mod tests {
             &mpsc::channel().0,
         );
         assert_eq!(state.activity.back().unwrap(), "Synced Invoices/one.pdf");
+        assert_eq!(state.last_event_id, 1);
     }
 }

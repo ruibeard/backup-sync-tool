@@ -348,7 +348,11 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         "Checking files…".into()
     } else if matches!(app.work, crate::app::WorkState::Syncing) {
         if app.need_files > 0 {
-            format!("Syncing… {} file(s) remaining", app.need_files)
+            format!(
+                "Syncing… {}% · {} file(s) remaining",
+                app.progress_pct(),
+                app.need_files
+            )
         } else {
             "Syncing…".into()
         }
@@ -371,6 +375,12 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         global_files: app.global_files,
         need_files: app.need_files,
         need_bytes: app.need_bytes,
+        rate_bps: app.transfer.rate_bps,
+        pct: app.progress_pct(),
+        eta: app
+            .eta_secs()
+            .map(crate::app::format_eta)
+            .unwrap_or_default(),
         version: env!("CARGO_PKG_VERSION").into(),
         update_available,
     }
@@ -769,7 +779,11 @@ fn apply_status(shared: &Shared) {
             (
                 IconKind::Syncing,
                 if app.need_files > 0 {
-                    format!("Backup Sync — {} file(s) remaining", app.need_files)
+                    format!(
+                        "Backup Sync — {}% · {} file(s) remaining",
+                        app.progress_pct(),
+                        app.need_files
+                    )
                 } else {
                     "Backup Sync — syncing".into()
                 },

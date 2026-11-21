@@ -16,24 +16,26 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
         let st = stmut(hwnd);
         st.connected = snapshot.hub_connected;
         st.sync_status_state = state as usize;
-        st.sync_progress_total = snapshot.global_files as usize;
-        st.sync_progress_done = snapshot.global_files.saturating_sub(snapshot.need_files) as usize;
+        st.sync_progress_total = snapshot.transfer.total_files as usize;
+        st.sync_progress_done = snapshot
+            .transfer
+            .total_files
+            .saturating_sub(snapshot.need_files) as usize;
         st.sync_status_text = match state {
             UiSyncState::Checking => "Checking...".into(),
             UiSyncState::Syncing => format!("Syncing {} file(s)...", snapshot.need_files),
             UiSyncState::Idle if snapshot.hub_connected => "All synced".into(),
             UiSyncState::Idle => "Hub offline".into(),
         };
-        let activity = if snapshot.last_event_id > st.last_event_id {
-            snapshot.activity.back().cloned()
-        } else {
-            None
-        };
+        // Every line added since the last snapshot, oldest first.
+        let fresh = snapshot.last_event_id.saturating_sub(st.last_event_id) as usize;
+        let skip = snapshot.activity.len().saturating_sub(fresh);
+        let activity: Vec<String> = snapshot.activity.iter().skip(skip).cloned().collect();
         st.last_event_id = st.last_event_id.max(snapshot.last_event_id);
         (activity, (st.sync_progress_done, st.sync_progress_total, 0))
     };
-    if let Some(line) = new_activity.0 {
-        apply_activity_log(hwnd, &line);
+    for line in &new_activity.0 {
+        apply_activity_log(hwnd, line);
     }
     if state == UiSyncState::Checking || state == UiSyncState::Syncing {
         SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);

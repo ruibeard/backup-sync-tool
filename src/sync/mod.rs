@@ -14,20 +14,20 @@ mod state;
 mod store;
 mod watch;
 
-use crate::app::AppCommand;
+use crate::app::{AppCommand, Transfer};
 use crate::config::{self, Config};
 use crate::logs;
 use client::{ApiError, Method, RemoteFile, SyncApiClient};
 use state::{state_path, SyncState, Synced};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use store::{hash_file, FileStore, MAX_FILE_BYTES};
 use watch::FolderWatcher;
 
@@ -75,6 +75,10 @@ const BATCH_FILES: usize = 200;
 const BATCH_BYTES: u64 = 256 * 1024 * 1024;
 /// Extra attempts for one file PUT/GET before it counts as failed.
 const TRANSFER_RETRIES: u32 = 2;
+/// How often the UI gets live progress while files move.
+const PROGRESS_TICK: Duration = Duration::from_secs(1);
+/// Speed is the average over this window.
+const RATE_WINDOW: Duration = Duration::from_secs(5);
 /// Activity lists each file up to this count, then one summary line.
 const MAX_ACTIVITY_LINES: usize = 10;
 
@@ -120,7 +124,7 @@ impl Drop for SyncEngine {
 /// Sends engine status to the shared app controller (both UIs render it).
 struct Reporter {
     tx: Sender<AppCommand>,
-    last: Option<(bool, &'static str, u64, u64, u64)>,
+    last: Option<(bool, &'static str, u64, u64, u64, Transfer)>,
 }
 
 impl Reporter {
@@ -135,6 +139,7 @@ impl Reporter {
         local: usize,
         need_files: u64,
         need_bytes: u64,
+        transfer: Transfer,
     ) {
         let next = (
             connected,
@@ -142,6 +147,7 @@ impl Reporter {
             local as u64,
             need_files,
             need_bytes,
+            transfer,
         );
         if self.last == Some(next) {
             return;
@@ -153,7 +159,13 @@ impl Reporter {
             local_files: local as u64,
             need_files,
             need_bytes,
+            transfer,
         });
+    }
+
+    /// One activity line. Safe to call from transfer workers.
+    fn line(&self, text: String) {
+        let _ = self.tx.send(AppCommand::Activity(text));
     }
 
     fn activity(&self, verb: &str, paths: &[String]) {
@@ -182,6 +194,8 @@ struct Ctx<'a> {
     /// Paths already logged as too large, so scans do not repeat the line.
     oversize_logged: Mutex<HashSet<String>>,
     stop: &'a AtomicBool,
+    /// Files finished in the current round (for live progress).
+    files_done: AtomicU64,
 }
 
 impl Ctx<'_> {
@@ -215,6 +229,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
         store: FileStore::new(),
         oversize_logged: Mutex::new(HashSet::new()),
         stop: &stop,
+        files_done: AtomicU64::new(0),
     };
 
     let mut state = SyncState::load(&state_path);
@@ -235,7 +250,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
                         logs::append(&format!("sync: state save failed: {err}"));
                     }
                 }
-                reporter.status(true, "idle", state.files.len(), 0, 0);
+                reporter.status(true, "idle", state.files.len(), 0, 0, Transfer::default());
                 if outcome.retry {
                     dirty.store(true, Ordering::Release);
                 }
@@ -248,7 +263,14 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
             }
             Err(err) => {
                 logs::append(&format!("sync: round failed: {err}"));
-                reporter.status(false, "offline", state.files.len(), 0, 0);
+                reporter.status(
+                    false,
+                    "offline",
+                    state.files.len(),
+                    0,
+                    0,
+                    Transfer::default(),
+                );
                 dirty.store(true, Ordering::Release);
                 sleep_interruptible(&stop, None, ERROR_BACKOFF);
                 continue;
@@ -382,59 +404,118 @@ fn sync_round(
 
     let files = scan_files(&ctx.root).map_err(ApiError::Other)?;
     let plan = make_plan(ctx, state, &files, &remote, &mut out);
-    let mut need_files = (plan.uploads.len()
+    let total_files = (plan.uploads.len()
         + plan.downloads.len()
         + plan.remote_deletes.len()
         + plan.local_deletes.len()) as u64;
-    if need_files == 0 {
+    if total_files == 0 {
         return Ok(out);
     }
-    let mut need_bytes = plan.uploads.iter().map(|u| u.local.size).sum::<u64>()
+    let total_bytes = plan.uploads.iter().map(|u| u.local.size).sum::<u64>()
         + plan.downloads.iter().map(|d| d.remote.size).sum::<u64>();
-    reporter.status(true, "syncing", state.files.len(), need_files, need_bytes);
-
-    let mut progress = |reporter: &mut Reporter, state: &SyncState, files: usize, bytes: u64| {
-        need_files = need_files.saturating_sub(files as u64);
-        need_bytes = need_bytes.saturating_sub(bytes);
-        reporter.status(true, "syncing", state.files.len(), need_files, need_bytes);
+    let transfer = Transfer {
+        total_files,
+        total_bytes,
+        rate_bps: 0,
     };
+    let local = state.files.len();
+    reporter.status(true, "syncing", local, total_files, total_bytes, transfer);
 
+    ctx.files_done.store(0, Ordering::Relaxed);
+    let base = ctx.store.bytes_moved();
+    let finished = AtomicBool::new(false);
+    let tx = reporter.tx.clone();
+    let result = thread::scope(|scope| {
+        scope.spawn(|| progress_ticker(ctx, &tx, &finished, local as u64, transfer, base));
+        let result = run_plan(ctx, state, &plan, reporter, &mut out);
+        finished.store(true, Ordering::Release);
+        result
+    });
+    result?;
+    Ok(out)
+}
+
+/// Sends live progress (files and bytes left, speed) until `finished`.
+fn progress_ticker(
+    ctx: &Ctx,
+    tx: &Sender<AppCommand>,
+    finished: &AtomicBool,
+    local: u64,
+    transfer: Transfer,
+    base: u64,
+) {
+    let mut samples: VecDeque<(Instant, u64)> = VecDeque::new();
+    loop {
+        let wait_until = Instant::now() + PROGRESS_TICK;
+        while Instant::now() < wait_until {
+            if finished.load(Ordering::Acquire) || ctx.stopping() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let now = Instant::now();
+        let moved = ctx.store.bytes_moved().saturating_sub(base);
+        samples.push_back((now, moved));
+        while samples.len() > 2 && now.duration_since(samples[0].0) > RATE_WINDOW {
+            samples.pop_front();
+        }
+        let rate_bps = transfer_rate(&samples);
+        let done = ctx.files_done.load(Ordering::Relaxed);
+        let _ = tx.send(AppCommand::EngineStatus {
+            connected: true,
+            folder_state: "syncing".into(),
+            local_files: local,
+            need_files: transfer.total_files.saturating_sub(done),
+            need_bytes: transfer.total_bytes.saturating_sub(moved),
+            transfer: Transfer {
+                rate_bps,
+                ..transfer
+            },
+        });
+    }
+}
+
+/// Bytes per second between the oldest and newest sample.
+fn transfer_rate(samples: &VecDeque<(Instant, u64)>) -> u64 {
+    match (samples.front(), samples.back()) {
+        (Some(first), Some(last)) if last.0 > first.0 => {
+            let secs = last.0.duration_since(first.0).as_secs_f64();
+            (last.1.saturating_sub(first.1) as f64 / secs) as u64
+        }
+        _ => 0,
+    }
+}
+
+fn run_plan(
+    ctx: &Ctx,
+    state: &mut SyncState,
+    plan: &Plan,
+    reporter: &mut Reporter,
+    out: &mut Outcome,
+) -> Result<(), ApiError> {
     let sizes: Vec<u64> = plan.uploads.iter().map(|u| u.local.size).collect();
     for range in chunks(&sizes) {
         if ctx.stopping() {
-            return Ok(out);
+            return Ok(());
         }
-        let batch = &plan.uploads[range];
-        upload_batch(ctx, state, batch, reporter, &mut out)?;
-        progress(
-            reporter,
-            state,
-            batch.len(),
-            batch.iter().map(|u| u.local.size).sum(),
-        );
+        upload_batch(ctx, state, &plan.uploads[range], reporter, out)?;
     }
 
     let sizes: Vec<u64> = plan.downloads.iter().map(|d| d.remote.size).collect();
     for range in chunks(&sizes) {
         if ctx.stopping() {
-            return Ok(out);
+            return Ok(());
         }
-        let batch = &plan.downloads[range];
-        download_batch(ctx, state, batch, reporter, &mut out)?;
-        progress(
-            reporter,
-            state,
-            batch.len(),
-            batch.iter().map(|d| d.remote.size).sum(),
-        );
+        download_batch(ctx, state, &plan.downloads[range], reporter, out)?;
     }
 
     for group in plan.remote_deletes.chunks(BATCH_FILES) {
         if ctx.stopping() {
-            return Ok(out);
+            return Ok(());
         }
-        delete_remote_batch(ctx, state, group, reporter, &mut out)?;
-        progress(reporter, state, group.len(), 0);
+        delete_remote_batch(ctx, state, group, reporter, out)?;
+        ctx.files_done
+            .fetch_add(group.len() as u64, Ordering::Relaxed);
     }
 
     let mut removed = Vec::new();
@@ -450,9 +531,10 @@ fn sync_round(
                 out.retry = true;
             }
         }
+        ctx.files_done.fetch_add(1, Ordering::Relaxed);
     }
     reporter.activity("Removed", &removed);
-    Ok(out)
+    Ok(())
 }
 
 /// Decide every path. Paths that only need a state update are applied here.
@@ -611,14 +693,22 @@ fn upload_batch(
         if ctx.stopping() {
             return Err("stopped".to_string());
         }
-        let etag = with_retries(ctx, || ctx.store.put_file(url, &u.abs))?;
-        // Stored bytes must be the bytes that were planned.
-        match file_fingerprint(&u.abs) {
-            Ok((size, mtime_ns)) if (size, mtime_ns) == (u.local.size, u.local.mtime_ns) => {
-                Ok(etag)
+        reporter.line(format!("Syncing {}", u.rel));
+        let result = with_retries(ctx, || ctx.store.put_file(url, &u.abs)).and_then(|etag| {
+            // Stored bytes must be the bytes that were planned.
+            match file_fingerprint(&u.abs) {
+                Ok((size, mtime_ns)) if (size, mtime_ns) == (u.local.size, u.local.mtime_ns) => {
+                    Ok(etag)
+                }
+                _ => Err("changed while syncing".to_string()),
             }
-            _ => Err("changed while syncing".to_string()),
+        });
+        ctx.files_done.fetch_add(1, Ordering::Relaxed);
+        match &result {
+            Ok(_) => reporter.line(format!("Synced {}", u.rel)),
+            Err(err) => reporter.line(format!("Could not sync {}: {err}", u.rel)),
         }
+        result
     });
     let mut done = Vec::new();
     for ((u, _), result) in jobs.iter().zip(results) {
@@ -642,7 +732,6 @@ fn upload_batch(
     }
     out.changed |= !done.is_empty();
     logs::append(&format!("sync: uploaded {} file(s)", done.len()));
-    reporter.activity("Uploaded", &done);
     Ok(())
 }
 
@@ -683,13 +772,19 @@ fn download_batch(
         if ctx.stopping() {
             return Err("stopped".to_string());
         }
+        reporter.line(format!("Syncing {}", d.rel));
         // Only a plain MD5 ETag proves the bytes; multipart ETags do not.
         let md5 = if is_md5_etag(&d.remote.etag) {
             d.remote.etag.as_str()
         } else {
             ""
         };
-        with_retries(ctx, || ctx.store.get_file(url, tmp, d.remote.size, md5))
+        let result = with_retries(ctx, || ctx.store.get_file(url, tmp, d.remote.size, md5));
+        ctx.files_done.fetch_add(1, Ordering::Relaxed);
+        if let Err(err) = &result {
+            reporter.line(format!("Could not sync {}: {err}", d.rel));
+        }
+        result
     });
 
     let mut done = Vec::new();
@@ -722,11 +817,11 @@ fn download_batch(
                 mtime_ns: file_mtime_ns(abs),
             },
         );
+        reporter.line(format!("Synced {}", d.rel));
         done.push(d.rel.clone());
     }
     out.changed |= !done.is_empty();
     logs::append(&format!("sync: downloaded {} file(s)", done.len()));
-    reporter.activity("Downloaded", &done);
     Ok(())
 }
 
@@ -1159,6 +1254,7 @@ mod tests {
                 store: FileStore::new(),
                 oversize_logged: Mutex::new(HashSet::new()),
                 stop: &stop,
+                files_done: AtomicU64::new(0),
             };
             (ctx, SyncState::default())
         };
