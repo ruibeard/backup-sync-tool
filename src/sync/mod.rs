@@ -226,7 +226,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
     let ctx = Ctx {
         root: PathBuf::from(cfg.watch_folder.trim()),
         api: SyncApiClient::new(&cfg.pair_api_base, &device_token),
-        store: FileStore::new(),
+        store: FileStore::new().with_stop(Arc::clone(&stop)),
         oversize_logged: Mutex::new(HashSet::new()),
         stop: &stop,
         files_done: AtomicU64::new(0),

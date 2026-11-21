@@ -9,7 +9,7 @@ use md5::{Digest, Md5};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use ureq::Agent;
@@ -29,16 +29,25 @@ pub struct FileStore {
     agent: Agent,
     /// Bytes sent or received so far, across all workers (for speed and progress).
     moved: Arc<AtomicU64>,
+    /// Set when the engine stops: transfers in flight end at the next read.
+    stop: Arc<AtomicBool>,
 }
 
 /// Adds every byte read to a shared counter.
 struct Counting<R> {
     inner: R,
     moved: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
 }
 
 impl<R: Read> Read for Counting<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.stop.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "stopped",
+            ));
+        }
         let n = self.inner.read(buf)?;
         self.moved.fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
@@ -56,7 +65,14 @@ impl FileStore {
                 .max_idle_connections_per_host(16)
                 .build(),
             moved: Arc::new(AtomicU64::new(0)),
+            stop: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Make in-flight transfers end soon after `stop` is set.
+    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// Total bytes moved by this store since it was made. Only goes up.
@@ -68,6 +84,7 @@ impl FileStore {
         Counting {
             inner,
             moved: Arc::clone(&self.moved),
+            stop: Arc::clone(&self.stop),
         }
     }
 
@@ -164,7 +181,7 @@ impl FileStore {
                 loop {
                     match self.get_range(url, &file, start, end) {
                         Ok(()) => return Ok(()),
-                        Err(_) if attempt < PART_RETRIES => {
+                        Err(_) if attempt < PART_RETRIES && !self.stop.load(Ordering::Acquire) => {
                             attempt += 1;
                             std::thread::sleep(Duration::from_millis(250 << attempt));
                         }
@@ -477,6 +494,22 @@ mod tests {
             .get_ranged(&url, &tmp, body.len() as u64, &"0".repeat(32), 64 * 1024)
             .unwrap_err();
         assert!(err.contains("hash mismatch"), "{err}");
+        assert!(!tmp.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stop_ends_a_transfer() {
+        let dir = temp_dir("stop");
+        let tmp = dir.join(".s.bst-tmp");
+        let body: Vec<u8> = vec![7u8; 200_000];
+        let url = serve_ranges(body.clone());
+        let stop = Arc::new(AtomicBool::new(true));
+        let store = FileStore::new().with_stop(stop);
+        let err = store
+            .get_ranged(&url, &tmp, body.len() as u64, "", 64 * 1024)
+            .unwrap_err();
+        assert!(err.contains("stopped"), "{err}");
         assert!(!tmp.exists());
         let _ = fs::remove_dir_all(dir);
     }
