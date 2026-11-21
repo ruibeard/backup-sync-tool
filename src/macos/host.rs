@@ -176,6 +176,7 @@ impl SyncHost {
                 });
             }
             Err(message) => {
+                logs::append(&format!("Pair start failed: {message}"));
                 let _ = self.app.send(AppCommand::PairFailed {
                     message: message.clone(),
                     retryable: true,
