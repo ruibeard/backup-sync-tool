@@ -10,6 +10,7 @@ pub const WM_TRAY: u32 = WM_APP + 1;
 pub const ID_TRAY_OPEN: usize = 1001;
 pub const ID_TRAY_LOGS: usize = 1002;
 pub const ID_TRAY_EXIT: usize = 1003;
+pub const ID_TRAY_PAUSE: usize = 1004;
 
 unsafe fn fill_tip(dst: &mut [u16; 128], text: &str) {
     let wide: Vec<u16> = text.encode_utf16().collect();
@@ -64,8 +65,15 @@ pub unsafe fn remove_tray_icon(hwnd: HWND) {
 }
 
 // Show right-click context menu at cursor
-pub unsafe fn show_tray_menu(hwnd: HWND) {
+pub unsafe fn show_tray_menu(hwnd: HWND, paused: bool) {
     let hmenu = CreatePopupMenu().unwrap();
+    let pause = if paused {
+        w!("Resume Sync")
+    } else {
+        w!("Pause Sync")
+    };
+    AppendMenuW(hmenu, MF_STRING, ID_TRAY_PAUSE, pause).ok();
+    AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).ok();
     AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN, w!("Open")).ok();
     AppendMenuW(hmenu, MF_STRING, ID_TRAY_LOGS, w!("Open Logs")).ok();
     AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()).ok();

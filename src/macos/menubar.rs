@@ -148,6 +148,7 @@ unsafe impl Send for MainTray {}
 unsafe impl Sync for MainTray {}
 
 struct Ids {
+    pause: String,
     open_window: String,
     open_logs: String,
     set_control_plane: String,
@@ -197,12 +198,15 @@ pub fn run() {
     let icon_syncing = png_to_icon(ICON_SYNCING).expect("menubar syncing icon");
     let icon_complete = png_to_icon(ICON_COMPLETE).expect("menubar complete icon");
 
+    let paused = host.lock().expect("host").is_paused();
+    let pause = TrayMenuItem::new(pause_label(paused), true, None);
     let open_window = TrayMenuItem::new("Open Backup Sync Tool…", true, None);
     let open_logs = TrayMenuItem::new("Open Logs", true, None);
     let set_control_plane = TrayMenuItem::new("Control plane URL…", true, None);
     let quit = TrayMenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
+        pause: pause.id().as_ref().to_string(),
         open_window: open_window.id().as_ref().to_string(),
         open_logs: open_logs.id().as_ref().to_string(),
         set_control_plane: set_control_plane.id().as_ref().to_string(),
@@ -210,12 +214,15 @@ pub fn run() {
     };
 
     let menu = Menu::new();
+    let _ = menu.append(&pause);
+    let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&open_window);
     let _ = menu.append(&open_logs);
     let _ = menu.append(&set_control_plane);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
+    PAUSE_ITEM.with(|slot| *slot.borrow_mut() = Some(pause));
     let tray = TrayIconBuilder::new()
         .with_tooltip("Backup Sync Tool")
         .with_icon(icon_idle.clone())
@@ -281,6 +288,10 @@ pub fn run() {
             }
             return;
         }
+        if id == ids.pause {
+            toggle_pause(&shared_ev);
+            return;
+        }
         if id == ids.open_window {
             open_main_window(&shared_ev);
             return;
@@ -329,6 +340,42 @@ pub fn run() {
     app.run();
 }
 
+thread_local! {
+    /// The tray menu item lives on the main thread; menu events arrive there too.
+    static PAUSE_ITEM: std::cell::RefCell<Option<TrayMenuItem>> = const { std::cell::RefCell::new(None) };
+}
+
+fn pause_label(paused: bool) -> &'static str {
+    if paused {
+        "Resume Sync"
+    } else {
+        "Pause Sync"
+    }
+}
+
+/// Pause or resume. Stopping can wait for a file part, so it runs off the main thread.
+fn toggle_pause(shared: &Shared) {
+    let paused = match shared.host.try_lock() {
+        Ok(h) => !h.is_paused(),
+        Err(_) => return,
+    };
+    PAUSE_ITEM.with(|slot| {
+        if let Some(item) = slot.borrow().as_ref() {
+            item.set_text(pause_label(paused));
+        }
+    });
+    let shared = shared.clone();
+    thread::spawn(move || {
+        if let Ok(mut h) = shared.host.lock() {
+            if let Err(err) = h.set_paused(paused) {
+                logs::append(&format!("pause: {err}"));
+            }
+        }
+        apply_status(&shared);
+        refresh_status_window(&shared);
+    });
+}
+
 fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
     let app = host.app_snapshot();
     let paired = host.is_paired();
@@ -344,7 +391,9 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         app.work,
         crate::app::WorkState::Scanning | crate::app::WorkState::Syncing
     );
-    let sync_status = if matches!(app.work, crate::app::WorkState::Scanning) {
+    let sync_status = if host.is_paused() {
+        "Paused".into()
+    } else if matches!(app.work, crate::app::WorkState::Scanning) {
         "Checking files…".into()
     } else if matches!(app.work, crate::app::WorkState::Syncing) {
         if app.need_files > 0 {
@@ -772,6 +821,8 @@ fn apply_status(shared: &Shared) {
         let app = h.app_snapshot();
         if h.auth_failed() {
             (IconKind::Idle, "Backup Sync — re-pair required".into())
+        } else if h.is_paused() {
+            (IconKind::Idle, "Backup Sync — paused".into())
         } else if matches!(
             app.work,
             crate::app::WorkState::Scanning | crate::app::WorkState::Syncing

@@ -113,8 +113,34 @@ impl SyncHost {
         }
     }
 
+    pub fn is_paused(&self) -> bool {
+        self.config.sync_paused
+    }
+
+    /// Pause stops the engine at once; resume starts it again. Saved to config.
+    pub fn set_paused(&mut self, paused: bool) -> Result<(), String> {
+        self.config.sync_paused = paused;
+        config::save(&self.config).map_err(|error| format!("save config: {error}"))?;
+        logs::append(if paused {
+            "Sync paused by user"
+        } else {
+            "Sync resumed by user"
+        });
+        if paused {
+            self.stop_sync();
+            let _ = self.app.send(AppCommand::Work(crate::app::WorkState::Idle));
+            Ok(())
+        } else {
+            self.restart_sync()
+        }
+    }
+
     pub fn restart_sync(&mut self) -> Result<(), String> {
         self.stop_sync();
+        if self.config.sync_paused {
+            logs::append("Sync not started: paused.");
+            return Ok(());
+        }
         let _ = self.app.send(AppCommand::EngineStarting);
         if !watch_folder_is_valid(&self.config.watch_folder) {
             let error = "Sync not started: choose a valid watch folder.".to_string();

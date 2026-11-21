@@ -22,6 +22,7 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
             .total_files
             .saturating_sub(snapshot.need_files) as usize;
         st.sync_status_text = match state {
+            _ if st.config.sync_paused => "Paused".into(),
             UiSyncState::Checking => "Checking...".into(),
             UiSyncState::Syncing => format!("Syncing {} file(s)...", snapshot.need_files),
             UiSyncState::Idle if snapshot.hub_connected => "All synced".into(),
@@ -349,7 +350,7 @@ unsafe fn on_tray(hwnd: HWND, lp: LPARAM) -> LRESULT {
             ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
         }
-        WM_RBUTTONUP => tray::show_tray_menu(hwnd),
+        WM_RBUTTONUP => tray::show_tray_menu(hwnd, stmut(hwnd).config.sync_paused),
         _ => {}
     }
     LRESULT(0)

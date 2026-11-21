@@ -31,7 +31,9 @@ unsafe fn update_bridge_display(hwnd: HWND) {
         "Control plane unavailable".to_string()
     };
 
-    st.bridge_sync_head = if auth_fail && !is_syncing && !is_checking {
+    st.bridge_sync_head = if st.config.sync_paused {
+        "Sync paused".to_string()
+    } else if auth_fail && !is_syncing && !is_checking {
         "Sync paused".to_string()
     } else if !paired {
         "Not syncing".to_string()
@@ -43,7 +45,9 @@ unsafe fn update_bridge_display(hwnd: HWND) {
         "All synced".to_string()
     };
 
-    st.bridge_sync_meta = if auth_fail && !is_syncing && !is_checking {
+    st.bridge_sync_meta = if st.config.sync_paused {
+        "Paused by you\r\nResume from the tray menu".to_string()
+    } else if auth_fail && !is_syncing && !is_checking {
         "Assignment invalid\r\nreconnect to resume".to_string()
     } else if !paired {
         "Pair with server\r\nto start backup".to_string()
@@ -301,6 +305,20 @@ unsafe fn ensure_or_prompt_watch_folder(hwnd: HWND) -> bool {
     }
 }
 
+/// Pause stops the engine; resume starts it again. Saved to config.
+unsafe fn toggle_pause(hwnd: HWND) {
+    let paused = !stmut(hwnd).config.sync_paused;
+    stmut(hwnd).config.sync_paused = paused;
+    if let Err(e) = crate::config::save(&stmut(hwnd).config) {
+        logs::append(&format!("pause: save config: {e}"));
+    }
+    logs::append(if paused { "Sync paused by user" } else { "Sync resumed by user" });
+    if let Err(err) = restart_sync_engine(hwnd) {
+        logs::append(&format!("Sync start failed: {err}"));
+    }
+    update_bridge_display(hwnd);
+}
+
 /// Start/restart the in-process file sync engine for the Windows UI.
 unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     read_ctrls(hwnd, stmut(hwnd));
@@ -309,6 +327,13 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
     }
     if let Some(engine) = stmut(hwnd).sync_engine.take() {
         engine.stop();
+    }
+    if stmut(hwnd).config.sync_paused {
+        let st = stmut(hwnd);
+        st.sync_status_text = "Paused".into();
+        st.sync_status_state = UiSyncState::Idle as usize;
+        logs::append("Sync not started: paused.");
+        return Ok(());
     }
     if !ensure_or_prompt_watch_folder(hwnd) {
         return Err("Sync not started: choose a valid backup folder on this PC.".into());

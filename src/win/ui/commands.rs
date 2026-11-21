@@ -36,6 +36,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
             ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
         }
+        x if x == tray::ID_TRAY_PAUSE as u16 => toggle_pause(hwnd),
         x if x == tray::ID_TRAY_LOGS as u16 => {
             do_open_logs(hwnd);
         }

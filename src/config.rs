@@ -25,6 +25,9 @@ pub struct Config {
     pub start_with_windows: bool,
     #[serde(default = "default_true")]
     pub auto_update: bool,
+    /// The user paused sync. Kept across restarts until they resume.
+    #[serde(default)]
+    pub sync_paused: bool,
 }
 
 impl Default for Config {
@@ -38,6 +41,7 @@ impl Default for Config {
             server_approved_at: None,
             start_with_windows: true,
             auto_update: true,
+            sync_paused: false,
         }
     }
 }
