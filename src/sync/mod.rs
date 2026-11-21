@@ -239,6 +239,8 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
         files_done: AtomicU64::new(0),
     };
 
+    // No download runs yet: temp files here are left from a killed app.
+    remove_stale_temps(&ctx.root);
     let mut state = SyncState::load_for(&state_path, &ctx.root.to_string_lossy());
     let dirty = Arc::new(AtomicBool::new(true));
     let _watcher = FolderWatcher::start(&ctx.root, Arc::clone(&dirty));
@@ -1028,6 +1030,32 @@ fn scan_files(root: &Path) -> Result<HashMap<String, PathBuf>, String> {
         }
     }
     Ok(out)
+}
+
+/// Delete our temp files under `root`, left when the app was killed mid-download.
+fn remove_stale_temps(root: &Path) {
+    let mut removed = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            let path = entry.path();
+            if ft.is_dir() && !ft.is_symlink() {
+                stack.push(path);
+            } else if ft.is_file()
+                && entry.file_name().to_string_lossy().ends_with(TEMP_SUFFIX)
+                && fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        logs::append(&format!("sync: removed {removed} leftover temp file(s)"));
+    }
 }
 
 fn normalize_rel_path(path: &Path) -> Result<String, String> {
