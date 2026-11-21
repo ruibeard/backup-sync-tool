@@ -343,7 +343,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         ui.pair.setBezelColor(Some(&crate::macos::brand::green()));
     } else {
         ui.pair.setTitle(&NSString::from_str("Connect Server"));
-        ui.pair.setKeyEquivalent(&NSString::from_str("\r"));
+        ui.pair.setKeyEquivalent(&NSString::from_str(""));
         ui.pair.setBezelColor(Some(&crate::macos::brand::green()));
     }
 
@@ -582,7 +582,7 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         sel!(actPair:),
         rect(PAD + col_w + COL_GAP, y, col_w, BTN_H),
     );
-    pair.setKeyEquivalent(&NSString::from_str("\r"));
+    pair.setKeyEquivalent(&NSString::from_str(""));
     pair.setBezelColor(Some(&crate::macos::brand::green()));
     root.addSubview(&pair);
 
