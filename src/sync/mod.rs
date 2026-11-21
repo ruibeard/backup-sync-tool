@@ -67,6 +67,13 @@ const ERROR_BACKOFF: Duration = Duration::from_secs(5);
 /// Let writes settle after a file-system event before scanning.
 const FS_SETTLE: Duration = Duration::from_millis(500);
 const TRANSFER_WORKERS: usize = 8;
+/// Files below `BIG_FILE_BYTES` (photos, documents) run 32 at a time:
+/// they spend most of their time waiting on the server, not on bandwidth.
+const SMALL_WORKERS: usize = 32;
+/// Big files (videos, models, archives) run 8 at a time; each one already
+/// downloads in parallel parts.
+const BIG_WORKERS: usize = 8;
+const BIG_FILE_BYTES: u64 = store::RANGED_MIN_BYTES;
 const HASH_WORKERS: usize = 4;
 /// Files per signing request (server cap is 500).
 const BATCH_FILES: usize = 200;
@@ -746,28 +753,36 @@ fn upload_all(
         &sizes,
     );
     let jobs: Vec<(usize, &Upload)> = uploads.iter().enumerate().collect();
-    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |&(i, u)| {
-        if ctx.stopping() {
-            return Err("stopped".to_string());
-        }
-        let url = book.url(i)?;
-        reporter.line(format!("Syncing {}", u.rel));
-        let result = with_retries(ctx, || ctx.store.put_file(&url, &u.abs)).and_then(|etag| {
-            // Stored bytes must be the bytes that were planned.
-            match file_fingerprint(&u.abs) {
-                Ok((size, mtime_ns)) if (size, mtime_ns) == (u.local.size, u.local.mtime_ns) => {
-                    Ok(etag)
-                }
-                _ => Err("changed while syncing".to_string()),
+    let results = pool::split_map(
+        &jobs,
+        |(_, u)| u.local.size >= BIG_FILE_BYTES,
+        SMALL_WORKERS,
+        BIG_WORKERS,
+        |&(i, u)| {
+            if ctx.stopping() {
+                return Err("stopped".to_string());
             }
-        });
-        ctx.files_done.fetch_add(1, Ordering::Relaxed);
-        match &result {
-            Ok(_) => reporter.line(format!("Synced {}", u.rel)),
-            Err(err) => reporter.line(format!("Could not sync {}: {err}", u.rel)),
-        }
-        result
-    });
+            let url = book.url(i)?;
+            reporter.line(format!("Syncing {}", u.rel));
+            let result = with_retries(ctx, || ctx.store.put_file(&url, &u.abs)).and_then(|etag| {
+                // Stored bytes must be the bytes that were planned.
+                match file_fingerprint(&u.abs) {
+                    Ok((size, mtime_ns))
+                        if (size, mtime_ns) == (u.local.size, u.local.mtime_ns) =>
+                    {
+                        Ok(etag)
+                    }
+                    _ => Err("changed while syncing".to_string()),
+                }
+            });
+            ctx.files_done.fetch_add(1, Ordering::Relaxed);
+            match &result {
+                Ok(_) => reporter.line(format!("Synced {}", u.rel)),
+                Err(err) => reporter.line(format!("Could not sync {}: {err}", u.rel)),
+            }
+            result
+        },
+    );
     let mut done = 0usize;
     for ((_, u), result) in jobs.iter().zip(results) {
         match result {
@@ -812,18 +827,24 @@ fn download_all(
     );
     let jobs: Vec<(usize, &Download)> = downloads.iter().enumerate().collect();
     // Each worker downloads, checks and places one file; Ok carries its mtime.
-    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |&(i, d)| {
-        if ctx.stopping() {
-            return Err("stopped".to_string());
-        }
-        let result = download_one(ctx, &book, i, d, reporter);
-        ctx.files_done.fetch_add(1, Ordering::Relaxed);
-        match &result {
-            Ok(_) => reporter.line(format!("Synced {}", d.rel)),
-            Err(err) => reporter.line(format!("Could not sync {}: {err}", d.rel)),
-        }
-        result
-    });
+    let results = pool::split_map(
+        &jobs,
+        |(_, d)| d.remote.size >= BIG_FILE_BYTES,
+        SMALL_WORKERS,
+        BIG_WORKERS,
+        |&(i, d)| {
+            if ctx.stopping() {
+                return Err("stopped".to_string());
+            }
+            let result = download_one(ctx, &book, i, d, reporter);
+            ctx.files_done.fetch_add(1, Ordering::Relaxed);
+            match &result {
+                Ok(_) => reporter.line(format!("Synced {}", d.rel)),
+                Err(err) => reporter.line(format!("Could not sync {}: {err}", d.rel)),
+            }
+            result
+        },
+    );
     let mut done = 0usize;
     for ((_, d), result) in jobs.iter().zip(results) {
         match result {
