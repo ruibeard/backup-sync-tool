@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SyncState {
+    /// The watch folder these entries describe. Empty in older state files.
+    #[serde(default)]
+    pub root: String,
     #[serde(default)]
     pub files: HashMap<String, Synced>,
 }
@@ -29,6 +32,22 @@ impl SyncState {
             return Self::default();
         };
         serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    /// Load the state for `root`. State from another folder is dropped: its
+    /// entries would make files missing here look deleted, and delete them
+    /// from the bucket. Without state, files on both sides are compared by hash.
+    pub fn load_for(path: &Path, root: &str) -> Self {
+        let mut state = Self::load(path);
+        if !state.root.is_empty() && state.root != root {
+            crate::logs::append(&format!(
+                "sync: watch folder changed ({} -> {root}); comparing files by hash",
+                state.root
+            ));
+            state = Self::default();
+        }
+        state.root = root.to_string();
+        state
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -71,6 +90,28 @@ mod tests {
         state.files.insert("a/b.txt".into(), synced.clone());
         state.save(&path).unwrap();
         assert_eq!(SyncState::load(&path).files["a/b.txt"], synced);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn state_from_another_folder_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("bst-state-root-{}", std::process::id()));
+        let path = dir.join("state.json");
+        let mut state = SyncState::default();
+        state.files.insert(
+            "a.txt".into(),
+            Synced {
+                etag: "e".into(),
+                size: 1,
+                mtime_ns: 1,
+            },
+        );
+        state.root = "/old".into();
+        state.save(&path).unwrap();
+        assert_eq!(SyncState::load_for(&path, "/old").files.len(), 1);
+        let other = SyncState::load_for(&path, "/new");
+        assert!(other.files.is_empty());
+        assert_eq!(other.root, "/new");
         let _ = fs::remove_dir_all(dir);
     }
 }

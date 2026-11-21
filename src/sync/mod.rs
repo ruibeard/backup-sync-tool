@@ -239,7 +239,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
         files_done: AtomicU64::new(0),
     };
 
-    let mut state = SyncState::load(&state_path);
+    let mut state = SyncState::load_for(&state_path, &ctx.root.to_string_lossy());
     let dirty = Arc::new(AtomicBool::new(true));
     let _watcher = FolderWatcher::start(&ctx.root, Arc::clone(&dirty));
 
