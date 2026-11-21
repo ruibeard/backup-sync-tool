@@ -14,6 +14,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use ureq::Agent;
 
+/// Files at least this big download as parallel byte ranges: one connection
+/// to the store is slow (about 3 MB/s to Spaces), many are not.
+pub const RANGED_MIN_BYTES: u64 = 32 * 1024 * 1024;
+const PART_BYTES: u64 = 16 * 1024 * 1024;
+const PART_WORKERS: usize = 8;
+const PART_RETRIES: u32 = 2;
+
 /// Largest object one signed PUT can carry (S3 single-request limit).
 pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
@@ -118,6 +125,131 @@ impl FileStore {
         }
         result
     }
+}
+
+impl FileStore {
+    /// Like `get_file`, but a big file downloads as parallel byte ranges.
+    pub fn get_file_fast(
+        &self,
+        url: &str,
+        dest_tmp: &Path,
+        size: u64,
+        md5_hex: &str,
+    ) -> Result<(), String> {
+        if size < RANGED_MIN_BYTES {
+            return self.get_file(url, dest_tmp, size, md5_hex);
+        }
+        self.get_ranged(url, dest_tmp, size, md5_hex, PART_BYTES)
+    }
+
+    fn get_ranged(
+        &self,
+        url: &str,
+        dest_tmp: &Path,
+        size: u64,
+        md5_hex: &str,
+        part_bytes: u64,
+    ) -> Result<(), String> {
+        let result = (|| {
+            let file = fs::File::create(dest_tmp)
+                .map_err(|e| format!("create {}: {e}", dest_tmp.display()))?;
+            file.set_len(size)
+                .map_err(|e| format!("size {}: {e}", dest_tmp.display()))?;
+            let parts: Vec<(u64, u64)> = (0..size)
+                .step_by(part_bytes as usize)
+                .map(|start| (start, (start + part_bytes).min(size) - 1))
+                .collect();
+            let results = super::pool::parallel_map(&parts, PART_WORKERS, |&(start, end)| {
+                let mut attempt = 0;
+                loop {
+                    match self.get_range(url, &file, start, end) {
+                        Ok(()) => return Ok(()),
+                        Err(_) if attempt < PART_RETRIES => {
+                            attempt += 1;
+                            std::thread::sleep(Duration::from_millis(250 << attempt));
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            });
+            results.into_iter().collect::<Result<Vec<()>, String>>()?;
+            file.sync_all().ok();
+            drop(file);
+            let (got, written) = hash_file(dest_tmp)?;
+            if written != size {
+                return Err(format!("size mismatch: got {written}, expected {size}"));
+            }
+            let want = md5_hex.trim();
+            if !want.is_empty() && !got.eq_ignore_ascii_case(want) {
+                return Err(format!("file hash mismatch: expected {want}, got {got}"));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(dest_tmp);
+        }
+        result
+    }
+
+    /// Write bytes `start..=end` of the object into `file` at the same offset.
+    fn get_range(&self, url: &str, file: &fs::File, start: u64, end: u64) -> Result<(), String> {
+        let resp = self
+            .agent
+            .get(url)
+            .set("Range", &format!("bytes={start}-{end}"))
+            .call()
+            .map_err(|e| map_ureq_err("file GET range", e))?;
+        if resp.status() != 206 {
+            return Err(format!(
+                "store ignored range request (HTTP {})",
+                resp.status()
+            ));
+        }
+        let mut reader = self.counting(resp.into_reader());
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut offset = start;
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("file GET range: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            if offset + n as u64 > end + 1 {
+                return Err("store sent more bytes than asked".into());
+            }
+            write_all_at(file, &buf[..n], offset).map_err(|e| format!("write: {e}"))?;
+            offset += n as u64;
+        }
+        if offset != end + 1 {
+            return Err(format!(
+                "short range: got {} of {}",
+                offset - start,
+                end + 1 - start
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn write_all_at(file: &fs::File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn write_all_at(file: &fs::File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.seek_write(buf, offset)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 /// MD5 and size of a file, streamed from disk.
@@ -284,6 +416,67 @@ mod tests {
         let (url, _rx) = serve_once("200 OK", "", body);
         let err = FileStore::new().get_file(&url, &tmp, 12, "").unwrap_err();
         assert!(err.contains("size mismatch"), "{err}");
+        assert!(!tmp.exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Serves `body` with Range support on every connection, until dropped.
+    fn serve_ranges(body: Vec<u8>) -> String {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/obj", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let body = body.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut range = None;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some(v) = line.to_ascii_lowercase().strip_prefix("range: bytes=") {
+                            let (a, b) = v.trim().split_once('-').unwrap();
+                            range =
+                                Some((a.parse::<usize>().unwrap(), b.parse::<usize>().unwrap()));
+                        }
+                    }
+                    let (a, b) = range.unwrap();
+                    let part = &body[a..=b];
+                    let mut out = stream;
+                    write!(
+                        out,
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        part.len()
+                    )
+                    .unwrap();
+                    out.write_all(part).unwrap();
+                });
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn ranged_get_assembles_parts_and_checks_hash() {
+        let dir = temp_dir("ranged");
+        let tmp = dir.join(".big.bst-tmp");
+        let body: Vec<u8> = (0..1_000_003u32).map(|n| (n % 251) as u8).collect();
+        let md5 = hex::encode(Md5::digest(&body));
+        let url = serve_ranges(body.clone());
+        let store = FileStore::new();
+        store
+            .get_ranged(&url, &tmp, body.len() as u64, &md5, 64 * 1024)
+            .unwrap();
+        assert_eq!(fs::read(&tmp).unwrap(), body);
+        assert_eq!(store.bytes_moved(), body.len() as u64);
+        let err = store
+            .get_ranged(&url, &tmp, body.len() as u64, &"0".repeat(32), 64 * 1024)
+            .unwrap_err();
+        assert!(err.contains("hash mismatch"), "{err}");
         assert!(!tmp.exists());
         let _ = fs::remove_dir_all(dir);
     }

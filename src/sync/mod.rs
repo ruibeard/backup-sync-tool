@@ -25,7 +25,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use store::{hash_file, FileStore, MAX_FILE_BYTES};
@@ -493,21 +493,11 @@ fn run_plan(
     reporter: &mut Reporter,
     out: &mut Outcome,
 ) -> Result<(), ApiError> {
-    let sizes: Vec<u64> = plan.uploads.iter().map(|u| u.local.size).collect();
-    for range in chunks(&sizes) {
-        if ctx.stopping() {
-            return Ok(());
-        }
-        upload_batch(ctx, state, &plan.uploads[range], reporter, out)?;
+    upload_all(ctx, state, &plan.uploads, reporter, out)?;
+    if ctx.stopping() {
+        return Ok(());
     }
-
-    let sizes: Vec<u64> = plan.downloads.iter().map(|d| d.remote.size).collect();
-    for range in chunks(&sizes) {
-        if ctx.stopping() {
-            return Ok(());
-        }
-        download_batch(ctx, state, &plan.downloads[range], reporter, out)?;
-    }
+    download_all(ctx, state, &plan.downloads, reporter, out)?;
 
     for group in plan.remote_deletes.chunks(BATCH_FILES) {
         if ctx.stopping() {
@@ -679,22 +669,90 @@ fn chunks(sizes: &[u64]) -> Vec<Range<usize>> {
     out
 }
 
-fn upload_batch(
+/// Signs URLs one batch at a time, when the first worker reaches the batch.
+/// URLs stay fresh on slow links, and no batch waits for another to finish.
+struct UrlBook<'a> {
+    ctx: &'a Ctx<'a>,
+    method: Method,
+    paths: Vec<String>,
+    batches: Vec<Range<usize>>,
+    signed: Vec<OnceLock<Result<Vec<String>, String>>>,
+    /// First signing error; it ends the round after the workers stop.
+    error: Mutex<Option<ApiError>>,
+}
+
+impl<'a> UrlBook<'a> {
+    fn new(ctx: &'a Ctx<'a>, method: Method, paths: Vec<String>, sizes: &[u64]) -> Self {
+        let batches = chunks(sizes);
+        let signed = batches.iter().map(|_| OnceLock::new()).collect();
+        Self {
+            ctx,
+            method,
+            paths,
+            batches,
+            signed,
+            error: Mutex::new(None),
+        }
+    }
+
+    fn url(&self, index: usize) -> Result<String, String> {
+        let batch = self.batches.partition_point(|range| range.end <= index);
+        let range = self.batches[batch].clone();
+        let urls = self.signed[batch].get_or_init(|| {
+            if let Some(err) = self
+                .error
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
+                return Err(err.to_string());
+            }
+            self.ctx
+                .api
+                .sign(self.method, &self.paths[range.clone()])
+                .map_err(|err| {
+                    let text = err.to_string();
+                    let mut first = self.error.lock().unwrap_or_else(|p| p.into_inner());
+                    first.get_or_insert(err);
+                    text
+                })
+        });
+        match urls {
+            Ok(urls) => Ok(urls[index - range.start].clone()),
+            Err(err) => Err(format!("sign: {err}")),
+        }
+    }
+
+    fn into_error(self) -> Option<ApiError> {
+        self.error.into_inner().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+fn upload_all(
     ctx: &Ctx,
     state: &mut SyncState,
-    batch: &[Upload],
+    uploads: &[Upload],
     reporter: &Reporter,
     out: &mut Outcome,
 ) -> Result<(), ApiError> {
-    let paths: Vec<String> = batch.iter().map(|u| u.rel.clone()).collect();
-    let urls = ctx.api.sign(Method::Put, &paths)?;
-    let jobs: Vec<(&Upload, &String)> = batch.iter().zip(&urls).collect();
-    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |(u, url)| {
+    if uploads.is_empty() {
+        return Ok(());
+    }
+    let sizes: Vec<u64> = uploads.iter().map(|u| u.local.size).collect();
+    let book = UrlBook::new(
+        ctx,
+        Method::Put,
+        uploads.iter().map(|u| u.rel.clone()).collect(),
+        &sizes,
+    );
+    let jobs: Vec<(usize, &Upload)> = uploads.iter().enumerate().collect();
+    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |&(i, u)| {
         if ctx.stopping() {
             return Err("stopped".to_string());
         }
+        let url = book.url(i)?;
         reporter.line(format!("Syncing {}", u.rel));
-        let result = with_retries(ctx, || ctx.store.put_file(url, &u.abs)).and_then(|etag| {
+        let result = with_retries(ctx, || ctx.store.put_file(&url, &u.abs)).and_then(|etag| {
             // Stored bytes must be the bytes that were planned.
             match file_fingerprint(&u.abs) {
                 Ok((size, mtime_ns)) if (size, mtime_ns) == (u.local.size, u.local.mtime_ns) => {
@@ -710,8 +768,8 @@ fn upload_batch(
         }
         result
     });
-    let mut done = Vec::new();
-    for ((u, _), result) in jobs.iter().zip(results) {
+    let mut done = 0usize;
+    for ((_, u), result) in jobs.iter().zip(results) {
         match result {
             Ok(etag) => {
                 state.files.insert(
@@ -722,7 +780,7 @@ fn upload_batch(
                         mtime_ns: u.local.mtime_ns,
                     },
                 );
-                done.push(u.rel.clone());
+                done += 1;
             }
             Err(err) => {
                 logs::append(&format!("sync: upload {} failed: {err}", u.rel));
@@ -730,99 +788,105 @@ fn upload_batch(
             }
         }
     }
-    out.changed |= !done.is_empty();
-    logs::append(&format!("sync: uploaded {} file(s)", done.len()));
-    Ok(())
+    out.changed |= done > 0;
+    logs::append(&format!("sync: uploaded {done} file(s)"));
+    book.into_error().map_or(Ok(()), Err)
 }
 
-fn download_batch(
+fn download_all(
     ctx: &Ctx,
     state: &mut SyncState,
-    batch: &[Download],
+    downloads: &[Download],
     reporter: &Reporter,
     out: &mut Outcome,
 ) -> Result<(), ApiError> {
-    // Temp file next to the target, so the final rename is atomic.
-    let mut ready: Vec<(&Download, PathBuf, PathBuf)> = Vec::new();
-    for d in batch {
-        let prepared = safe_join(&ctx.root, &d.rel).and_then(|abs| {
-            if let Some(parent) = abs.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    if downloads.is_empty() {
+        return Ok(());
+    }
+    let sizes: Vec<u64> = downloads.iter().map(|d| d.remote.size).collect();
+    let book = UrlBook::new(
+        ctx,
+        Method::Get,
+        downloads.iter().map(|d| d.rel.clone()).collect(),
+        &sizes,
+    );
+    let jobs: Vec<(usize, &Download)> = downloads.iter().enumerate().collect();
+    // Each worker downloads, checks and places one file; Ok carries its mtime.
+    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |&(i, d)| {
+        if ctx.stopping() {
+            return Err("stopped".to_string());
+        }
+        let result = download_one(ctx, &book, i, d, reporter);
+        ctx.files_done.fetch_add(1, Ordering::Relaxed);
+        match &result {
+            Ok(_) => reporter.line(format!("Synced {}", d.rel)),
+            Err(err) => reporter.line(format!("Could not sync {}: {err}", d.rel)),
+        }
+        result
+    });
+    let mut done = 0usize;
+    for ((_, d), result) in jobs.iter().zip(results) {
+        match result {
+            Ok(mtime_ns) => {
+                state.files.insert(
+                    d.rel.clone(),
+                    Synced {
+                        etag: d.remote.etag.clone(),
+                        size: d.remote.size,
+                        mtime_ns,
+                    },
+                );
+                done += 1;
             }
-            let tmp = temp_path_for(&abs);
-            Ok((abs, tmp))
-        });
-        match prepared {
-            Ok((abs, tmp)) => ready.push((d, abs, tmp)),
             Err(err) => {
-                logs::append(&format!("sync: skip {}: {err}", d.rel));
+                logs::append(&format!("sync: download {} failed: {err}", d.rel));
                 out.retry = true;
             }
         }
     }
-    if ready.is_empty() {
-        return Ok(());
-    }
+    out.changed |= done > 0;
+    logs::append(&format!("sync: downloaded {done} file(s)"));
+    book.into_error().map_or(Ok(()), Err)
+}
 
-    let paths: Vec<String> = ready.iter().map(|(d, _, _)| d.rel.clone()).collect();
-    let urls = ctx.api.sign(Method::Get, &paths)?;
-    let jobs: Vec<_> = ready.iter().zip(&urls).collect();
-    let results = pool::parallel_map(&jobs, TRANSFER_WORKERS, |((d, _, tmp), url)| {
-        if ctx.stopping() {
-            return Err("stopped".to_string());
-        }
-        reporter.line(format!("Syncing {}", d.rel));
-        // Only a plain MD5 ETag proves the bytes; multipart ETags do not.
-        let md5 = if is_md5_etag(&d.remote.etag) {
-            d.remote.etag.as_str()
-        } else {
-            ""
-        };
-        let result = with_retries(ctx, || ctx.store.get_file(url, tmp, d.remote.size, md5));
-        ctx.files_done.fetch_add(1, Ordering::Relaxed);
-        if let Err(err) = &result {
-            reporter.line(format!("Could not sync {}: {err}", d.rel));
-        }
-        result
-    });
-
-    let mut done = Vec::new();
-    for (((d, abs, tmp), _), result) in jobs.iter().zip(results) {
-        if let Err(err) = result {
-            logs::append(&format!("sync: download {} failed: {err}", d.rel));
-            out.retry = true;
-            continue;
-        }
-        // The user edited the file while it downloaded: keep their edit.
-        let now = file_fingerprint(abs)
-            .ok()
-            .map(|(size, mtime_ns)| Local { size, mtime_ns });
-        if now != d.local {
-            let _ = fs::remove_file(tmp);
-            out.retry = true;
-            continue;
-        }
-        if let Err(err) = fs::rename(tmp, abs) {
-            let _ = fs::remove_file(tmp);
-            logs::append(&format!("sync: place {} failed: {err}", d.rel));
-            out.retry = true;
-            continue;
-        }
-        state.files.insert(
-            d.rel.clone(),
-            Synced {
-                etag: d.remote.etag.clone(),
-                size: d.remote.size,
-                mtime_ns: file_mtime_ns(abs),
-            },
-        );
-        reporter.line(format!("Synced {}", d.rel));
-        done.push(d.rel.clone());
+/// Download one file to a temp file next to it, then rename it into place.
+fn download_one(
+    ctx: &Ctx,
+    book: &UrlBook,
+    index: usize,
+    d: &Download,
+    reporter: &Reporter,
+) -> Result<u64, String> {
+    let abs = safe_join(&ctx.root, &d.rel)?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    out.changed |= !done.is_empty();
-    logs::append(&format!("sync: downloaded {} file(s)", done.len()));
-    Ok(())
+    // Temp file next to the target, so the final rename is atomic.
+    let tmp = temp_path_for(&abs);
+    let url = book.url(index)?;
+    reporter.line(format!("Syncing {}", d.rel));
+    // Only a plain MD5 ETag proves the bytes; multipart ETags do not.
+    let md5 = if is_md5_etag(&d.remote.etag) {
+        d.remote.etag.as_str()
+    } else {
+        ""
+    };
+    with_retries(ctx, || {
+        ctx.store.get_file_fast(&url, &tmp, d.remote.size, md5)
+    })?;
+    // The user edited the file while it downloaded: keep their edit.
+    let now = file_fingerprint(&abs)
+        .ok()
+        .map(|(size, mtime_ns)| Local { size, mtime_ns });
+    if now != d.local {
+        let _ = fs::remove_file(&tmp);
+        return Err("changed here while downloading; will retry".into());
+    }
+    if let Err(err) = fs::rename(&tmp, &abs) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("place: {err}"));
+    }
+    Ok(file_mtime_ns(&abs))
 }
 
 fn delete_remote_batch(
