@@ -31,7 +31,7 @@ rustup toolchain install nightly
 if ($LASTEXITCODE) { throw 'rustup nightly failed' }
 rustup component add rust-src --toolchain nightly
 if ($LASTEXITCODE) { throw 'rust-src failed' }
-$env:RUSTFLAGS = '-C target-feature=+crt-static'
+$env:RUSTFLAGS = '-C target-feature=+crt-static --cfg windows_raw_dylib'
 cargo +nightly build -Z build-std=std,panic_abort --release --target $target
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $src)) { throw 'cargo build failed' }
 $ErrorActionPreference = 'Stop'
