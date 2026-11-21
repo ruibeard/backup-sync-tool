@@ -9,6 +9,7 @@
 //! store keys.
 
 mod client;
+mod ignore;
 mod pool;
 mod state;
 mod store;
@@ -400,18 +401,24 @@ fn sync_round(
     if !ctx.root.is_dir() {
         return Ok(out);
     }
+    let ignore = ignore::Ignore::load(&ctx.root);
+    // Ignored paths drop out of the state too, so they are never deleted.
+    let before = state.files.len();
+    state.files.retain(|rel, _| !ignore.matches(rel));
+    out.changed |= state.files.len() != before;
     let remote: HashMap<String, RemoteFile> = ctx
         .api
         .list_files()?
         .into_iter()
-        .filter(|f| !f.path.ends_with('/') && !is_ignored_path(&f.path))
+        .filter(|f| !f.path.ends_with('/') && !is_ignored_path(&f.path) && !ignore.matches(&f.path))
         .map(|f| (f.path.clone(), f))
         .collect();
     if !scan && !remote_differs(&remote, state) {
         return Ok(out);
     }
 
-    let files = scan_files(&ctx.root).map_err(ApiError::Other)?;
+    let mut files = scan_files(&ctx.root).map_err(ApiError::Other)?;
+    files.retain(|rel, _| !ignore.matches(rel));
     let plan = make_plan(ctx, state, &files, &remote, &mut out);
     let total_files = (plan.uploads.len()
         + plan.downloads.len()
