@@ -187,6 +187,8 @@ unsafe fn on_create(hwnd: HWND) {
             let msg = format!("Sync start failed: {err}");
             logs::append(&msg);
         }
+    } else if crate::config::needs_repair(&cfg) {
+        notify_user(hwnd, crate::config::REPAIR_MESSAGE);
     }
 
     let watch_for_xd = cfg.watch_folder.clone();

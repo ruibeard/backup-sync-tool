@@ -185,6 +185,11 @@ pub fn run() {
             if let Err(err) = h.restart_sync() {
                 logs::append(&format!("menubar auto-start: {err}"));
             }
+        } else if config::needs_repair(&h.config) {
+            logs::append(config::REPAIR_MESSAGE);
+            let _ = h.restart_sync();
+        } else {
+            logs::append("Sync not started: not paired or no watch folder.");
         }
     }
 
@@ -786,7 +791,12 @@ fn apply_status(shared: &Shared) {
         } else if h.is_paired() {
             (IconKind::Idle, "Backup Sync — set watch folder".into())
         } else {
-            (IconKind::Idle, "Backup Sync — not paired".into())
+            let text = if config::needs_repair(&h.config) {
+                "Backup Sync — pair again"
+            } else {
+                "Backup Sync — not paired"
+            };
+            (IconKind::Idle, text.into())
         }
     };
     set_icon(&shared.tray, &shared.icons, kind);

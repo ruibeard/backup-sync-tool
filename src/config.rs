@@ -48,6 +48,14 @@ pub fn is_paired(cfg: &Config) -> bool {
         && !cfg.customer.trim().is_empty()
 }
 
+/// Old pairing (token present, but no device or customer): user must pair again.
+pub fn needs_repair(cfg: &Config) -> bool {
+    !cfg.device_token_enc.trim().is_empty() && !is_paired(cfg)
+}
+
+pub const REPAIR_MESSAGE: &str =
+    "This computer has an old pairing. Pair this computer again to start sync.";
+
 fn config_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -190,6 +198,14 @@ mod tests {
             ..Config::default()
         };
         assert!(is_paired(&cfg));
+        assert!(!needs_repair(&cfg));
+    }
+
+    #[test]
+    fn old_token_without_customer_needs_repair() {
+        let cfg = from_json(r#"{"device_token_enc": "old", "schema_version": 2}"#);
+        assert!(!is_paired(&cfg));
+        assert!(needs_repair(&cfg));
     }
 
     #[test]
