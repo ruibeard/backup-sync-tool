@@ -85,6 +85,10 @@ const BATCH_BYTES: u64 = 256 * 1024 * 1024;
 /// byte cap keeps each call well under proxy timeouts.
 const MOVE_BATCH_FILES: usize = 100;
 const MOVE_BATCH_BYTES: u64 = 1024 * 1024 * 1024;
+/// New files from this size up are first looked up in the bucket history
+/// by MD5: a file moved or put back while the app was off is copied there,
+/// not uploaded. Smaller files upload faster than the lookup.
+const REUSE_MIN_BYTES: u64 = 256 * 1024;
 /// Extra attempts for one file PUT/GET before it counts as failed.
 const TRANSFER_RETRIES: u32 = 2;
 /// How often the UI gets live progress while files move.
@@ -391,9 +395,10 @@ struct Download {
 }
 
 /// This device renamed `from` to `upload.rel`: the server copies the object
-/// instead of the device uploading the bytes again.
+/// instead of the device uploading the bytes again. With no `from`, the
+/// server copies any stored version with the same MD5, if it has one.
 struct RemoteMove {
-    from: String,
+    from: Option<String>,
     /// The bucket ETag of `from`; the bytes of the new path have this MD5.
     etag: String,
     upload: Upload,
@@ -843,7 +848,8 @@ fn pair_local_moves(plan: &mut Plan, mut sources: HashMap<String, Vec<(String, L
 }
 
 /// Uploads of new paths whose size matches a file this device deleted from
-/// the bucket in the same round. Only these are hashed for move detection.
+/// the bucket in the same round, or big enough to look up in the bucket
+/// history. Only these are hashed for move detection.
 fn remote_move_candidates(
     ctx: &Ctx,
     state: &SyncState,
@@ -857,14 +863,11 @@ fn remote_move_candidates(
         .filter(|t| is_md5_etag(&t.etag) && t.size > 0)
         .map(|t| t.size)
         .collect();
-    if sizes.is_empty() {
-        return Vec::new();
-    }
     let failed = ctx.move_failed.lock().unwrap_or_else(|p| p.into_inner());
     plan.uploads
         .iter()
         .filter(|u| {
-            sizes.contains(&u.local.size)
+            (sizes.contains(&u.local.size) || u.local.size >= REUSE_MIN_BYTES)
                 && !remote.contains_key(&u.rel)
                 && !failed.contains(&u.rel)
         })
@@ -874,6 +877,7 @@ fn remote_move_candidates(
 
 /// Pair hashed new files with deleted bucket files of the same MD5: each
 /// pair becomes one server-side move instead of an upload plus a delete.
+/// Other big new files ask the server for a stored copy before upload.
 fn pair_remote_moves(
     state: &SyncState,
     plan: &mut Plan,
@@ -889,18 +893,24 @@ fn pair_remote_moves(
             }
         }
     }
-    let mut pairs: HashMap<String, (String, String)> = HashMap::new();
+    let mut pairs: HashMap<String, (Option<String>, String)> = HashMap::new();
     for ((rel, size), hash) in hashed {
         let Ok(md5) = hash else { continue };
         let key = (md5.to_ascii_lowercase(), size);
-        if let Some(from) = gone.get_mut(&key).and_then(Vec::pop) {
-            pairs.insert(rel, (from, key.0));
+        match gone.get_mut(&key).and_then(Vec::pop) {
+            Some(from) => {
+                pairs.insert(rel, (Some(from), key.0));
+            }
+            None if size >= REUSE_MIN_BYTES => {
+                pairs.insert(rel, (None, key.0));
+            }
+            None => {}
         }
     }
     if pairs.is_empty() {
         return;
     }
-    let moved_from: HashSet<&String> = pairs.values().map(|(from, _)| from).collect();
+    let moved_from: HashSet<&String> = pairs.values().filter_map(|(from, _)| from.as_ref()).collect();
     plan.remote_deletes.retain(|rel| !moved_from.contains(rel));
     let mut uploads = Vec::new();
     for u in std::mem::take(&mut plan.uploads) {
@@ -1017,6 +1027,7 @@ fn move_remote_all(
     let moves = std::mem::take(&mut plan.remote_moves);
     let sizes: Vec<u64> = moves.iter().map(|m| m.upload.local.size).collect();
     let mut moved = Vec::new();
+    let mut reused = 0usize;
     for range in chunks_by(&sizes, MOVE_BATCH_FILES, MOVE_BATCH_BYTES) {
         if ctx.stopping() {
             break;
@@ -1050,7 +1061,12 @@ fn move_remote_all(
             let u = &m.upload;
             match result {
                 Ok(etag) => {
-                    state.files.remove(&m.from);
+                    match &m.from {
+                        Some(from) => {
+                            state.files.remove(from);
+                        }
+                        None => reused += 1,
+                    }
                     // A file edited since the hash uploads next round.
                     if file_fingerprint(&u.abs).ok() == Some((u.local.size, u.local.mtime_ns)) {
                         state.files.insert(
@@ -1067,8 +1083,8 @@ fn move_remote_all(
                     moved.push(u.rel.clone());
                     out.changed = true;
                 }
-                Err(err) => {
-                    logs::append(&format!("sync: move {} -> {} failed: {err}", m.from, u.rel));
+                // No stored copy: the normal case for a new file.
+                Err(err) if m.from.is_none() && err == "Not found." => {
                     ctx.move_failed
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -1078,7 +1094,20 @@ fn move_remote_all(
                         abs: u.abs.clone(),
                         local: u.local,
                     });
-                    plan.remote_deletes.push(m.from.clone());
+                }
+                Err(err) => {
+                    let from = m.from.as_deref().unwrap_or("bucket history");
+                    logs::append(&format!("sync: move {from} -> {} failed: {err}", u.rel));
+                    ctx.move_failed
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .insert(u.rel.clone());
+                    plan.uploads.push(Upload {
+                        rel: u.rel.clone(),
+                        abs: u.abs.clone(),
+                        local: u.local,
+                    });
+                    plan.remote_deletes.extend(m.from.clone());
                 }
             }
         }
@@ -1087,7 +1116,7 @@ fn move_remote_all(
     }
     if !moved.is_empty() {
         logs::append(&format!(
-            "sync: moved {} file(s) in the bucket",
+            "sync: moved {} file(s) in the bucket ({reused} from history)",
             moved.len()
         ));
     }
@@ -1851,11 +1880,31 @@ mod tests {
         ];
         pair_remote_moves(&state, &mut plan, hashed.into_iter());
         assert_eq!(plan.remote_moves.len(), 1);
-        assert_eq!(plan.remote_moves[0].from, "old/a.bin");
+        assert_eq!(plan.remote_moves[0].from.as_deref(), Some("old/a.bin"));
         assert_eq!(plan.remote_moves[0].upload.rel, "new/a.bin");
         assert_eq!(plan.uploads.len(), 1);
         assert_eq!(plan.uploads[0].rel, "new/c.bin");
         assert_eq!(plan.remote_deletes, vec!["old/b.bin".to_string()]);
+    }
+
+    #[test]
+    fn big_new_files_ask_the_bucket_history_first() {
+        let state = SyncState::default();
+        let big = REUSE_MIN_BYTES;
+        let mut plan = Plan {
+            uploads: vec![upload("new/big.bin", big), upload("new/small.bin", 10)],
+            ..Plan::default()
+        };
+        let hashed = vec![
+            (("new/big.bin".to_string(), big), Ok(md5(4))),
+            (("new/small.bin".to_string(), 10), Ok(md5(5))),
+        ];
+        pair_remote_moves(&state, &mut plan, hashed.into_iter());
+        assert_eq!(plan.remote_moves.len(), 1);
+        assert_eq!(plan.remote_moves[0].from, None);
+        assert_eq!(plan.remote_moves[0].etag, md5(4));
+        assert_eq!(plan.uploads.len(), 1);
+        assert_eq!(plan.uploads[0].rel, "new/small.bin");
     }
 
     #[test]

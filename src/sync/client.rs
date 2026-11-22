@@ -56,7 +56,8 @@ impl From<ApiError> for String {
 /// One rename inside the bucket: `from` must still hold `etag`.
 #[derive(Debug, Clone)]
 pub struct MoveRequest {
-    pub from: String,
+    /// `None`: copy any stored version (current or old) with this MD5.
+    pub from: Option<String>,
     pub to: String,
     pub etag: String,
 }

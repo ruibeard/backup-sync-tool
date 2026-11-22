@@ -158,7 +158,7 @@ Authenticated with `Authorization: Bearer <device_token>`. Revoked tokens receiv
 | --- | --- |
 | `GET /api/sync/files` | Every object under the device's customer folder: `{files:[{path,size,etag,modified}]}` |
 | `POST /api/sync/sign` | `{method: GET\|PUT\|DELETE, paths:[…]}` (1..500) → `{urls, expires_in}`: one presigned URL per path, same order |
-| `POST /api/sync/move` | `{moves:[{from,to,etag}]}` (1..100) → `{results:[{etag}\|{error}]}`, same order. Per move: S3 CopyObject `from`→`to`, check the new ETag equals `etag` (else delete `to` and fail), then delete `from`. No bytes leave the store |
+| `POST /api/sync/move` | `{moves:[{from?,to,etag}]}` (1..100) → `{results:[{etag}\|{error}]}`, same order. With `from`: S3 CopyObject `from`→`to`, check the new ETag equals `etag` (else delete `to` and fail), then delete `from`. Without `from`: copy any stored version (current or old, within the 30 days) whose ETag is `etag`, or `{error:"Not found."}`; nothing is deleted. Laravel caches the customer's version index for 10 min. No bytes leave the store |
 
 Sync routes are rate-limited per device (`throttle:sync`, 600/min), not per IP: behind the Cloudflare tunnel many devices can share one IP.
 
@@ -179,6 +179,7 @@ On launch (if paired), after approval, and after watch-path save:
 ### Moves
 
 - **This device moved a file.** A new local path whose size equals a path this device deleted from the bucket in the same round is hashed. Equal MD5 and the old path's ETag: one `sync/move` instead of an upload plus a delete. Batches ≤100 files, ≤1 GiB. A rejected move falls back to upload + delete in the same round. A failed call does neither; the next round sees what the server did, and that path uploads if it still needs to.
+- **A file came back.** A new local path of ≥256 KiB with no bucket file is hashed and sent as a `sync/move` without `from`. The server copies a stored version with that MD5 (for example a folder moved while the app was off or old, so its old paths were already deleted). `Not found.` means a normal upload, and the path is not asked again until the app restarts.
 - **Another device moved a file.** A new bucket path with no local file, whose ETag and size match a file this device holds unchanged, is placed from that file: renamed when the old path left the bucket, copied (temp file, then rename) when it stays. This also covers the moment between the server's copy and delete. A failure falls back to a download.
 - Only plain MD5 ETags match (single-part uploads; files are ≤5 GiB, the CopyObject limit).
 
