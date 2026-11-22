@@ -10,8 +10,9 @@ obj/
 /.idea/
 .DS_Store
 
-# App runtime files
+# App runtime files (config next to the exe holds credentials)
 /config.json
+/backupsynctool.json
 /logs/
 .env
 
