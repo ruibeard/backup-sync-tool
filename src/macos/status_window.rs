@@ -298,7 +298,16 @@ fn rows_from(lines: &[String]) -> Vec<Row> {
             Some(Activity::File { dir, done, path }) => {
                 (RowKind::File(dir, done), dir.label(done, file_name(path)), Some(path))
             }
-            Some(Activity::Failed(d)) => (RowKind::Error, format!("Could not sync {d}"), None),
+            Some(Activity::Waiting { dir, path }) => (
+                RowKind::File(dir, false),
+                format!("{} changed, will retry", file_name(path)),
+                Some(path),
+            ),
+            Some(Activity::Failed { path, reason }) => (
+                RowKind::Error,
+                failed_label(file_name(path), reason),
+                Some(path),
+            ),
             Some(Activity::Info(m)) => (RowKind::Info, m.to_string(), None),
             None => continue,
         };
@@ -314,6 +323,14 @@ fn rows_from(lines: &[String]) -> Vec<Row> {
         });
     }
     rows
+}
+
+fn failed_label(name: &str, reason: &str) -> String {
+    if reason.is_empty() {
+        format!("Could not sync {name}")
+    } else {
+        format!("Could not sync {name}: {reason}")
+    }
 }
 
 fn file_name(path: &str) -> &str {

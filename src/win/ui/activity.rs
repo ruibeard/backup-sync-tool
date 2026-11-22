@@ -67,19 +67,43 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 },
             ))
         }
-        Activity::Failed(detail) => Some((
-            None,
-            ActivityRow {
-                label: "Item needs attention".into(),
-                kind: ActivityKind::Error,
-                pct: None,
-                detail: Some(detail.to_string()),
-                replace_key: None,
-                time_label: None,
-                path: None,
-                icon: "!",
-            },
-        )),
+        Activity::Waiting { dir, path } => {
+            let key = format!("file:{path}");
+            Some((
+                Some(key.clone()),
+                ActivityRow {
+                    label: format!("{} changed, will retry", display_activity_name(path)),
+                    kind: ActivityKind::Syncing,
+                    pct: None,
+                    detail: None,
+                    replace_key: Some(key),
+                    time_label: None,
+                    path: Some(path.to_string()),
+                    icon: dir.icon(),
+                },
+            ))
+        }
+        Activity::Failed { path, reason } => {
+            let key = format!("file:{path}");
+            let name = display_activity_name(path);
+            Some((
+                Some(key.clone()),
+                ActivityRow {
+                    label: if reason.is_empty() {
+                        format!("Could not sync {name}")
+                    } else {
+                        format!("Could not sync {name}: {reason}")
+                    },
+                    kind: ActivityKind::Error,
+                    pct: None,
+                    detail: None,
+                    replace_key: Some(key),
+                    time_label: None,
+                    path: Some(path.to_string()),
+                    icon: "!",
+                },
+            ))
+        }
         Activity::Info(message) => Some((
             None,
             ActivityRow {
@@ -269,7 +293,7 @@ unsafe fn draw_activity_row(
 
     let mut label_rc = top_line;
     label_rc.left += 24;
-    label_rc.right = if show_bar || is_error || row.time_label.is_some() {
+    label_rc.right = if show_bar || row.time_label.is_some() {
         status_left - 4
     } else {
         top_line.right
@@ -289,36 +313,7 @@ unsafe fn draw_activity_row(
         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
     );
 
-    if is_error {
-        if let Some(detail) = row.detail.as_deref() {
-            let of_detail = SelectObject(hdc, hf_status);
-            SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
-            let mut detail_rc = *rc;
-            detail_rc.left = label_rc.left;
-            detail_rc.right = top_line.right;
-            detail_rc.top = top_line.bottom;
-            detail_rc.bottom = rc.bottom - 4;
-            draw_activity_text(
-                hdc,
-                &mut detail_rc,
-                detail,
-                DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS,
-            );
-            SelectObject(hdc, of_detail);
-        }
-        let of_status = SelectObject(hdc, hf_status);
-        SetTextColor(hdc, COLORREF(C_RED));
-        let mut fail_rc = top_line;
-        fail_rc.left = status_left;
-        fail_rc.right = status_right;
-        draw_activity_text(
-            hdc,
-            &mut fail_rc,
-            "Failed",
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        SelectObject(hdc, of_status);
-    } else if show_bar {
+    if show_bar {
         let status = if let Some(pct) = row.pct {
             Some(format!("{pct}%"))
         } else {

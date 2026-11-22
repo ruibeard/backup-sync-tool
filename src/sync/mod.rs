@@ -809,6 +809,10 @@ impl<'a> UrlBook<'a> {
     }
 }
 
+/// The file changed on disk during the transfer. Not a failure: the next
+/// round moves the new bytes.
+const CHANGING: &str = "changed while syncing; will retry";
+
 fn upload_all(
     ctx: &Ctx,
     state: &mut SyncState,
@@ -846,12 +850,13 @@ fn upload_all(
                     {
                         Ok(etag)
                     }
-                    _ => Err("changed while syncing".to_string()),
+                    _ => Err(CHANGING.to_string()),
                 }
             });
             ctx.files_done.fetch_add(1, Ordering::Relaxed);
             match &result {
                 Ok(_) => reporter.line(format!("Uploaded {}", u.rel)),
+                Err(err) if err == CHANGING => reporter.line(format!("Waiting to upload {}", u.rel)),
                 Err(err) => reporter.line(format!("Could not sync {}: {err}", u.rel)),
             }
             result
@@ -914,6 +919,7 @@ fn download_all(
             ctx.files_done.fetch_add(1, Ordering::Relaxed);
             match &result {
                 Ok(_) => reporter.line(format!("Downloaded {}", d.rel)),
+                Err(err) if err == CHANGING => reporter.line(format!("Waiting to download {}", d.rel)),
                 Err(err) => reporter.line(format!("Could not sync {}: {err}", d.rel)),
             }
             result
@@ -975,7 +981,7 @@ fn download_one(
         .map(|(size, mtime_ns)| Local { size, mtime_ns });
     if now != d.local {
         let _ = fs::remove_file(&tmp);
-        return Err("changed here while downloading; will retry".into());
+        return Err(CHANGING.into());
     }
     if let Err(err) = fs::rename(&tmp, &abs) {
         let _ = fs::remove_file(&tmp);

@@ -77,7 +77,10 @@ pub enum Activity<'a> {
         done: bool,
         path: &'a str,
     },
-    Failed(&'a str),
+    /// The file changed during the transfer; the next round tries again.
+    Waiting { dir: Direction, path: &'a str },
+    /// A file that could not sync, and why.
+    Failed { path: &'a str, reason: &'a str },
     Info(&'a str),
 }
 
@@ -128,8 +131,17 @@ pub fn parse_activity(line: &str) -> Option<Activity<'_>> {
             return file(dir, done, path);
         }
     }
+    for (prefix, dir) in [
+        ("Waiting to upload ", Direction::Up),
+        ("Waiting to download ", Direction::Down),
+    ] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            return Some(Activity::Waiting { dir, path });
+        }
+    }
     if let Some(detail) = line.strip_prefix("Could not sync ") {
-        return Some(Activity::Failed(detail));
+        let (path, reason) = detail.split_once(": ").unwrap_or((detail, ""));
+        return Some(Activity::Failed { path, reason });
     }
     line.strip_prefix("! ").map(Activity::Info)
 }
@@ -521,6 +533,18 @@ mod tests {
         assert_eq!(format_eta(20), "20 s left");
         assert_eq!(format_eta(600), "10 min left");
         assert_eq!(format_eta(7500), "2 h 5 min left");
+    }
+
+    #[test]
+    fn activity_lines_parse() {
+        assert_eq!(
+            parse_activity("Waiting to upload models/a.glb"),
+            Some(Activity::Waiting { dir: Direction::Up, path: "models/a.glb" })
+        );
+        assert_eq!(
+            parse_activity("Could not sync models/a.glb: stat failed"),
+            Some(Activity::Failed { path: "models/a.glb", reason: "stat failed" })
+        );
     }
 
     #[test]
