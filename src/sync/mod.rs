@@ -212,6 +212,8 @@ struct Ctx<'a> {
     stop: &'a AtomicBool,
     /// Files finished in the current round (for live progress).
     files_done: AtomicU64,
+    /// Planned upload bytes a server-side copy made unnecessary this round.
+    up_skipped: AtomicU64,
     /// New paths whose server-side move failed once: they upload instead.
     move_failed: Mutex<HashSet<String>>,
 }
@@ -248,6 +250,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
         oversize_logged: Mutex::new(HashSet::new()),
         stop: &stop,
         files_done: AtomicU64::new(0),
+        up_skipped: AtomicU64::new(0),
         move_failed: Mutex::new(HashSet::new()),
     };
 
@@ -474,7 +477,10 @@ fn sync_round(
     if total_files == 0 {
         return Ok(out);
     }
-    let up_total = plan.uploads.iter().map(|u| u.local.size).sum::<u64>();
+    // A move without a stored copy uploads: count its bytes up front, and
+    // take them off again when the server copies the file.
+    let up_total = plan.uploads.iter().map(|u| u.local.size).sum::<u64>()
+        + plan.remote_moves.iter().map(|m| m.upload.local.size).sum::<u64>();
     let down_total = plan.downloads.iter().map(|d| d.remote.size).sum::<u64>();
     let total_bytes = up_total + down_total;
     let transfer = Transfer {
@@ -489,6 +495,7 @@ fn sync_round(
     reporter.status(true, "syncing", local, total_files, total_bytes, transfer);
 
     ctx.files_done.store(0, Ordering::Relaxed);
+    ctx.up_skipped.store(0, Ordering::Relaxed);
     let base = (ctx.store.bytes_sent(), ctx.store.bytes_received());
     let finished = AtomicBool::new(false);
     let tx = reporter.tx.clone();
@@ -538,15 +545,16 @@ fn progress_ticker(
         }
         let rate_bps = transfer_rate(&samples);
         let done = ctx.files_done.load(Ordering::Relaxed);
+        let skipped = ctx.up_skipped.load(Ordering::Relaxed);
         let _ = tx.send(AppCommand::EngineStatus {
             connected: true,
             folder_state: "syncing".into(),
             local_files: local,
             need_files: transfer.total_files.saturating_sub(done),
-            need_bytes: transfer.total_bytes.saturating_sub(moved),
+            need_bytes: transfer.total_bytes.saturating_sub(moved + skipped),
             transfer: Transfer {
                 rate_bps,
-                up_left: transfer.up_total.saturating_sub(sent),
+                up_left: transfer.up_total.saturating_sub(sent + skipped),
                 down_left: transfer.down_total.saturating_sub(received),
                 up_bps: transfer_rate(&up_samples),
                 down_bps: transfer_rate(&down_samples),
@@ -1054,6 +1062,10 @@ fn move_remote_all(
                 out.retry = true;
                 ctx.files_done
                     .fetch_add(group.len() as u64, Ordering::Relaxed);
+                ctx.up_skipped.fetch_add(
+                    group.iter().map(|m| m.upload.local.size).sum(),
+                    Ordering::Relaxed,
+                );
                 continue;
             }
         };
@@ -1061,6 +1073,8 @@ fn move_remote_all(
             let u = &m.upload;
             match result {
                 Ok(etag) => {
+                    ctx.files_done.fetch_add(1, Ordering::Relaxed);
+                    ctx.up_skipped.fetch_add(u.local.size, Ordering::Relaxed);
                     match &m.from {
                         Some(from) => {
                             state.files.remove(from);
@@ -1111,8 +1125,7 @@ fn move_remote_all(
                 }
             }
         }
-        ctx.files_done
-            .fetch_add(group.len() as u64, Ordering::Relaxed);
+        // A fallback counts as done when its upload ends.
     }
     if !moved.is_empty() {
         logs::append(&format!(
@@ -1965,6 +1978,7 @@ mod tests {
                 oversize_logged: Mutex::new(HashSet::new()),
                 stop: &stop,
                 files_done: AtomicU64::new(0),
+                up_skipped: AtomicU64::new(0),
                 move_failed: Mutex::new(HashSet::new()),
             };
             (ctx, SyncState::default())
