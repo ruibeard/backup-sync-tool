@@ -114,7 +114,7 @@ unsafe fn blit_hbitmap_alpha(hdc_dest: HDC, dest: &RECT, hbmp: HBITMAP) {
     );
     SetStretchBltMode(hdc_dest, STRETCH_BLT_MODE(old_mode));
     SelectObject(mem_dc, old);
-    DeleteDC(mem_dc);
+    let _ = DeleteDC(mem_dc);
 }
 
 unsafe fn draw_bridge_icon_png(hdc: HDC, rc: &RECT, hbmp: HBITMAP) {
@@ -124,17 +124,17 @@ unsafe fn draw_bridge_icon_png(hdc: HDC, rc: &RECT, hbmp: HBITMAP) {
 unsafe fn fill_rect_color(hdc: HDC, rc: &RECT, color: u32) {
     let br = CreateSolidBrush(COLORREF(color));
     FillRect(hdc, rc, br);
-    DeleteObject(br);
+    let _ = DeleteObject(br);
 }
 
 unsafe fn frame_rect_color(hdc: HDC, rc: &RECT, color: u32) {
     let hp = CreatePen(PS_SOLID, 1, COLORREF(color));
     let op = SelectObject(hdc, hp);
     let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+    let _ = Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
     SelectObject(hdc, op);
     SelectObject(hdc, ob);
-    DeleteObject(hp);
+    let _ = DeleteObject(hp);
 }
 
 unsafe fn round_rect_color(hdc: HDC, rc: &RECT, color: u32, border: u32, radius: i32) {
@@ -142,11 +142,11 @@ unsafe fn round_rect_color(hdc: HDC, rc: &RECT, color: u32, border: u32, radius:
     let hp = CreatePen(PS_SOLID, 1, COLORREF(border));
     let ob = SelectObject(hdc, br);
     let op = SelectObject(hdc, hp);
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    let _ = RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
     SelectObject(hdc, op);
     SelectObject(hdc, ob);
-    DeleteObject(hp);
-    DeleteObject(br);
+    let _ = DeleteObject(hp);
+    let _ = DeleteObject(br);
 }
 
 unsafe fn draw_text_w(hdc: HDC, rc: &RECT, text: &str, flags: DRAW_TEXT_FORMAT) {
@@ -206,9 +206,9 @@ unsafe fn draw_status_pill_row(
     };
     let br_dot = CreateSolidBrush(COLORREF(dot_color));
     let op_br = SelectObject(hdc, br_dot);
-    Ellipse(hdc, dot.left, dot.top, dot.right, dot.bottom);
+    let _ = Ellipse(hdc, dot.left, dot.top, dot.right, dot.bottom);
     SelectObject(hdc, op_br);
-    DeleteObject(br_dot);
+    let _ = DeleteObject(br_dot);
 
     SetTextColor(hdc, COLORREF(pill_fg));
     let mut text_rc = RECT {
@@ -641,14 +641,14 @@ unsafe extern "system" fn edit_sub(
                 },
                 br,
             );
-            DeleteObject(br);
+            let _ = DeleteObject(br);
             let hp = CreatePen(PS_SOLID, 1, COLORREF(border_clr));
             let op = SelectObject(hdc, hp);
             let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            Rectangle(hdc, 0, 0, w, h);
+            let _ = Rectangle(hdc, 0, 0, w, h);
             SelectObject(hdc, op);
             SelectObject(hdc, ob);
-            DeleteObject(hp);
+            let _ = DeleteObject(hp);
             ReleaseDC(hwnd, hdc);
             LRESULT(0)
         }

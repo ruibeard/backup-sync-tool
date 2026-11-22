@@ -67,8 +67,8 @@ unsafe fn show_pair_qr_window(parent: HWND) {
     center_child_window(parent, hwnd, PAIR_QR_CLIENT_W, PAIR_QR_CLIENT_H);
 
     stmut(parent).pair_qr_hwnd = hwnd;
-    ShowWindow(hwnd, SW_SHOW);
-    UpdateWindow(hwnd);
+    let _ = ShowWindow(hwnd, SW_SHOW);
+    let _ = UpdateWindow(hwnd);
 }
 
 unsafe fn update_pair_qr_window(parent: HWND, code: &str, approve_url: &str) {
@@ -105,8 +105,8 @@ unsafe fn update_pair_qr_window(parent: HWND, code: &str, approve_url: &str) {
         GetDlgItem(hwnd, IDC_PAIR_QR_LINK as i32),
         &hstring(approve_url),
     );
-    InvalidateRect(hwnd, None, TRUE);
-    UpdateWindow(hwnd);
+    let _ = InvalidateRect(hwnd, None, TRUE);
+    let _ = UpdateWindow(hwnd);
 }
 
 unsafe extern "system" fn pair_qr_wnd_proc(
@@ -130,7 +130,7 @@ unsafe extern "system" fn pair_qr_wnd_proc(
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
             pair_qr_paint(hwnd, hdc);
-            EndPaint(hwnd, &ps);
+            let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
         WM_CTLCOLORSTATIC => {
@@ -282,7 +282,7 @@ unsafe fn pair_qr_on_create(hwnd: HWND) {
         PAIR_QR_CLIENT_W - margin * 2,
         st.hfont,
     );
-    ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_SERVER_EDIT as i32), SW_HIDE);
+    let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_SERVER_EDIT as i32), SW_HIDE);
     let button_gap = 10;
     let button_w = 128;
     let buttons_w = button_w * 2 + button_gap;
@@ -328,10 +328,10 @@ unsafe fn pair_qr_change_server(hwnd: HWND) {
         let edit = GetDlgItem(hwnd, IDC_PAIR_QR_SERVER_EDIT as i32);
         let current = pair_qr_state(hwnd).api_base.clone();
         let _ = SetWindowTextW(edit, &hstring(&current));
-        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_LINK as i32), SW_HIDE);
-        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_CODE as i32), SW_HIDE);
-        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_EXPIRY as i32), SW_HIDE);
-        ShowWindow(edit, SW_SHOW);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_LINK as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_CODE as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_QR_EXPIRY as i32), SW_HIDE);
+        let _ = ShowWindow(edit, SW_SHOW);
         let _ = SetWindowTextW(
             GetDlgItem(hwnd, IDC_PAIR_QR_TITLE as i32),
             &hstring("Change control plane server"),
@@ -346,7 +346,7 @@ unsafe fn pair_qr_change_server(hwnd: HWND) {
         );
         let _ = SetFocus(Some(edit));
         SendMessageW(edit, EM_SETSEL, WPARAM(0), LPARAM(-1));
-        InvalidateRect(hwnd, None, TRUE);
+        let _ = InvalidateRect(hwnd, None, TRUE);
         return;
     }
 
@@ -399,7 +399,7 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
     GetClientRect(hwnd, &mut cr).ok();
     let br_bg = CreateSolidBrush(COLORREF(C_WIN_BG));
     FillRect(hdc, &cr, br_bg);
-    DeleteObject(br_bg);
+    let _ = DeleteObject(br_bg);
 
     let st = pair_qr_state(hwnd);
     if !st.ready {
@@ -411,7 +411,7 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
             bottom: 336,
         };
         FillRect(hdc, &outer, br_white);
-        DeleteObject(br_white);
+        let _ = DeleteObject(br_white);
         let mut text_rc = RECT {
             left: 78,
             top: 178,
@@ -456,7 +456,7 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
         bottom: top + drawn + quiet,
     };
     FillRect(hdc, &outer, br_white);
-    DeleteObject(br_white);
+    let _ = DeleteObject(br_white);
 
     let br_black = CreateSolidBrush(COLORREF(0x00000000));
     for y in 0..modules {
@@ -472,7 +472,7 @@ unsafe fn pair_qr_paint(hwnd: HWND, hdc: HDC) {
             }
         }
     }
-    DeleteObject(br_black);
+    let _ = DeleteObject(br_black);
 }
 
 unsafe fn pair_qr_on_destroy(hwnd: HWND) {
@@ -489,9 +489,9 @@ unsafe fn pair_qr_on_destroy(hwnd: HWND) {
             (*parent_state).pair_qr_hwnd = HWND(std::ptr::null_mut());
         }
     }
-    DeleteObject(st.hfont);
-    DeleteObject(st.hfont_b);
-    DeleteObject(st.hfont_code);
+    let _ = DeleteObject(st.hfont);
+    let _ = DeleteObject(st.hfont_b);
+    let _ = DeleteObject(st.hfont_code);
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
 }
 

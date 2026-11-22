@@ -293,10 +293,6 @@ impl Default for AppSnapshot {
 pub enum AppCommand {
     SetWatchFolder(PathBuf),
     SetPairApiBase(String),
-    SetPreferences {
-        start_at_login: bool,
-        auto_update: bool,
-    },
     Connect,
     PairStarted {
         code: String,
@@ -311,6 +307,7 @@ pub enum AppCommand {
     CancelPairing,
     EngineStarting,
     /// Update work phase after the in-process file sync engine starts or settles.
+    #[cfg_attr(windows, allow(dead_code))] // macOS shell only
     Work(WorkState),
     EngineStatus {
         connected: bool,
@@ -322,12 +319,13 @@ pub enum AppCommand {
     },
     Activity(String),
     EngineFailed(String),
+    #[cfg_attr(not(windows), allow(dead_code))] // Windows shell only
     Shutdown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
-    SnapshotChanged(AppSnapshot),
+    SnapshotChanged(Box<AppSnapshot>),
     ConnectRequested { api_base: String },
     PairCancellationRequested,
     Shutdown,
@@ -383,7 +381,7 @@ fn run_controller(
         *shared
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = state.clone();
-        let _ = events.send(AppEvent::SnapshotChanged(state.clone()));
+        let _ = events.send(AppEvent::SnapshotChanged(Box::new(state.clone())));
         if shutdown {
             let _ = events.send(AppEvent::Shutdown);
             break;
@@ -395,13 +393,6 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
     match command {
         AppCommand::SetWatchFolder(path) => state.watch_folder = Some(path),
         AppCommand::SetPairApiBase(api_base) => state.pair_api_base = api_base,
-        AppCommand::SetPreferences {
-            start_at_login,
-            auto_update,
-        } => {
-            state.start_at_login = start_at_login;
-            state.auto_update = auto_update;
-        }
         AppCommand::Connect => {
             state.connection = ConnectionState::Connecting;
             state.pairing = PairingState::Starting;

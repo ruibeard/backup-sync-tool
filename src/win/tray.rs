@@ -85,6 +85,6 @@ pub unsafe fn show_tray_menu(hwnd: HWND, paused: bool) {
     // Required so menu dismisses when clicking elsewhere
     let _ = SetForegroundWindow(hwnd).ok();
 
-    TrackPopupMenu(hmenu, TPM_RIGHTBUTTON, pt.x, pt.y, Some(0), hwnd, None);
+    let _ = TrackPopupMenu(hmenu, TPM_RIGHTBUTTON, pt.x, pt.y, Some(0), hwnd, None);
     DestroyMenu(hmenu).ok();
 }

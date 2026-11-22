@@ -54,13 +54,7 @@ pub struct StatusSnapshot {
     /// Newest first.
     pub activity_lines: Vec<String>,
     pub syncing: bool,
-    pub sync_status: String,
-    pub local_files: u64,
-    pub global_files: u64,
     pub need_files: u64,
-    pub need_bytes: u64,
-    /// Bytes per second while files move.
-    pub rate_bps: u64,
     /// Percent done in this round.
     pub pct: u64,
     /// "12 min left", or empty.

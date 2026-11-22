@@ -45,7 +45,6 @@ unsafe fn on_create(hwnd: HWND) {
     std::thread::spawn(move || {
         while let Ok(event) = app_events.recv() {
             if let crate::app::AppEvent::SnapshotChanged(snapshot) = event {
-                let snapshot = Box::new(snapshot);
                 unsafe {
                     PostMessageW(
                         HWND(app_hwnd as *mut _),
@@ -257,7 +256,7 @@ unsafe fn build_ui(
         st.status_strip_display.clear();
         st.status_subtitle.clear();
         mkstatic(hwnd, hi, IDC_SERVER_STATUS, "", 0, 0, 1, 1, hf_b);
-        ShowWindow(GetDlgItem(hwnd, IDC_SERVER_STATUS as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_SERVER_STATUS as i32), SW_HIDE);
         install_server_tooltip(hwnd, hi);
 
         y = layout_bridge_section(hwnd, hi, cfg, y, hf_bridge);
@@ -267,7 +266,7 @@ unsafe fn build_ui(
     // Hidden legacy controls (still used for read_ctrls / tooltips)
     {
         mkstatic(hwnd, hi, IDC_SERVER_HDR, "SERVER", 0, 0, 1, 1, hf_hdr);
-        ShowWindow(GetDlgItem(hwnd, IDC_SERVER_HDR as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_SERVER_HDR as i32), SW_HIDE);
         mkstatic_align(
             hwnd,
             hi,
@@ -280,7 +279,7 @@ unsafe fn build_ui(
             hf_small,
             SS_RIGHT,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_SERVER_URL_LABEL as i32), SW_HIDE);
         mkstatic(
             hwnd,
             hi,
@@ -292,7 +291,7 @@ unsafe fn build_ui(
             1,
             hf_small,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_ORIGIN_LABEL as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_ORIGIN_LABEL as i32), SW_HIDE);
         mkstatic(
             hwnd,
             hi,
@@ -304,7 +303,7 @@ unsafe fn build_ui(
             1,
             hf_small,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_DEST_LABEL as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_DEST_LABEL as i32), SW_HIDE);
         mkedit_cue(
             hwnd,
             hi,
@@ -316,7 +315,7 @@ unsafe fn build_ui(
             1,
             hf,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_WATCH_FOLDER as i32), SW_HIDE);
         let destination_text = destination_display_text(
             cfg,
             st.remote_folder_from_xd,
@@ -334,7 +333,7 @@ unsafe fn build_ui(
             1,
             hf_small,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_REMOTE_FOLDER as i32), SW_HIDE);
     }
 
     // ── CONTROL PLANE (which Laravel install to pair with) ───────────────────
@@ -352,7 +351,7 @@ unsafe fn build_ui(
             1,
             hf_hdr,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_API_LABEL as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_API_LABEL as i32), SW_HIDE);
         mkedit_cue(
             hwnd,
             hi,
@@ -364,7 +363,7 @@ unsafe fn build_ui(
             1,
             hf,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_API_BASE as i32), SW_HIDE);
     }
 
     // ── RECENT ACTIVITY ───────────────────────────────────────────────────────
@@ -452,8 +451,8 @@ unsafe fn build_ui(
             hf_small,
             SS_RIGHT,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_SYNC_STATUS as i32), SW_HIDE);
-        ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_SYNC_STATUS as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
         y += SYNC_FOOTER_H;
         st.post_sync_sect = SECT;
         y += SECT;
@@ -551,7 +550,7 @@ unsafe fn build_ui(
             ACTION_BTN_H,
             hf_btn,
         );
-        ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
+        let _ = ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
 
         mkstatic_align(
             hwnd,
@@ -1140,9 +1139,9 @@ unsafe fn layout_bridge_section(
             WPARAM(0),
             LPARAM(C_PROGRESS_TRACK as isize),
         );
-        ShowWindow(prog_hwnd, SW_HIDE);
+        let _ = ShowWindow(prog_hwnd, SW_HIDE);
     } else {
-        ShowWindow(prog, SW_HIDE);
+        let _ = ShowWindow(prog, SW_HIDE);
         SetWindowPos(prog, None, 0, 0, 1, 1, SWP_NOZORDER).ok();
     }
 

@@ -17,7 +17,7 @@ pub fn app_support_dir() -> PathBuf {
         if let Some(base) = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
             return PathBuf::from(base).join(APP_DIR_NAME);
         }
-        return std::env::temp_dir().join(APP_DIR_NAME);
+        std::env::temp_dir().join(APP_DIR_NAME)
     }
 
     #[cfg(target_os = "macos")]
@@ -28,7 +28,7 @@ pub fn app_support_dir() -> PathBuf {
                 .join("Application Support")
                 .join(APP_DIR_NAME);
         }
-        return std::env::temp_dir().join(APP_DIR_NAME);
+        std::env::temp_dir().join(APP_DIR_NAME)
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -42,7 +42,7 @@ pub fn app_support_dir() -> PathBuf {
                 .join("share")
                 .join(APP_DIR_NAME);
         }
-        return std::env::temp_dir().join(APP_DIR_NAME);
+        std::env::temp_dir().join(APP_DIR_NAME)
     }
 
     #[cfg(not(any(windows, unix)))]
@@ -52,6 +52,7 @@ pub fn app_support_dir() -> PathBuf {
 }
 
 /// Create `path` and parents if missing.
+#[cfg_attr(windows, allow(dead_code))] // macOS shell only
 pub fn ensure_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)
 }

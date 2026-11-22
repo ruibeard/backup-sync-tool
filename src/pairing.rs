@@ -102,6 +102,7 @@ impl std::error::Error for PairingError {}
 /// Pairing start without cancellation (macOS host). Windows uses
 /// [`start_pairing_cancellable`].
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(windows, allow(dead_code))] // macOS shell only
 pub fn start_pairing_result(
     api_base: &str,
     machine_name: &str,
@@ -257,6 +258,7 @@ fn log_control_plane_mismatch(api_base: &str, start: &PairStartResponse) {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))] // macOS shell only
 pub fn poll_pairing_result(
     api_base: &str,
     poll_token: &str,

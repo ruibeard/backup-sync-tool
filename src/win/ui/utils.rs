@@ -2,14 +2,14 @@
 unsafe fn set_status_dot_color(hwnd: HWND, color: u32) {
     let st = stmut(hwnd);
     st.status_dot_color = color;
-    InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+    let _ = InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
 }
 
 unsafe fn invalidate_bridge(hwnd: HWND) {
     let st = stmut(hwnd);
-    InvalidateRect(hwnd, Some(&st.bridge_rect), TRUE);
+    let _ = InvalidateRect(hwnd, Some(&st.bridge_rect), TRUE);
     if st.bridge_progress_rect.bottom > st.bridge_progress_rect.top {
-        InvalidateRect(hwnd, Some(&st.bridge_progress_rect), TRUE);
+        let _ = InvalidateRect(hwnd, Some(&st.bridge_progress_rect), TRUE);
     }
 }
 
@@ -77,7 +77,7 @@ unsafe fn restore_pair_idle_controls(hwnd: HWND) {
     };
     let pair_hwnd = GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32);
     let _ = SetWindowTextW(pair_hwnd, &hstring(label));
-    ShowWindow(pair_hwnd, SW_SHOW);
+    let _ = ShowWindow(pair_hwnd, SW_SHOW);
     update_pair_button_enabled(hwnd);
     layout_main(hwnd);
 }
@@ -106,7 +106,7 @@ unsafe fn set_status_strip_text(hwnd: HWND, text: &str) {
     let st = stmut(hwnd);
     st.status_strip_display = text.to_string();
     if STATUS_ROW_H > 0 {
-        InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+        let _ = InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
     }
     update_bridge_display(hwnd);
 }
@@ -115,7 +115,7 @@ unsafe fn set_status_subtitle(hwnd: HWND, text: &str) {
     let st = stmut(hwnd);
     st.status_subtitle = text.to_string();
     if STATUS_ROW_H > 0 {
-        InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
+        let _ = InvalidateRect(hwnd, Some(&st.status_strip_rect), TRUE);
     }
 }
 
@@ -165,7 +165,7 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
         st.sync_row_h = footer_h;
         layout_main(hwnd);
     } else if was_busy != st.sync_footer_busy {
-        InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
+        let _ = InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
     }
 
     if is_busy && progress.1 > 0 {
@@ -183,14 +183,14 @@ unsafe fn update_sync_footer(hwnd: HWND, state: usize, progress: (usize, usize, 
         let _ = SetWindowTextW(eta_hwnd, &hstring(""));
     }
 
-    ShowWindow(prog_hwnd, SW_HIDE);
+    let _ = ShowWindow(prog_hwnd, SW_HIDE);
     SendMessageW(prog_hwnd, PBM_SETPOS, WPARAM(0), LPARAM(0));
 
     update_bridge_display(hwnd);
 
     let footer_hwnd = GetDlgItem(hwnd, IDC_SYNC_STATUS as i32);
-    ShowWindow(footer_hwnd, SW_HIDE);
-    ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
+    let _ = ShowWindow(footer_hwnd, SW_HIDE);
+    let _ = ShowWindow(GetDlgItem(hwnd, IDC_SYNC_ETA as i32), SW_HIDE);
 }
 
 unsafe fn update_status_strip_from_connection(hwnd: HWND) {
@@ -259,7 +259,7 @@ unsafe fn update_pair_button_enabled(hwnd: HWND) {
 
     let refresh_hwnd = GetDlgItem(hwnd, IDC_REFRESH_REMOTE as i32);
     if !refresh_hwnd.0.is_null() {
-        ShowWindow(refresh_hwnd, SW_HIDE);
+        let _ = ShowWindow(refresh_hwnd, SW_HIDE);
     }
 }
 

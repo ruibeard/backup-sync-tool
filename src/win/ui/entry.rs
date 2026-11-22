@@ -9,7 +9,7 @@ pub fn run(hinstance: HINSTANCE, start_minimized: bool) {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
             dwICC: ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES,
         };
-        InitCommonControlsEx(&icex);
+        let _ = InitCommonControlsEx(&icex);
 
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -51,8 +51,8 @@ pub fn run(hinstance: HINSTANCE, start_minimized: bool) {
             hinstance,
             None,
         );
-        ShowWindow(hwnd, if start_minimized { SW_HIDE } else { SW_SHOW });
-        UpdateWindow(hwnd);
+        let _ = ShowWindow(hwnd, if start_minimized { SW_HIDE } else { SW_SHOW });
+        let _ = UpdateWindow(hwnd);
 
         let mut msg = MSG::default();
         loop {
@@ -60,7 +60,7 @@ pub fn run(hinstance: HINSTANCE, start_minimized: bool) {
             if ret.0 == 0 || ret.0 == -1 {
                 break;
             }
-            TranslateMessage(&msg);
+            let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
@@ -83,7 +83,7 @@ unsafe extern "system" fn wnd_proc(
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
             paint_bg(hwnd, hdc);
-            EndPaint(hwnd, &ps);
+            let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
 
@@ -221,7 +221,7 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER => on_timer(hwnd, wparam),
 
         WM_CLOSE => {
-            ShowWindow(hwnd, SW_HIDE);
+            let _ = ShowWindow(hwnd, SW_HIDE);
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -229,25 +229,25 @@ unsafe extern "system" fn wnd_proc(
             if !st.is_null() {
                 (*st).app.send(crate::app::AppCommand::Shutdown).ok();
                 tray::remove_tray_icon(hwnd);
-                DeleteObject((*st).br_win);
-                DeleteObject((*st).br_path_box);
-                DeleteObject((*st).br_footer_idle);
-                DeleteObject((*st).br_footer_busy);
-                DeleteObject((*st).br_input);
-                DeleteObject((*st).hfont);
-                DeleteObject((*st).hfont_hdr);
-                DeleteObject((*st).hfont_b);
-                DeleteObject((*st).hfont_small);
-                DeleteObject((*st).hfont_activity);
-                DeleteObject((*st).hfont_btn);
-                DeleteObject((*st).hfont_bridge);
-                DeleteObject((*st).hfont_bridge_name);
-                DeleteObject((*st).hfont_bridge_path);
-                DeleteObject((*st).hfont_bridge_mid);
-                DeleteObject((*st).hfont_bridge_check);
-                DeleteObject((*st).hfont_link);
-                DeleteObject((*st).bridge_icon_pc);
-                DeleteObject((*st).bridge_icon_cloud);
+                let _ = DeleteObject((*st).br_win);
+                let _ = DeleteObject((*st).br_path_box);
+                let _ = DeleteObject((*st).br_footer_idle);
+                let _ = DeleteObject((*st).br_footer_busy);
+                let _ = DeleteObject((*st).br_input);
+                let _ = DeleteObject((*st).hfont);
+                let _ = DeleteObject((*st).hfont_hdr);
+                let _ = DeleteObject((*st).hfont_b);
+                let _ = DeleteObject((*st).hfont_small);
+                let _ = DeleteObject((*st).hfont_activity);
+                let _ = DeleteObject((*st).hfont_btn);
+                let _ = DeleteObject((*st).hfont_bridge);
+                let _ = DeleteObject((*st).hfont_bridge_name);
+                let _ = DeleteObject((*st).hfont_bridge_path);
+                let _ = DeleteObject((*st).hfont_bridge_mid);
+                let _ = DeleteObject((*st).hfont_bridge_check);
+                let _ = DeleteObject((*st).hfont_link);
+                let _ = DeleteObject((*st).bridge_icon_pc);
+                let _ = DeleteObject((*st).bridge_icon_cloud);
                 drop(Box::from_raw(st));
             }
             PostQuitMessage(0);

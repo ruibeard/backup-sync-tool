@@ -302,7 +302,6 @@ pub fn run() {
         }
         if id == ids.set_control_plane {
             start_set_control_plane(&shared_ev);
-            return;
         }
     }));
 
@@ -391,25 +390,6 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         app.work,
         crate::app::WorkState::Scanning | crate::app::WorkState::Syncing
     );
-    let sync_status = if host.is_paused() {
-        "Paused".into()
-    } else if matches!(app.work, crate::app::WorkState::Scanning) {
-        "Checking files…".into()
-    } else if matches!(app.work, crate::app::WorkState::Syncing) {
-        if app.need_files > 0 {
-            format!(
-                "Syncing… {}% · {} file(s) remaining",
-                app.progress_pct(),
-                app.need_files
-            )
-        } else {
-            "Syncing…".into()
-        }
-    } else if connected {
-        "Idle".into()
-    } else {
-        String::new()
-    };
     StatusSnapshot {
         watch_folder: host.config.watch_folder.clone(),
         folder_label: host.config.customer.clone(),
@@ -419,12 +399,7 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         auto_update: host.config.auto_update,
         activity_lines: app.activity.iter().rev().cloned().collect(),
         syncing,
-        sync_status,
-        local_files: app.local_files,
-        global_files: app.global_files,
         need_files: app.need_files,
-        need_bytes: app.need_bytes,
-        rate_bps: app.transfer.rate_bps,
         pct: app.progress_pct(),
         eta: app
             .eta_secs()

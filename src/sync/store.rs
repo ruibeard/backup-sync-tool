@@ -78,11 +78,6 @@ impl FileStore {
         self
     }
 
-    /// Total bytes moved by this store since it was made. Only goes up.
-    pub fn bytes_moved(&self) -> u64 {
-        self.bytes_sent() + self.bytes_received()
-    }
-
     /// Bytes uploaded since this store was made. Only goes up.
     pub fn bytes_sent(&self) -> u64 {
         self.sent.load(Ordering::Relaxed)
@@ -510,7 +505,7 @@ mod tests {
             .get_ranged(&url, &tmp, body.len() as u64, &md5, 64 * 1024)
             .unwrap();
         assert_eq!(fs::read(&tmp).unwrap(), body);
-        assert_eq!(store.bytes_moved(), body.len() as u64);
+        assert_eq!(store.bytes_received(), body.len() as u64);
         let err = store
             .get_ranged(&url, &tmp, body.len() as u64, &"0".repeat(32), 64 * 1024)
             .unwrap_err();

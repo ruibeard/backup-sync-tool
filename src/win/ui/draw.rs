@@ -39,7 +39,7 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
 
     let hbr = CreateSolidBrush(COLORREF(C_WIN_BG));
     FillRect(hdc, &rc, hbr);
-    DeleteObject(hbr);
+    let _ = DeleteObject(hbr);
 
     // Draw border for non-borderless buttons
     if !is_borderless {
@@ -48,7 +48,7 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
     } else {
         let hbr = CreateSolidBrush(COLORREF(bg));
         FillRect(hdc, &rc, hbr);
-        DeleteObject(hbr);
+        let _ = DeleteObject(hbr);
     }
 
     let len = GetWindowTextLengthW(di.hwndItem);
@@ -80,7 +80,7 @@ unsafe fn on_draw_item(lp: LPARAM) -> LRESULT {
         fr.top += 3;
         fr.right -= 3;
         fr.bottom -= 3;
-        DrawFocusRect(hdc, &fr);
+        let _ = DrawFocusRect(hdc, &fr);
     }
     LRESULT(1)
 }

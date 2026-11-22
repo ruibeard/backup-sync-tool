@@ -92,7 +92,7 @@ fn find_asset_for_platform(assets: &[GhAsset]) -> Option<&GhAsset> {
                 return Some(a);
             }
         }
-        return None;
+        None
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
@@ -125,8 +125,8 @@ pub fn download_and_replace(url: &str, progress: impl Fn(u8)) -> Result<(), Stri
         }
         buf.extend_from_slice(&chunk[..n]);
         downloaded += n as u64;
-        if total > 0 {
-            progress(((downloaded * 100) / total) as u8);
+        if let Some(pct) = (downloaded * 100).checked_div(total) {
+            progress(pct as u8);
         }
     }
 
@@ -387,6 +387,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 }
 
 /// Background-friendly check; returns a short status string for logs/UI.
+#[cfg_attr(windows, allow(dead_code))] // macOS shell only
 pub fn check_status_line(current_version: &str) -> String {
     match check(current_version) {
         CheckResult::UpToDate => "updater: up to date".into(),
@@ -429,10 +430,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn mac_repair_selects_only_exact_arch_complete_bundle() {
-        let arch = match std::env::consts::ARCH {
-            "aarch64" => "aarch64",
-            other => other,
-        };
+        let arch = std::env::consts::ARCH;
         let wanted = format!("backupsynctool-macos-{arch}.tar.gz");
         let assets = vec![
             asset("backupsynctool"),

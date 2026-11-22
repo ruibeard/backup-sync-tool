@@ -1,9 +1,6 @@
 // main.rs — entry point
 // #![windows_subsystem = "windows"] suppresses the console window on release builds.
 #![cfg_attr(windows, windows_subsystem = "windows")]
-// Platform-specific native shells intentionally leave some shared supervisor
-// and pairing helpers unused on the opposite target.
-#![cfg_attr(not(windows), allow(dead_code))]
 
 mod app;
 mod config;
@@ -37,7 +34,7 @@ fn main() {
         if OpenMutexW(MUTEX_ALL_ACCESS, false, w!("BackupSyncToolSingleton")).is_ok() {
             let hwnd = FindWindowW(win::ui::CLASS_NAME, None).unwrap_or_default();
             if !hwnd.0.is_null() && !start_minimized {
-                ShowWindow(hwnd, SW_RESTORE);
+                let _ = ShowWindow(hwnd, SW_RESTORE);
                 let _ = SetForegroundWindow(hwnd);
             }
             return;

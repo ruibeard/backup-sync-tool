@@ -214,7 +214,8 @@ struct Ctx<'a> {
     files_done: AtomicU64,
     /// Planned upload bytes a server-side copy made unnecessary this round.
     up_skipped: AtomicU64,
-    /// New paths whose server-side move failed once: they upload instead.
+    /// New paths whose server-side move failed or found no stored copy:
+    /// they upload, and are not asked again until the app restarts.
     move_failed: Mutex<HashSet<String>>,
 }
 

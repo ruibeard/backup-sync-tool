@@ -38,7 +38,7 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
 
     match id {
         x if x == tray::ID_TRAY_OPEN as u16 => {
-            ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
         }
         x if x == tray::ID_TRAY_PAUSE as u16 => toggle_pause(hwnd),
@@ -270,7 +270,7 @@ unsafe fn do_pair_device(hwnd: HWND) {
     st.pair_cancel = Some(cancel.clone());
     let raw = hwnd.0 as isize;
 
-    ShowWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), SW_HIDE);
+    let _ = ShowWindow(GetDlgItem(hwnd, IDC_PAIR_DEVICE as i32), SW_HIDE);
     show_pair_qr_window(hwnd);
     set_status_dot_color(hwnd, C_AMBER);
     set_status_strip_text(hwnd, &format!("Pairing \u{00B7} {api_base}"));
@@ -535,7 +535,7 @@ unsafe fn start_update_install(hwnd: HWND, url: String) {
         LPARAM(Box::into_raw(msg) as isize),
     )
     .ok();
-    ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
+    let _ = ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_HIDE);
     let raw = hwnd.0 as isize;
     std::thread::spawn(move || {
         let _ = crate::updater::download_and_replace(&url, |pct| {
@@ -786,5 +786,5 @@ unsafe fn layout_main(hwnd: HWND) {
     let meta = footer_meta_layout(footer_y, (*st).hfont_link, "Rui Almeida");
     position_footer_meta(hwnd, &meta, "Rui Almeida");
 
-    InvalidateRect(hwnd, None, TRUE);
+    let _ = InvalidateRect(hwnd, None, TRUE);
 }

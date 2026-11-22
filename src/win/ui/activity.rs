@@ -135,7 +135,7 @@ unsafe fn refresh_activity_listbox(hwnd: HWND) {
             SendMessageW(hlb, LB_ADDSTRING, WPARAM(0), LPARAM(0));
         }
     }
-    InvalidateRect(hlb, None, TRUE);
+    let _ = InvalidateRect(hlb, None, TRUE);
 }
 
 unsafe fn push_activity_row(hwnd: HWND, row: ActivityRow) {
@@ -226,7 +226,7 @@ unsafe fn draw_activity_row(
 ) {
     let hbr = CreateSolidBrush(COLORREF(C_STATUS_BG));
     FillRect(hdc, rc, hbr);
-    DeleteObject(hbr);
+    let _ = DeleteObject(hbr);
 
     let content_right = activity_content_right(rc);
 
@@ -346,7 +346,7 @@ unsafe fn draw_activity_row(
         };
         let br_track = CreateSolidBrush(COLORREF(C_ACTIVITY_TRACK));
         FillRect(hdc, &track, br_track);
-        DeleteObject(br_track);
+        let _ = DeleteObject(br_track);
 
         let inner_w = (bar_right - bar_left).max(1);
         let fill_w = if let Some(pct) = row.pct {
@@ -370,7 +370,7 @@ unsafe fn draw_activity_row(
             };
             let br_fill = CreateSolidBrush(COLORREF(C_PROGRESS_MINI));
             FillRect(hdc, &fill, br_fill);
-            DeleteObject(br_fill);
+            let _ = DeleteObject(br_fill);
         }
     } else if let Some(time) = row.time_label.as_deref() {
         let of_status = SelectObject(hdc, hf_status);
@@ -394,7 +394,7 @@ unsafe fn draw_activity_row(
     let _ = MoveToEx(hdc, rc.left, rc.bottom - 1, None);
     let _ = LineTo(hdc, rc.right, rc.bottom - 1);
     SelectObject(hdc, op);
-    DeleteObject(hp);
+    let _ = DeleteObject(hp);
 }
 
 unsafe fn on_draw_activity_item(lp: LPARAM) -> LRESULT {

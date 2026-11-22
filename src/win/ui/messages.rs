@@ -47,7 +47,7 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
     }
     set_status_strip_connection(hwnd);
     update_sync_footer(hwnd, state as usize, new_activity.1);
-    InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_progress_rect), TRUE);
+    let _ = InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_progress_rect), TRUE);
     LRESULT(0)
 }
 
@@ -84,13 +84,13 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
         };
         tray::set_tray_icon_and_tip(hwnd, hicon, &tip);
     }
-    InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
-    InvalidateRect(hwnd, Some(&st.bridge_rect), TRUE);
-    InvalidateRect(hwnd, Some(&st.bridge_progress_rect), TRUE);
-    InvalidateRect(hwnd, Some(&st.activity_list_rect), TRUE);
+    let _ = InvalidateRect(hwnd, Some(&st.sync_footer_rect), TRUE);
+    let _ = InvalidateRect(hwnd, Some(&st.bridge_rect), TRUE);
+    let _ = InvalidateRect(hwnd, Some(&st.bridge_progress_rect), TRUE);
+    let _ = InvalidateRect(hwnd, Some(&st.activity_list_rect), TRUE);
     let list = activity_list_hwnd(hwnd);
     if !list.0.is_null() {
-        InvalidateRect(list, None, TRUE);
+        let _ = InvalidateRect(list, None, TRUE);
     }
     LRESULT(0)
 }
@@ -316,8 +316,8 @@ unsafe fn on_app_update(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
         return LRESULT(0);
     }
     stmut(hwnd).update_url = Some(*url);
-    ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_SHOW);
-    InvalidateRect(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), None, TRUE);
+    let _ = ShowWindow(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), SW_SHOW);
+    let _ = InvalidateRect(GetDlgItem(hwnd, IDC_UPDATE_LINK as i32), None, TRUE);
     LRESULT(0)
 }
 
@@ -349,7 +349,7 @@ unsafe fn on_app_remote_folder(hwnd: HWND, lp: LPARAM) -> LRESULT {
 unsafe fn on_tray(hwnd: HWND, lp: LPARAM) -> LRESULT {
     match (lp.0 & 0xFFFF) as u32 {
         WM_LBUTTONDBLCLK => {
-            ShowWindow(hwnd, SW_SHOW);
+            let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = SetForegroundWindow(hwnd);
         }
         WM_RBUTTONUP => tray::show_tray_menu(hwnd, stmut(hwnd).config.sync_paused),
