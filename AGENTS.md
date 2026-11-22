@@ -1,6 +1,6 @@
 # Agent Instructions
 
-Docs: `SPEC.md` = technical contract + platform checklists. `README.md` = short GitHub summary. **Do not add more markdown** for product/behavior — edit `SPEC.md`. Leave `proxmox/` and `license-inspector/` alone (unrelated tooling).
+Docs: `SPEC.md` = technical contract + platform checklists. `README.md` = short GitHub summary. **Do not add more markdown** for product/behavior — edit `SPEC.md`. Leave `license-inspector/` alone (unrelated tooling).
 
 Status and roadmap: `SPEC.md` → **Implementation status**. Work happens on branch `live-sync`; `main` is the legacy WebDAV production build — do not touch it.
 
