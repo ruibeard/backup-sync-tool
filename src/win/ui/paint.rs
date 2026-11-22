@@ -299,7 +299,11 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
 
     draw_bridge_icon_png(hdc, &left_ico, st.bridge_icon_pc);
     draw_bridge_icon_png(hdc, &right_ico, st.bridge_icon_cloud);
-    draw_bridge_icon_badge(hdc, &right_ico, st.bridge_conn_ok, st.hfont_small);
+    // No badge while the first answer from the server is pending: that is
+    // not a failure.
+    if st.bridge_conn_ok || !st.connecting {
+        draw_bridge_icon_badge(hdc, &right_ico, st.bridge_conn_ok, st.hfont_small);
+    }
 
     SetTextColor(hdc, COLORREF(C_LABEL));
 
@@ -358,31 +362,30 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
     let (head, pct, bar_color, detail, eta) = if syncing {
         let app = st.app.snapshot();
         let pct = app.progress_pct();
-        let mut detail = if app.need_bytes > 0 {
-            format!(
-                "{} file(s) · {} left",
-                app.need_files,
-                format_transfer_bytes(app.need_bytes)
-            )
-        } else if app.need_files > 0 {
-            format!("{} file(s) left", app.need_files)
-        } else {
-            String::new()
+        let detail = {
+            let dirs = app.direction_detail();
+            if !dirs.is_empty() {
+                dirs
+            } else if app.need_files > 0 {
+                format!("{} file(s) left", app.need_files)
+            } else {
+                String::new()
+            }
         };
-        if app.transfer.rate_bps > 0 {
-            detail.push_str(&format!(
-                " · {}/s",
-                format_transfer_bytes(app.transfer.rate_bps)
-            ));
-        }
         let eta = app.eta_secs().map(crate::app::format_eta).unwrap_or_default();
-        ("Syncing".to_string(), pct, C_BLUE, detail, eta)
+        (format!("Syncing {} file(s)", app.need_files), pct, C_BLUE, detail, eta)
     } else if checking {
+        // Hashing files present on both sides: show how far it is.
+        let app = st.app.snapshot();
         (
-            "Checking…".to_string(),
-            0,
-            C_PROGRESS_TRACK,
-            String::new(),
+            if st.connecting {
+                "Connecting…".to_string()
+            } else {
+                "Checking…".to_string()
+            },
+            app.checking_pct(),
+            C_BLUE,
+            app.checking_detail(),
             String::new(),
         )
     } else if all_synced {
@@ -478,21 +481,6 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
             draw_text_w(hdc, &row2, &eta, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
         }
         SelectObject(hdc, of_d);
-    }
-}
-
-fn format_transfer_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = 1024 * KIB;
-    const GIB: u64 = 1024 * MIB;
-    if bytes >= GIB {
-        format!("{:.1} GB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MB", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.1} KB", bytes as f64 / KIB as f64)
-    } else {
-        format!("{bytes} B")
     }
 }
 

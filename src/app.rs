@@ -51,6 +51,87 @@ pub struct Transfer {
     pub total_bytes: u64,
     /// Bytes per second, averaged over the last few seconds.
     pub rate_bps: u64,
+    /// Upload and download bytes in this round.
+    pub up_total: u64,
+    pub down_total: u64,
+    /// Upload and download bytes still to move.
+    pub up_left: u64,
+    pub down_left: u64,
+    /// Upload and download speed, bytes per second.
+    pub up_bps: u64,
+    pub down_bps: u64,
+    /// Files present on both sides, hashed before the transfer starts.
+    pub check_files: u64,
+    pub check_bytes: u64,
+    pub checked_files: u64,
+    pub checked_bytes: u64,
+}
+
+/// What one activity line says. The engine writes the lines; both UIs read
+/// them with this, so the words stay the same on Windows and macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity<'a> {
+    /// A file moving, or moved, in one direction.
+    File {
+        dir: Direction,
+        done: bool,
+        path: &'a str,
+    },
+    Failed(&'a str),
+    Info(&'a str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    /// Deleted here, so deleted on the server.
+    DeletedRemote,
+    /// Deleted on another device, so deleted here.
+    DeletedLocal,
+}
+
+impl Direction {
+    /// Arrow for upload, download and delete rows.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Direction::Up => "\u{2191}",
+            Direction::Down => "\u{2193}",
+            Direction::DeletedRemote | Direction::DeletedLocal => "\u{2715}",
+        }
+    }
+
+    /// "Uploading recipe.md", "Downloaded recipe.md", "Deleted recipe.md (here)".
+    pub fn label(self, done: bool, name: &str) -> String {
+        match (self, done) {
+            (Direction::Up, false) => format!("Uploading {name}"),
+            (Direction::Up, true) => format!("Uploaded {name}"),
+            (Direction::Down, false) => format!("Downloading {name}"),
+            (Direction::Down, true) => format!("Downloaded {name}"),
+            (Direction::DeletedRemote, _) => format!("Deleted {name} (from server)"),
+            (Direction::DeletedLocal, _) => format!("Deleted {name} (here)"),
+        }
+    }
+}
+
+pub fn parse_activity(line: &str) -> Option<Activity<'_>> {
+    let file = |dir, done, path| Some(Activity::File { dir, done, path });
+    for (prefix, dir, done) in [
+        ("Uploading ", Direction::Up, false),
+        ("Uploaded ", Direction::Up, true),
+        ("Downloading ", Direction::Down, false),
+        ("Downloaded ", Direction::Down, true),
+        ("Deleted ", Direction::DeletedRemote, true),
+        ("Removed ", Direction::DeletedLocal, true),
+    ] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            return file(dir, done, path);
+        }
+    }
+    if let Some(detail) = line.strip_prefix("Could not sync ") {
+        return Some(Activity::Failed(detail));
+    }
+    line.strip_prefix("! ").map(Activity::Info)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,10 +167,71 @@ impl AppSnapshot {
             .unwrap_or(0)
     }
 
+    /// "Upload 2.0 GB · 5.1 MB/s   Download 10.3 GB · 20.0 MB/s": bytes left
+    /// and speed per direction. A direction with nothing to move is left out.
+    pub fn direction_detail(&self) -> String {
+        let t = self.transfer;
+        let mut parts = Vec::new();
+        for (name, total, left, bps) in [
+            ("Upload", t.up_total, t.up_left, t.up_bps),
+            ("Download", t.down_total, t.down_left, t.down_bps),
+        ] {
+            if total == 0 {
+                continue;
+            }
+            let mut part = format!("{name} {}", format_bytes(left));
+            if bps > 0 {
+                part.push_str(&format!(" · {}/s", format_bytes(bps)));
+            }
+            parts.push(part);
+        }
+        parts.join("   ")
+    }
+
+    /// "Comparing 120 of 3400 files · 4.1 GB of 20.0 GB" while hashing.
+    pub fn checking_detail(&self) -> String {
+        let t = self.transfer;
+        if t.check_files == 0 {
+            return String::new();
+        }
+        format!(
+            "Comparing {} of {} files · {} of {}",
+            t.checked_files,
+            t.check_files,
+            format_bytes(t.checked_bytes),
+            format_bytes(t.check_bytes)
+        )
+    }
+
+    /// Percent of the hashing done, by bytes.
+    pub fn checking_pct(&self) -> u64 {
+        let t = self.transfer;
+        (t.checked_bytes * 100)
+            .checked_div(t.check_bytes)
+            .or_else(|| (t.checked_files * 100).checked_div(t.check_files))
+            .unwrap_or(0)
+    }
+
     /// Seconds left at the current speed.
     pub fn eta_secs(&self) -> Option<u64> {
         let rate = self.transfer.rate_bps;
         (rate > 0 && self.need_bytes > 0).then(|| self.need_bytes / rate)
+    }
+}
+
+/// "512 B", "3.4 KB", "12.0 MB", "2.1 GB".
+pub fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -350,6 +492,7 @@ mod tests {
                     total_files: 10,
                     total_bytes: 8192,
                     rate_bps: 1000,
+                    ..Transfer::default()
                 },
             },
             &mpsc::channel().0,
@@ -369,6 +512,7 @@ mod tests {
                 total_files: 10,
                 total_bytes: 8_000,
                 rate_bps: 100,
+                ..Transfer::default()
             },
             ..AppSnapshot::default()
         };
@@ -384,10 +528,10 @@ mod tests {
         let mut state = AppSnapshot::default();
         reduce(
             &mut state,
-            AppCommand::Activity("Synced Invoices/one.pdf".into()),
+            AppCommand::Activity("Uploaded Invoices/one.pdf".into()),
             &mpsc::channel().0,
         );
-        assert_eq!(state.activity.back().unwrap(), "Synced Invoices/one.pdf");
+        assert_eq!(state.activity.back().unwrap(), "Uploaded Invoices/one.pdf");
         assert_eq!(state.last_event_id, 1);
     }
 }

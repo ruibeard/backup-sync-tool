@@ -416,10 +416,14 @@ fn sync_round(
     if !scan && !remote_differs(&remote, state) {
         return Ok(out);
     }
+    // The listing worked: the server is reachable. Say so now, not after
+    // the scan and the hashing, which can take minutes on a big folder.
+    let local = state.files.len();
+    reporter.status(true, "scanning", local, 0, 0, Transfer::default());
 
     let mut files = scan_files(&ctx.root).map_err(ApiError::Other)?;
     files.retain(|rel, _| !ignore.matches(rel));
-    let plan = make_plan(ctx, state, &files, &remote, &mut out);
+    let plan = make_plan(ctx, state, &files, &remote, &mut out, &reporter.tx, local as u64);
     let total_files = (plan.uploads.len()
         + plan.downloads.len()
         + plan.remote_deletes.len()
@@ -427,18 +431,22 @@ fn sync_round(
     if total_files == 0 {
         return Ok(out);
     }
-    let total_bytes = plan.uploads.iter().map(|u| u.local.size).sum::<u64>()
-        + plan.downloads.iter().map(|d| d.remote.size).sum::<u64>();
+    let up_total = plan.uploads.iter().map(|u| u.local.size).sum::<u64>();
+    let down_total = plan.downloads.iter().map(|d| d.remote.size).sum::<u64>();
+    let total_bytes = up_total + down_total;
     let transfer = Transfer {
         total_files,
         total_bytes,
-        rate_bps: 0,
+        up_total,
+        down_total,
+        up_left: up_total,
+        down_left: down_total,
+        ..Transfer::default()
     };
-    let local = state.files.len();
     reporter.status(true, "syncing", local, total_files, total_bytes, transfer);
 
     ctx.files_done.store(0, Ordering::Relaxed);
-    let base = ctx.store.bytes_moved();
+    let base = (ctx.store.bytes_sent(), ctx.store.bytes_received());
     let finished = AtomicBool::new(false);
     let tx = reporter.tx.clone();
     let result = thread::scope(|scope| {
@@ -458,9 +466,11 @@ fn progress_ticker(
     finished: &AtomicBool,
     local: u64,
     transfer: Transfer,
-    base: u64,
+    base: (u64, u64),
 ) {
     let mut samples: VecDeque<(Instant, u64)> = VecDeque::new();
+    let mut up_samples: VecDeque<(Instant, u64)> = VecDeque::new();
+    let mut down_samples: VecDeque<(Instant, u64)> = VecDeque::new();
     loop {
         let wait_until = Instant::now() + PROGRESS_TICK;
         while Instant::now() < wait_until {
@@ -470,10 +480,18 @@ fn progress_ticker(
             thread::sleep(Duration::from_millis(100));
         }
         let now = Instant::now();
-        let moved = ctx.store.bytes_moved().saturating_sub(base);
-        samples.push_back((now, moved));
-        while samples.len() > 2 && now.duration_since(samples[0].0) > RATE_WINDOW {
-            samples.pop_front();
+        let sent = ctx.store.bytes_sent().saturating_sub(base.0);
+        let received = ctx.store.bytes_received().saturating_sub(base.1);
+        let moved = sent + received;
+        for (q, v) in [
+            (&mut samples, moved),
+            (&mut up_samples, sent),
+            (&mut down_samples, received),
+        ] {
+            q.push_back((now, v));
+            while q.len() > 2 && now.duration_since(q[0].0) > RATE_WINDOW {
+                q.pop_front();
+            }
         }
         let rate_bps = transfer_rate(&samples);
         let done = ctx.files_done.load(Ordering::Relaxed);
@@ -485,6 +503,10 @@ fn progress_ticker(
             need_bytes: transfer.total_bytes.saturating_sub(moved),
             transfer: Transfer {
                 rate_bps,
+                up_left: transfer.up_total.saturating_sub(sent),
+                down_left: transfer.down_total.saturating_sub(received),
+                up_bps: transfer_rate(&up_samples),
+                down_bps: transfer_rate(&down_samples),
                 ..transfer
             },
         });
@@ -550,6 +572,8 @@ fn make_plan(
     files: &HashMap<String, PathBuf>,
     remote: &HashMap<String, RemoteFile>,
     out: &mut Outcome,
+    tx: &Sender<AppCommand>,
+    local_files: u64,
 ) -> Plan {
     let mut paths: Vec<String> = files
         .keys()
@@ -611,12 +635,53 @@ fn make_plan(
         }
     }
 
-    // Hash the files that exist on both sides, in parallel.
-    let hashes = pool::parallel_map(&to_compare, HASH_WORKERS, |(rel, _)| {
-        if ctx.stopping() {
-            return Err("stopped".to_string());
+    // Hash the files that exist on both sides, in parallel, and show how far
+    // the check is: on a big folder this is the slow part of a round.
+    let check_files = to_compare.len() as u64;
+    let check_bytes: u64 = to_compare
+        .iter()
+        .map(|(rel, _)| remote.get(*rel).map_or(0, |r| r.size))
+        .sum();
+    let checked_files = AtomicU64::new(0);
+    let checked_bytes = AtomicU64::new(0);
+    let hashed = AtomicBool::new(false);
+    let hashes = thread::scope(|scope| {
+        if check_files > 0 {
+            scope.spawn(|| loop {
+                let _ = tx.send(AppCommand::EngineStatus {
+                    connected: true,
+                    folder_state: "scanning".into(),
+                    local_files,
+                    need_files: 0,
+                    need_bytes: 0,
+                    transfer: Transfer {
+                        check_files,
+                        check_bytes,
+                        checked_files: checked_files.load(Ordering::Relaxed),
+                        checked_bytes: checked_bytes.load(Ordering::Relaxed),
+                        ..Transfer::default()
+                    },
+                });
+                let wait_until = Instant::now() + PROGRESS_TICK;
+                while Instant::now() < wait_until {
+                    if hashed.load(Ordering::Acquire) || ctx.stopping() {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            });
         }
-        hash_file(&files[*rel]).map(|(md5, _)| md5)
+        let hashes = pool::parallel_map(&to_compare, HASH_WORKERS, |(rel, _)| {
+            if ctx.stopping() {
+                return Err("stopped".to_string());
+            }
+            let result = hash_file(&files[*rel]).map(|(md5, _)| md5);
+            checked_files.fetch_add(1, Ordering::Relaxed);
+            checked_bytes.fetch_add(remote.get(*rel).map_or(0, |r| r.size), Ordering::Relaxed);
+            result
+        });
+        hashed.store(true, Ordering::Release);
+        hashes
     });
     for ((rel, different), hash) in to_compare.into_iter().zip(hashes) {
         let Ok(md5) = hash else {
@@ -772,7 +837,7 @@ fn upload_all(
                 return Err("stopped".to_string());
             }
             let url = book.url(i)?;
-            reporter.line(format!("Syncing {}", u.rel));
+            reporter.line(format!("Uploading {}", u.rel));
             let result = with_retries(ctx, || ctx.store.put_file(&url, &u.abs)).and_then(|etag| {
                 // Stored bytes must be the bytes that were planned.
                 match file_fingerprint(&u.abs) {
@@ -786,7 +851,7 @@ fn upload_all(
             });
             ctx.files_done.fetch_add(1, Ordering::Relaxed);
             match &result {
-                Ok(_) => reporter.line(format!("Synced {}", u.rel)),
+                Ok(_) => reporter.line(format!("Uploaded {}", u.rel)),
                 Err(err) => reporter.line(format!("Could not sync {}: {err}", u.rel)),
             }
             result
@@ -848,7 +913,7 @@ fn download_all(
             let result = download_one(ctx, &book, i, d, reporter);
             ctx.files_done.fetch_add(1, Ordering::Relaxed);
             match &result {
-                Ok(_) => reporter.line(format!("Synced {}", d.rel)),
+                Ok(_) => reporter.line(format!("Downloaded {}", d.rel)),
                 Err(err) => reporter.line(format!("Could not sync {}: {err}", d.rel)),
             }
             result
@@ -894,7 +959,7 @@ fn download_one(
     // Temp file next to the target, so the final rename is atomic.
     let tmp = temp_path_for(&abs);
     let url = book.url(index)?;
-    reporter.line(format!("Syncing {}", d.rel));
+    reporter.line(format!("Downloading {}", d.rel));
     // Only a plain MD5 ETag proves the bytes; multipart ETags do not.
     let md5 = if is_md5_etag(&d.remote.etag) {
         d.remote.etag.as_str()

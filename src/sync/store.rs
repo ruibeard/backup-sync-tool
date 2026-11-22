@@ -27,8 +27,10 @@ pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct FileStore {
     agent: Agent,
-    /// Bytes sent or received so far, across all workers (for speed and progress).
+    /// Bytes received so far, across all workers (for speed and progress).
     moved: Arc<AtomicU64>,
+    /// Bytes sent so far, across all workers.
+    sent: Arc<AtomicU64>,
     /// Set when the engine stops: transfers in flight end at the next read.
     stop: Arc<AtomicBool>,
 }
@@ -65,6 +67,7 @@ impl FileStore {
                 .max_idle_connections_per_host(16)
                 .build(),
             moved: Arc::new(AtomicU64::new(0)),
+            sent: Arc::new(AtomicU64::new(0)),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -77,6 +80,16 @@ impl FileStore {
 
     /// Total bytes moved by this store since it was made. Only goes up.
     pub fn bytes_moved(&self) -> u64 {
+        self.bytes_sent() + self.bytes_received()
+    }
+
+    /// Bytes uploaded since this store was made. Only goes up.
+    pub fn bytes_sent(&self) -> u64 {
+        self.sent.load(Ordering::Relaxed)
+    }
+
+    /// Bytes downloaded since this store was made. Only goes up.
+    pub fn bytes_received(&self) -> u64 {
         self.moved.load(Ordering::Relaxed)
     }
 
@@ -84,6 +97,14 @@ impl FileStore {
         Counting {
             inner,
             moved: Arc::clone(&self.moved),
+            stop: Arc::clone(&self.stop),
+        }
+    }
+
+    fn counting_sent<R: Read>(&self, inner: R) -> Counting<R> {
+        Counting {
+            inner,
+            moved: Arc::clone(&self.sent),
             stop: Arc::clone(&self.stop),
         }
     }
@@ -104,7 +125,7 @@ impl FileStore {
             .set("Content-Type", "application/octet-stream")
             .set("Content-Length", &len.to_string())
             // `take` keeps the body at the declared length if the file grows.
-            .send(self.counting(file.take(len)))
+            .send(self.counting_sent(file.take(len)))
             .map_err(|e| map_ureq_err("file PUT", e))?;
         match resp.header("etag").map(|v| v.trim().trim_matches('"')) {
             Some(etag) if !etag.is_empty() => Ok(etag.to_string()),

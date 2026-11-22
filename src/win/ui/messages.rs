@@ -15,6 +15,7 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let new_activity = {
         let st = stmut(hwnd);
         st.connected = snapshot.hub_connected;
+        st.connecting = matches!(snapshot.connection, crate::app::ConnectionState::Connecting);
         st.sync_status_state = state as usize;
         st.sync_progress_total = snapshot.transfer.total_files as usize;
         st.sync_progress_done = snapshot
@@ -26,6 +27,7 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
             UiSyncState::Checking => "Checking...".into(),
             UiSyncState::Syncing => format!("Syncing {} file(s)...", snapshot.need_files),
             UiSyncState::Idle if snapshot.hub_connected => "All synced".into(),
+            _ if st.connecting => "Connecting...".into(),
             UiSyncState::Idle => "Hub offline".into(),
         };
         // Every line added since the last snapshot, oldest first.

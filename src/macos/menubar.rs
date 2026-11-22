@@ -432,6 +432,12 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
             .unwrap_or_default(),
         version: env!("CARGO_PKG_VERSION").into(),
         update_available,
+        checking: matches!(app.work, crate::app::WorkState::Scanning),
+        paused: host.is_paused(),
+        transfer_detail: app.direction_detail(),
+        check_detail: app.checking_detail(),
+        check_pct: app.checking_pct(),
+        connecting: matches!(app.connection, crate::app::ConnectionState::Connecting),
     }
 }
 

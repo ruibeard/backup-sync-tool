@@ -133,6 +133,8 @@ unsafe fn set_status_strip_connection(hwnd: HWND) {
         }
     } else if st.connected {
         ("Connected".to_string(), C_GREEN)
+    } else if st.connecting {
+        ("Connecting...".to_string(), C_AMBER)
     } else {
         ("Offline".to_string(), C_RED)
     };

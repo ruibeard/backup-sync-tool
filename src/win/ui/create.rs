@@ -65,6 +65,7 @@ unsafe fn on_create(hwnd: HWND) {
         sync_engine: None,
         update_url: None,
         connected: false,
+        connecting: false,
         sync_status_text: if sync_configured {
             "Starting...".to_string()
         } else {

@@ -101,6 +101,10 @@ objc2-app-kit = { version = "0.3", features = [
     "NSStatusItem",
     "NSStatusBarButton",
     "NSAttributedString",
+    "NSTableView",
+    "NSTableColumn",
+    "NSTableHeaderView",
+    "NSUserInterfaceItemIdentification",
     "objc2-quartz-core",
 ] }
 dispatch = "0.2"

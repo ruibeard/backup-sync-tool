@@ -10,24 +10,26 @@ use objc2_app_kit::{
     NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlSize, NSControlStateValueOff,
     NSControlStateValueOn, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
     NSImageScaling, NSImageView, NSLineBreakMode, NSProgressIndicator, NSProgressIndicatorStyle,
-    NSScrollView, NSTextAlignment, NSTextField, NSTitlePosition, NSUnderlineStyle,
+    NSControlTextEditingDelegate, NSScrollView, NSTableColumn, NSTableColumnResizingOptions,
+    NSTableView, NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewStyle, NSTextAlignment, NSTextField, NSTitlePosition, NSUnderlineStyle,
     NSUnderlineStyleAttributeName, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSAttributedString, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSInteger, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-const W: f64 = 560.0;
-const H: f64 = 560.0;
+const W: f64 = 540.0;
+const H: f64 = 588.0;
 const PAD: f64 = 20.0;
 const COL_GAP: f64 = 16.0;
 const ACT_H: f64 = 200.0;
-/// Shared short Push height (Open / Change / Connect).
-const BTN_H: f64 = 22.0;
+const BTN_H: f64 = 28.0;
+const ROW_H: f64 = 24.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusAction {
@@ -49,6 +51,7 @@ pub struct StatusSnapshot {
     pub server_status: String,
     pub start_at_login: bool,
     pub auto_update: bool,
+    /// Newest first.
     pub activity_lines: Vec<String>,
     pub syncing: bool,
     pub sync_status: String,
@@ -64,9 +67,36 @@ pub struct StatusSnapshot {
     pub eta: String,
     pub version: String,
     pub update_available: bool,
+    /// The engine is comparing files (no transfer yet).
+    pub checking: bool,
+    pub paused: bool,
+    /// "Upload 2.0 GB · 5 MB/s   Download 10 GB · 20 MB/s", or empty.
+    pub transfer_detail: String,
+    /// "Comparing 120 of 3400 files · …" while hashing, or empty.
+    pub check_detail: String,
+    pub check_pct: u64,
+    /// Engine started, server not answered yet: not an error.
+    pub connecting: bool,
 }
 
 type ActionFn = Arc<dyn Fn(StatusAction) + Send + Sync>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowKind {
+    /// Upload, download or delete; `done` is false while it moves.
+    File(crate::app::Direction, bool),
+    Error,
+    Info,
+}
+
+/// One activity row, as on Windows.
+#[derive(Clone, PartialEq, Eq)]
+struct Row {
+    kind: RowKind,
+    label: String,
+    /// Path under the watch folder; double-click opens it.
+    path: Option<String>,
+}
 
 struct Widgets {
     window: Retained<NSWindow>,
@@ -77,9 +107,12 @@ struct Widgets {
     server_title: Retained<NSTextField>,
     server_detail: Retained<NSTextField>,
     pair: Retained<NSButton>,
-    sync_spinner: Retained<NSProgressIndicator>,
-    act_body: Retained<NSTextField>,
-    act_sub: Retained<NSTextField>,
+    head: Retained<NSTextField>,
+    pct: Retained<NSTextField>,
+    bar: Retained<NSProgressIndicator>,
+    detail: Retained<NSTextField>,
+    eta: Retained<NSTextField>,
+    table: Retained<NSTableView>,
     login: Retained<NSButton>,
     auto_update: Retained<NSButton>,
     version: Retained<NSTextField>,
@@ -93,6 +126,9 @@ struct Live {
 
 thread_local! {
     static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+    /// Rows the table shows. Separate from LIVE: the table reads it during reloadData.
+    static ROWS: RefCell<Vec<Row>> = const { RefCell::new(Vec::new()) };
+    static ROOT: RefCell<String> = const { RefCell::new(String::new()) };
 }
 static OPEN: AtomicBool = AtomicBool::new(false);
 
@@ -141,6 +177,37 @@ define_class!(
         fn act_author(&self, _: Option<&AnyObject>) {
             fire(StatusAction::OpenAuthor);
         }
+        #[unsafe(method(actRow:))]
+        fn act_row(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            let row: NSInteger = unsafe { msg_send![sender, clickedRow] };
+            if row >= 0 {
+                open_row(row as usize);
+            }
+        }
+    }
+
+    unsafe impl NSControlTextEditingDelegate for StatusTarget {}
+
+    unsafe impl NSTableViewDataSource for StatusTarget {
+        #[unsafe(method(numberOfRowsInTableView:))]
+        fn number_of_rows(&self, _table: &NSTableView) -> NSInteger {
+            ROWS.with(|r| r.borrow().len().max(1) as NSInteger)
+        }
+    }
+
+    unsafe impl NSTableViewDelegate for StatusTarget {
+        #[unsafe(method_id(tableView:viewForTableColumn:row:))]
+        fn view_for(
+            &self,
+            _table: &NSTableView,
+            column: Option<&NSTableColumn>,
+            row: NSInteger,
+        ) -> Option<Retained<NSView>> {
+            let mtm = self.mtm();
+            let col = column.map(|c| c.identifier().to_string()).unwrap_or_default();
+            Some(Retained::into_super(Retained::into_super(cell(mtm, &col, row))))
+        }
     }
 
     unsafe impl NSWindowDelegate for StatusTarget {
@@ -179,6 +246,99 @@ fn fire(action: StatusAction) {
     if let Some(cb) = cb {
         cb(action);
     }
+}
+
+/// One table cell: icon, label or status column of an activity row.
+fn cell(mtm: MainThreadMarker, col: &str, row: NSInteger) -> Retained<NSTextField> {
+    let r = ROWS.with(|rows| rows.borrow().get(row.max(0) as usize).cloned());
+    let f = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+    f.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+    f.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+    let Some(r) = r else {
+        if col == "label" {
+            f.setStringValue(&NSString::from_str("No recent activity"));
+            f.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        }
+        return f;
+    };
+    let (icon, tint) = match r.kind {
+        // Green when done, grey while it moves.
+        RowKind::File(dir, true) => (dir.icon(), crate::macos::brand::green()),
+        RowKind::File(dir, false) => (dir.icon(), NSColor::secondaryLabelColor()),
+        RowKind::Error => ("!", NSColor::systemRedColor()),
+        RowKind::Info => ("i", NSColor::secondaryLabelColor()),
+    };
+    if col == "icon" {
+        f.setStringValue(&NSString::from_str(icon));
+        f.setAlignment(NSTextAlignment::Center);
+        f.setTextColor(Some(&tint));
+    } else {
+        f.setStringValue(&NSString::from_str(&r.label));
+        let color = match r.kind {
+            RowKind::Info => NSColor::secondaryLabelColor(),
+            RowKind::Error => NSColor::systemRedColor(),
+            _ => NSColor::labelColor(),
+        };
+        f.setTextColor(Some(&color));
+        if let Some(path) = &r.path {
+            f.setToolTip(Some(&NSString::from_str(path)));
+        }
+    }
+    f
+}
+
+/// Activity lines (newest first) to rows, the same rules as Windows:
+/// one row per file with its latest state.
+fn rows_from(lines: &[String]) -> Vec<Row> {
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    for line in lines {
+        use crate::app::Activity;
+        let (kind, label, path) = match crate::app::parse_activity(line) {
+            Some(Activity::File { dir, done, path }) => {
+                (RowKind::File(dir, done), dir.label(done, file_name(path)), Some(path))
+            }
+            Some(Activity::Failed(d)) => (RowKind::Error, format!("Could not sync {d}"), None),
+            Some(Activity::Info(m)) => (RowKind::Info, m.to_string(), None),
+            None => continue,
+        };
+        if let Some(p) = path {
+            if !seen.insert(p.to_string()) {
+                continue;
+            }
+        }
+        rows.push(Row {
+            kind,
+            label,
+            path: path.map(str::to_string),
+        });
+    }
+    rows
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Open the file of a row. If it is gone, open the nearest folder that exists.
+fn open_row(row: usize) {
+    let Some(rel) = ROWS.with(|r| r.borrow().get(row).and_then(|r| r.path.clone())) else {
+        return;
+    };
+    let root = ROOT.with(|r| r.borrow().clone());
+    if root.trim().is_empty() {
+        return;
+    }
+    let root = std::path::PathBuf::from(root.trim());
+    let mut target = root.join(&rel);
+    while !target.exists() {
+        match target.parent() {
+            Some(p) if p.starts_with(&root) => target = p.to_path_buf(),
+            _ => return,
+        }
+    }
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&target.to_string_lossy()));
+    let _ = objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
 }
 
 pub fn is_open() -> bool {
@@ -276,6 +436,7 @@ fn show_main(snapshot: StatusSnapshot, on_action: ActionFn) {
 
     let widgets = build(mtm);
     paint(&widgets, &snapshot);
+    widgets.table.scrollRowToVisible(0);
     widgets.window.center();
     widgets.window.makeKeyAndOrderFront(None);
     OPEN.store(true, Ordering::SeqCst);
@@ -283,48 +444,44 @@ fn show_main(snapshot: StatusSnapshot, on_action: ActionFn) {
     LIVE.with(|c| *c.borrow_mut() = Some(Live { widgets, on_action }));
 }
 
+fn set_text(f: &NSTextField, s: &str) {
+    if f.stringValue().to_string() != s {
+        f.setStringValue(&NSString::from_str(s));
+    }
+}
+
 fn paint(ui: &Widgets, s: &StatusSnapshot) {
+    ROOT.with(|r| *r.borrow_mut() = s.watch_folder.clone());
     let watch = if s.watch_folder.trim().is_empty() {
         "Choose a folder to back up…"
     } else {
         s.watch_folder.as_str()
     };
-    ui.watch.setStringValue(&NSString::from_str(watch));
+    set_text(&ui.watch, watch);
+    ui.watch.setToolTip(Some(&NSString::from_str(watch)));
 
-    let connected_title = if s.folder_label.trim().is_empty() {
-        "Backup destination"
+    let lower = s.server_status.to_ascii_lowercase();
+    let (sym, tint, title, detail) = if s.connecting {
+        let title = if s.folder_label.trim().is_empty() {
+            "Server"
+        } else {
+            s.folder_label.as_str()
+        };
+        ("shield", NSColor::secondaryLabelColor(), title, "Connecting…")
+    } else if s.connected {
+        let title = if s.folder_label.trim().is_empty() {
+            "Backup destination"
+        } else {
+            s.folder_label.as_str()
+        };
+        ("checkmark.shield.fill", crate::macos::brand::green(), title, "Connected")
     } else {
-        s.folder_label.as_str()
-    };
-    let (sym, tint, title, detail) = if s.connected {
-        (
-            "checkmark.shield.fill",
-            crate::macos::brand::green(),
-            connected_title,
-            if s.syncing {
-                if s.sync_status.is_empty() {
-                    "Syncing…"
-                } else {
-                    s.sync_status.as_str()
-                }
-            } else {
-                "Connected"
-            },
-        )
-    } else {
-        (
-            "exclamationmark.shield.fill",
-            NSColor::systemRedColor(),
-            "Not connected",
-            if s.server_status.to_ascii_lowercase().contains("pair")
-                || s.server_status.to_ascii_lowercase().contains("reconnect")
-                || s.server_status.to_ascii_lowercase().contains("connecting")
-            {
-                s.server_status.as_str()
-            } else {
-                "Not connected"
-            },
-        )
+        let detail = if lower.contains("pair") || lower.contains("reconnect") || lower.contains("connecting") || lower.contains("offline") {
+            s.server_status.as_str()
+        } else {
+            "Not connected"
+        };
+        ("exclamationmark.shield.fill", NSColor::systemRedColor(), "Server", detail)
     };
     if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(sym),
@@ -333,72 +490,96 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         ui.server_icon.setImage(Some(&img));
     }
     ui.server_icon.setContentTintColor(Some(&tint));
-    ui.server_title.setStringValue(&NSString::from_str(title));
-    ui.server_detail.setStringValue(&NSString::from_str(detail));
-    ui.server_detail.setTextColor(Some(&tint));
+    set_text(&ui.server_title, title);
+    set_text(&ui.server_detail, detail);
 
-    if s.connected {
-        ui.pair.setTitle(&NSString::from_str("Reconnect Server"));
-        ui.pair.setKeyEquivalent(&NSString::from_str(""));
-        ui.pair.setBezelColor(Some(&crate::macos::brand::green()));
-    } else {
-        ui.pair.setTitle(&NSString::from_str("Connect Server"));
-        ui.pair.setKeyEquivalent(&NSString::from_str(""));
-        ui.pair.setBezelColor(Some(&crate::macos::brand::green()));
+    let linked = s.connected || s.connecting;
+    let pair_title = if linked { "Reconnect Server" } else { "Connect Server" };
+    if ui.pair.title().to_string() != pair_title {
+        ui.pair.setTitle(&NSString::from_str(pair_title));
+        // Connect is the main action while not connected: default (accent) button.
+        ui.pair
+            .setKeyEquivalent(&NSString::from_str(if linked { "" } else { "\r" }));
     }
 
-    let syncing = s.syncing;
-    ui.sync_spinner.setHidden(!syncing);
-    if syncing {
-        unsafe {
-            ui.sync_spinner.startAnimation(None);
-        }
+    // Sync band: same states and words as Windows.
+    let moving = s.syncing && !s.checking;
+    let head = if s.paused {
+        "Paused".to_string()
+    } else if !s.connected && !s.connecting {
+        detail.to_string()
+    } else if s.checking || s.connecting {
+        "Checking…".to_string()
+    } else if moving {
+        format!("Syncing {} file(s)", s.need_files)
     } else {
-        unsafe {
-            ui.sync_spinner.stopAnimation(None);
-        }
-    }
-
-    let n = s.activity_lines.len();
-    let activity_summary = if s.need_files > 0 || s.need_bytes > 0 {
-        let mut text = format!(
-            "{}% · {} file(s) · {} left",
-            s.pct,
-            s.need_files,
-            format_bytes(s.need_bytes)
-        );
-        if s.rate_bps > 0 {
-            text.push_str(&format!(" · {}/s", format_bytes(s.rate_bps)));
-        }
-        if !s.eta.is_empty() {
-            text.push_str(&format!(" · {}", s.eta));
-        }
-        text
-    } else {
-        format!(
-            "{} local / {} global · {n} recent event(s)",
-            s.local_files, s.global_files
-        )
+        "All synced".to_string()
     };
-    ui.act_sub
-        .setStringValue(&NSString::from_str(&activity_summary));
-    let preview = if s.activity_lines.is_empty() {
-        "No recent activity".to_string()
-    } else {
-        s.activity_lines.join("\n")
-    };
-    ui.act_body.setStringValue(&NSString::from_str(&preview));
-    if s.activity_lines.is_empty() {
-        ui.act_body
-            .setTextColor(Some(&crate::macos::brand::caption()));
-    } else {
-        ui.act_body.setTextColor(Some(&crate::macos::brand::ink()));
+    set_text(&ui.head, &head);
+    let all_synced = head == "All synced";
+    let checking_known = s.checking && !s.check_detail.is_empty();
+    set_text(
+        &ui.pct,
+        &if all_synced {
+            "100%".to_string()
+        } else if moving {
+            format!("{}%", s.pct)
+        } else if checking_known {
+            format!("{}%", s.check_pct)
+        } else {
+            String::new()
+        },
+    );
+    // Moving bar only while nothing can be counted yet (listing, folder scan).
+    let indeterminate = s.checking && !s.paused && !checking_known;
+    if ui.bar.isIndeterminate() != indeterminate {
+        ui.bar.setIndeterminate(indeterminate);
     }
-    let line_h = 15.0;
-    let lines = n.max(1) as f64;
-    let doc_h = (lines * line_h + 12.0).max(ACT_H);
-    let aw = W - PAD * 2.0 - 16.0;
-    ui.act_body.setFrame(rect(0.0, 0.0, aw, doc_h));
+    if indeterminate {
+        unsafe { ui.bar.startAnimation(None) };
+    } else {
+        unsafe { ui.bar.stopAnimation(None) };
+        ui.bar.setDoubleValue(if all_synced {
+            100.0
+        } else if checking_known {
+            s.check_pct as f64
+        } else if moving {
+            s.pct as f64
+        } else {
+            0.0
+        });
+    }
+    let detail_text = if s.checking && !s.check_detail.is_empty() {
+        s.check_detail.clone()
+    } else if moving {
+        if !s.transfer_detail.is_empty() {
+            s.transfer_detail.clone()
+        } else if s.need_files > 0 {
+            format!("{} file(s) left", s.need_files)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    set_text(&ui.detail, &detail_text);
+    set_text(&ui.eta, if moving { &s.eta } else { "" });
+
+    let rows = rows_from(&s.activity_lines);
+    let changed = ROWS.with(|r| {
+        let mut r = r.borrow_mut();
+        if *r == rows {
+            false
+        } else {
+            *r = rows;
+            true
+        }
+    });
+    if changed {
+        ui.table.reloadData();
+        // Rows move on every update: a kept selection would point at another file.
+        unsafe { ui.table.deselectAll(None) };
+    }
 
     ui.login.setState(if s.start_at_login {
         NSControlStateValueOn
@@ -410,8 +591,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     } else {
         NSControlStateValueOff
     });
-    ui.version
-        .setStringValue(&NSString::from_str(&format!("v{}", s.version)));
+    set_text(&ui.version, &format!("v{}", s.version));
     ui.update_btn.setHidden(!s.update_available);
 }
 
@@ -436,8 +616,6 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str("Backup Sync Tool"));
-    let mark = crate::macos::brand::mark();
-    window.setBackgroundColor(Some(&crate::macos::brand::surface()));
     window.setDelegate(Some(ProtocolObject::from_ref(&*target)));
 
     let root = NSView::new(mtm);
@@ -446,237 +624,174 @@ fn build(mtm: MainThreadMarker) -> Widgets {
 
     let inner = W - PAD * 2.0;
     let col_w = (inner - COL_GAP) / 2.0;
-    let mut y = H - PAD;
+    let left_x = PAD;
+    let right_x = PAD + col_w + COL_GAP;
+    // Layout is written top-down: `top(y, h)` turns it into AppKit's bottom-up y.
+    let top = |y: f64, h: f64| H - y - h;
 
-    // —— Brand header ——
-    y -= 32.0;
-    let brand_icon = NSImageView::new(mtm);
-    brand_icon.setFrame(rect(PAD, y, 28.0, 28.0));
-    brand_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
-    brand_icon.setImage(Some(&mark));
-    if mark.isTemplate() {
-        brand_icon.setContentTintColor(Some(&crate::macos::brand::green()));
-    }
-    root.addSubview(&brand_icon);
-
-    let brand_name = label(
-        mtm,
-        "Backup Sync Tool",
-        rect(PAD + 36.0, y + 3.0, inner - 36.0, 22.0),
-        15.0,
-        true,
-    );
-    brand_name.setTextColor(Some(&crate::macos::brand::green()));
-    root.addSubview(&brand_name);
-
-    y -= 14.0;
-    add_sep(&root, mtm, rect(PAD, y, inner, 1.0));
-
-    // —— Top bridge: This Mac | Server ——
-    y -= 22.0;
-    fx_caption(&root, mtm, "This Mac", rect(PAD, y, col_w, 16.0));
-    fx_caption(
-        &root,
-        mtm,
-        "Server",
-        rect(PAD + col_w + COL_GAP, y, col_w, 16.0),
-    );
-
-    y -= 44.0;
-    let icon_y = y;
+    // —— Two devices, side by side (as on Windows) ——
+    let icon = 56.0;
     let folder_icon = NSImageView::new(mtm);
-    folder_icon.setFrame(rect(PAD, icon_y, 36.0, 36.0));
+    folder_icon.setFrame(rect(left_x + (col_w - icon) / 2.0, top(18.0, icon), icon, icon));
     folder_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("folder.fill"),
+        &NSString::from_str("laptopcomputer"),
         Some(&NSString::from_str("This Mac")),
     ) {
         folder_icon.setImage(Some(&img));
     }
-    folder_icon.setContentTintColor(Some(&crate::macos::brand::green()));
+    folder_icon.setContentTintColor(Some(&NSColor::controlAccentColor()));
     root.addSubview(&folder_icon);
 
     let server_icon = NSImageView::new(mtm);
-    server_icon.setFrame(rect(PAD + col_w + COL_GAP, icon_y, 36.0, 36.0));
+    server_icon.setFrame(rect(right_x + (col_w - icon) / 2.0, top(18.0, icon), icon, icon));
     server_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     root.addSubview(&server_icon);
 
-    // Path centered vertically with folder icon (single truncated line).
-    let watch = label(
-        mtm,
-        "Choose a folder…",
-        rect(PAD + 44.0, icon_y + 9.0, col_w - 44.0, 18.0),
-        12.0,
-        false,
-    );
-    watch.setMaximumNumberOfLines(1);
+    let watch = label(mtm, "", rect(left_x, top(82.0, 18.0), col_w, 18.0), 12.0, false);
+    watch.setAlignment(NSTextAlignment::Center);
     watch.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-    watch.setTextColor(Some(&crate::macos::brand::ink()));
+    watch.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&watch);
 
-    let server_title = label(
-        mtm,
-        "Server",
-        rect(
-            PAD + col_w + COL_GAP + 44.0,
-            icon_y + 18.0,
-            col_w - 44.0,
-            16.0,
-        ),
-        12.0,
-        true,
-    );
-    server_title.setTextColor(Some(&crate::macos::brand::ink()));
+    let server_title = label(mtm, "Server", rect(right_x, top(80.0, 18.0), col_w, 18.0), 13.0, true);
+    server_title.setAlignment(NSTextAlignment::Center);
     root.addSubview(&server_title);
-
-    let server_detail = label(
-        mtm,
-        "Not connected",
-        rect(
-            PAD + col_w + COL_GAP + 44.0,
-            icon_y + 1.0,
-            col_w - 64.0,
-            16.0,
-        ),
-        12.0,
-        false,
-    );
+    let server_detail = label(mtm, "", rect(right_x, top(98.0, 16.0), col_w, 16.0), 12.0, false);
+    server_detail.setAlignment(NSTextAlignment::Center);
+    server_detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&server_detail);
 
-    let sync_spinner = NSProgressIndicator::new(mtm);
-    sync_spinner.setStyle(NSProgressIndicatorStyle::Spinning);
-    sync_spinner.setIndeterminate(true);
-    sync_spinner.setDisplayedWhenStopped(false);
-    sync_spinner.setFrame(rect(
-        PAD + col_w + COL_GAP + col_w - 18.0,
-        icon_y + 11.0,
-        14.0,
-        14.0,
-    ));
-    sync_spinner.setHidden(true);
-    root.addSubview(&sync_spinner);
-
-    y = icon_y - 10.0;
-    y -= 24.0;
-    let half = (col_w - 8.0) / 2.0;
-    root.addSubview(&button(
-        mtm,
-        &target,
-        "Open",
-        sel!(actOpen:),
-        rect(PAD, y, half, BTN_H),
-    ));
+    let btn_y = top(124.0, BTN_H);
+    let (open_w, change_w, gap) = (80.0, 100.0, 8.0);
+    let bx = left_x + (col_w - open_w - gap - change_w) / 2.0;
+    root.addSubview(&button(mtm, &target, "Open", sel!(actOpen:), rect(bx, btn_y, open_w, BTN_H)));
     root.addSubview(&button(
         mtm,
         &target,
         "Change…",
         sel!(actChoose:),
-        rect(PAD + half + 8.0, y, half, BTN_H),
+        rect(bx + open_w + gap, btn_y, change_w, BTN_H),
     ));
-
-    // Primary Connect: same short Push as Open/Change (not a tall green slab).
+    let pair_w = 160.0;
     let pair = button(
         mtm,
         &target,
         "Connect Server",
         sel!(actPair:),
-        rect(PAD + col_w + COL_GAP, y, col_w, BTN_H),
+        rect(right_x + (col_w - pair_w) / 2.0, btn_y, pair_w, BTN_H),
     );
-    pair.setKeyEquivalent(&NSString::from_str(""));
-    pair.setBezelColor(Some(&crate::macos::brand::green()));
     root.addSubview(&pair);
 
-    // —— Activity ——
-    y -= 20.0;
-    add_sep(&root, mtm, rect(PAD, y, inner, 1.0));
+    add_sep(&root, mtm, rect(PAD, top(166.0, 1.0), inner, 1.0));
 
-    y -= 24.0;
-    fx_caption(&root, mtm, "Current Activity", rect(PAD, y, 160.0, 16.0));
-    let act_sub = label(
-        mtm,
-        "Showing last 0 events",
-        rect(W - PAD - 300.0, y, 300.0, 16.0),
-        11.0,
-        false,
-    );
-    act_sub.setAlignment(NSTextAlignment::Right);
-    act_sub.setTextColor(Some(&crate::macos::brand::caption()));
-    root.addSubview(&act_sub);
-    y -= ACT_H + 8.0;
+    // —— Sync band: headline + %, bar, upload/download + time left ——
+    let head = label(mtm, "", rect(PAD, top(180.0, 20.0), inner - 60.0, 20.0), 14.0, true);
+    root.addSubview(&head);
+    let pct = label(mtm, "", rect(W - PAD - 60.0, top(180.0, 20.0), 60.0, 20.0), 13.0, true);
+    pct.setAlignment(NSTextAlignment::Right);
+    root.addSubview(&pct);
+    let bar = NSProgressIndicator::new(mtm);
+    bar.setStyle(NSProgressIndicatorStyle::Bar);
+    bar.setControlSize(NSControlSize::Small);
+    bar.setIndeterminate(false);
+    bar.setMinValue(0.0);
+    bar.setMaxValue(100.0);
+    bar.setFrame(rect(PAD, top(204.0, 12.0), inner, 12.0));
+    root.addSubview(&bar);
+    let detail = label(mtm, "", rect(PAD, top(220.0, 16.0), inner - 120.0, 16.0), 11.0, false);
+    detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    root.addSubview(&detail);
+    let eta = label(mtm, "", rect(W - PAD - 120.0, top(220.0, 16.0), 120.0, 16.0), 11.0, false);
+    eta.setAlignment(NSTextAlignment::Right);
+    eta.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    root.addSubview(&eta);
+
+    // —— Activity ——
+    let caption = label(mtm, "CURRENT ACTIVITY", rect(PAD, top(250.0, 16.0), 200.0, 16.0), 11.0, true);
+    caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    root.addSubview(&caption);
+
     let scroll = NSScrollView::new(mtm);
-    scroll.setFrame(rect(PAD, y, inner, ACT_H));
+    scroll.setFrame(rect(PAD, top(272.0, ACT_H), inner, ACT_H));
     scroll.setHasVerticalScroller(true);
     scroll.setHasHorizontalScroller(false);
     scroll.setAutohidesScrollers(true);
     scroll.setBorderType(NSBorderType::BezelBorder);
-    scroll.setDrawsBackground(true);
-    scroll.setBackgroundColor(&crate::macos::brand::surface());
 
-    let act_body = label(
-        mtm,
-        "No recent activity",
-        rect(0.0, 0.0, inner - 16.0, ACT_H),
-        11.0,
-        false,
-    );
-    act_body.setSelectable(true);
-    // Without this, `\n` collapses — Recent Activity looks like one raw blob.
-    act_body.setUsesSingleLineMode(false);
-    act_body.setMaximumNumberOfLines(0);
-    act_body.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-    act_body.setTextColor(Some(&crate::macos::brand::caption()));
-    let mono = NSFont::systemFontOfSize(11.0);
-    act_body.setFont(Some(&mono));
-    scroll.setDocumentView(Some(&act_body as &NSView));
+    let table = NSTableView::new(mtm);
+    table.setFrame(rect(0.0, 0.0, inner, ACT_H));
+    // Room for the scroller and the cell spacing of the plain style.
+    for (id, w) in [("icon", 22.0), ("label", inner - 22.0 - 40.0)] {
+        let col = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &NSString::from_str(id));
+        col.setWidth(w);
+        col.setResizingMask(NSTableColumnResizingOptions::NoResizing);
+        table.addTableColumn(&col);
+    }
+    table.setHeaderView(None);
+    table.setStyle(NSTableViewStyle::Plain);
+    table.setRowHeight(ROW_H);
+    table.setUsesAlternatingRowBackgroundColors(true);
+    table.setColumnAutoresizingStyle(NSTableViewColumnAutoresizingStyle::NoColumnAutoresizing);
+    table.setAllowsEmptySelection(true);
+    unsafe {
+        table.setDataSource(Some(ProtocolObject::from_ref(&*target)));
+        table.setDelegate(Some(ProtocolObject::from_ref(&*target)));
+        table.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject)));
+        table.setDoubleAction(Some(sel!(actRow:)));
+    }
+    scroll.setDocumentView(Some(&table as &NSView));
     root.addSubview(&scroll);
 
-    // —— Prefs + footer ——
-    y -= 18.0;
-    add_sep(&root, mtm, rect(PAD, y, inner, 1.0));
-
-    y -= 30.0;
-    let login = switch(
-        mtm,
-        &target,
-        "Start at Login",
-        sel!(actLogin:),
-        rect(PAD, y, 160.0, 22.0),
-    );
+    // —— Settings + footer ——
+    let set_y = 272.0 + ACT_H + 16.0;
+    add_sep(&root, mtm, rect(PAD, top(set_y, 1.0), inner, 1.0));
+    let login = switch(mtm, &target, "Start at Login", sel!(actLogin:), rect(PAD, top(set_y + 12.0, 22.0), 130.0, 22.0));
     root.addSubview(&login);
     let auto_update = switch(
         mtm,
         &target,
         "Auto-update",
         sel!(actAuto:),
-        rect(PAD + 170.0, y, 140.0, 22.0),
+        rect(PAD + 136.0, top(set_y + 12.0, 22.0), 120.0, 22.0),
     );
     root.addSubview(&auto_update);
+    let hint = label(
+        mtm,
+        "Changes and deletions sync across devices",
+        rect(W - PAD - 250.0, top(set_y + 15.0, 16.0), 250.0, 16.0),
+        11.0,
+        false,
+    );
+    hint.setAlignment(NSTextAlignment::Right);
+    hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    root.addSubview(&hint);
+
     let foot_y = 12.0;
     let version = label(
         mtm,
         &format!("v{}", env!("CARGO_PKG_VERSION")),
-        rect(PAD, foot_y + 4.0, 56.0, 16.0),
+        rect(PAD, foot_y + 4.0, 70.0, 16.0),
         11.0,
         false,
     );
-    version.setTextColor(Some(&crate::macos::brand::caption()));
+    version.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&version);
     root.addSubview(&link_btn(
         mtm,
         &target,
         "GitHub",
         sel!(actGithub:),
-        rect(PAD + 60.0, foot_y + 2.0, 52.0, 20.0),
+        rect(PAD + 70.0, foot_y + 2.0, 52.0, 20.0),
     ));
     let update_btn = button(
         mtm,
         &target,
         "Update",
         sel!(actUpdate:),
-        rect(PAD + 118.0, foot_y, 64.0, 24.0),
+        rect(PAD + 128.0, foot_y, 70.0, 24.0),
     );
     update_btn.setHidden(true);
-    update_btn.setBezelColor(Some(&crate::macos::brand::green()));
     root.addSubview(&update_btn);
     root.addSubview(&link_btn(
         mtm,
@@ -694,22 +809,16 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         server_title,
         server_detail,
         pair,
-        sync_spinner,
-        act_body,
-        act_sub,
+        head,
+        pct,
+        bar,
+        detail,
+        eta,
+        table,
         login,
         auto_update,
         version,
         update_btn,
-    }
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const MIB: f64 = (1024 * 1024) as f64;
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / MIB)
-    } else {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
     }
 }
 
@@ -731,12 +840,6 @@ fn add_sep(parent: &NSView, mtm: MainThreadMarker, frame: NSRect) {
     parent.addSubview(&sep);
 }
 
-fn fx_caption(parent: &NSView, mtm: MainThreadMarker, s: &str, frame: NSRect) {
-    let t = label(mtm, s, frame, 11.0, true);
-    t.setTextColor(Some(&crate::macos::brand::caption()));
-    parent.addSubview(&t);
-}
-
 fn label(
     mtm: MainThreadMarker,
     s: &str,
@@ -753,12 +856,12 @@ fn label(
     f.setFrame(frame);
     f.setAlignment(NSTextAlignment::Left);
     let font = if bold {
-        NSFont::boldSystemFontOfSize(size)
+        NSFont::systemFontOfSize_weight(size, unsafe { objc2_app_kit::NSFontWeightSemibold })
     } else {
         NSFont::systemFontOfSize(size)
     };
     f.setFont(Some(&font));
-    f.setTextColor(Some(&crate::macos::brand::ink()));
+    f.setTextColor(Some(&NSColor::labelColor()));
     f
 }
 
@@ -772,7 +875,6 @@ fn button(
     let b = NSButton::new(mtm);
     b.setTitle(&NSString::from_str(title));
     b.setBezelStyle(NSBezelStyle::Push);
-    b.setControlSize(NSControlSize::Small);
     b.setFrame(frame);
     unsafe {
         b.setTarget(Some(&*(target as *const StatusTarget as *const AnyObject)));
@@ -795,7 +897,7 @@ fn link_btn(
     b.setFrame(frame);
     // Underlined brand-green attributed title — reads as a real text link.
     let font = NSFont::systemFontOfSize(12.0);
-    let green = crate::macos::brand::green();
+    let green = NSColor::linkColor();
     let underline = NSNumber::numberWithInteger(NSUnderlineStyle::Single.0);
     let attrs: Retained<NSDictionary<NSString, AnyObject>> = unsafe {
         NSDictionary::from_slices(
@@ -838,8 +940,6 @@ fn switch(
     b.setButtonType(NSButtonType::Switch);
     b.setControlSize(NSControlSize::Small);
     b.setFrame(frame);
-    // Best-effort brand tint; AppKit may ignore for the track (title still OK).
-    b.setContentTintColor(Some(&crate::macos::brand::green()));
     unsafe {
         b.setTarget(Some(&*(target as *const StatusTarget as *const AnyObject)));
         b.setAction(Some(action));

@@ -35,52 +35,39 @@ fn activity_row_height(row: &ActivityRow) -> i32 {
     }
 }
 
-fn activity_icon_char(kind: ActivityKind, done: bool) -> &'static str {
-    if done {
-        "\u{2713}"
-    } else {
-        match kind {
-            ActivityKind::Syncing => "\u{21C4}",
-            ActivityKind::Error => "!",
-            ActivityKind::Info => "i",
-            _ => " ",
-        }
+fn activity_icon_char(row: &ActivityRow) -> &'static str {
+    match row.kind {
+        ActivityKind::Error => "!",
+        ActivityKind::Info => "i",
+        // Up, down or delete arrow: green when done, grey while it moves.
+        ActivityKind::Syncing | ActivityKind::Done => row.icon,
     }
 }
 
 fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> {
-    if let Some(path) = message.strip_prefix("Synced ") {
-        let name = display_activity_name(path);
-        let key = format!("sync:{path}");
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: format!("Synced {name}"),
-                kind: ActivityKind::Done,
-                pct: None,
-                detail: None,
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(path) = message.strip_prefix("Syncing ") {
-        let name = display_activity_name(path);
-        let key = format!("sync:{path}");
-        return Some((
-            Some(key.clone()),
-            ActivityRow {
-                label: format!("Syncing {name}"),
-                kind: ActivityKind::Syncing,
-                pct: None,
-                detail: None,
-                replace_key: Some(key),
-                time_label: None,
-            },
-        ));
-    }
-    if let Some(detail) = message.strip_prefix("Could not sync ") {
-        return Some((
+    use crate::app::Activity;
+    match crate::app::parse_activity(message)? {
+        Activity::File { dir, done, path } => {
+            let key = format!("file:{path}");
+            Some((
+                Some(key.clone()),
+                ActivityRow {
+                    label: dir.label(done, display_activity_name(path)),
+                    kind: if done {
+                        ActivityKind::Done
+                    } else {
+                        ActivityKind::Syncing
+                    },
+                    pct: None,
+                    detail: None,
+                    replace_key: Some(key),
+                    time_label: None,
+                    path: Some(path.to_string()),
+                    icon: dir.icon(),
+                },
+            ))
+        }
+        Activity::Failed(detail) => Some((
             None,
             ActivityRow {
                 label: "Item needs attention".into(),
@@ -89,11 +76,11 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: Some(detail.to_string()),
                 replace_key: None,
                 time_label: None,
+                path: None,
+                icon: "!",
             },
-        ));
-    }
-    if let Some(message) = message.strip_prefix("! ") {
-        return Some((
+        )),
+        Activity::Info(message) => Some((
             None,
             ActivityRow {
                 label: message.to_string(),
@@ -102,10 +89,11 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 detail: None,
                 replace_key: None,
                 time_label: activity_time_for_kind(ActivityKind::Info),
+                path: None,
+                icon: "i",
             },
-        ));
+        )),
     }
-    None
 }
 
 unsafe fn activity_list_hwnd(hwnd: HWND) -> HWND {
@@ -241,7 +229,7 @@ unsafe fn draw_activity_row(
     let done = row.kind == ActivityKind::Done;
     let is_error = row.kind == ActivityKind::Error;
     let show_bar = row.kind == ActivityKind::Syncing;
-    let icon = activity_icon_char(row.kind, done);
+    let icon = activity_icon_char(row);
     SetBkMode(hdc, TRANSPARENT);
 
     let mut top_line = *rc;
@@ -281,7 +269,7 @@ unsafe fn draw_activity_row(
 
     let mut label_rc = top_line;
     label_rc.left += 24;
-    label_rc.right = if show_bar || done || is_error || row.time_label.is_some() {
+    label_rc.right = if show_bar || is_error || row.time_label.is_some() {
         status_left - 4
     } else {
         top_line.right
@@ -331,9 +319,7 @@ unsafe fn draw_activity_row(
         );
         SelectObject(hdc, of_status);
     } else if show_bar {
-        let status = if done {
-            Some("Done".to_string())
-        } else if let Some(pct) = row.pct {
+        let status = if let Some(pct) = row.pct {
             Some(format!("{pct}%"))
         } else {
             None
@@ -391,19 +377,6 @@ unsafe fn draw_activity_row(
             FillRect(hdc, &fill, br_fill);
             DeleteObject(br_fill);
         }
-    } else if done {
-        let of_status = SelectObject(hdc, hf_status);
-        SetTextColor(hdc, COLORREF(C_GREEN));
-        let mut done_rc = top_line;
-        done_rc.left = status_left;
-        done_rc.right = status_right;
-        draw_activity_text(
-            hdc,
-            &mut done_rc,
-            "Done",
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        SelectObject(hdc, of_status);
     } else if let Some(time) = row.time_label.as_deref() {
         let of_status = SelectObject(hdc, hf_status);
         SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
@@ -459,4 +432,40 @@ unsafe fn on_draw_activity_item(lp: LPARAM) -> LRESULT {
         (*st).hfont_small,
     );
     LRESULT(1)
+}
+
+/// Double-click on an activity row: open that file, or its folder if the file is gone.
+unsafe fn open_activity_row(hwnd: HWND) {
+    let hlb = activity_list_hwnd(hwnd);
+    let idx = SendMessageW(hlb, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    if idx < 0 {
+        return;
+    }
+    let st = stmut(hwnd);
+    let Some(rel) = st
+        .activity_rows
+        .get(idx as usize)
+        .and_then(|r| r.path.clone())
+    else {
+        return;
+    };
+    let root = st.config.watch_folder.trim().to_string();
+    if root.is_empty() {
+        return;
+    }
+    let mut target = Path::new(&root).join(rel.replace('/', "\\"));
+    while !target.exists() {
+        match target.parent() {
+            Some(p) if p.starts_with(&root) => target = p.to_path_buf(),
+            _ => return,
+        }
+    }
+    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+        Some(hwnd),
+        w!("open"),
+        &hstring(&target.to_string_lossy()),
+        None,
+        None,
+        SW_SHOWNORMAL,
+    );
 }

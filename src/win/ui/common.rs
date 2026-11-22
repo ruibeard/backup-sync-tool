@@ -529,6 +529,10 @@ struct ActivityRow {
     replace_key: Option<String>,
     /// Local time label for info rows (e.g. "10:42 AM").
     time_label: Option<String>,
+    /// Path under the watch folder; double-click opens it.
+    path: Option<String>,
+    /// Up / down / delete arrow.
+    icon: &'static str,
 }
 
 #[repr(usize)]
@@ -546,6 +550,8 @@ struct WndState {
     sync_engine: Option<crate::sync::SyncEngine>,
     update_url: Option<String>,
     connected: bool,
+    /// Engine started, server not answered yet: not an error.
+    connecting: bool,
     sync_status_text: String,
     sync_status_state: usize,
     sync_progress_done: usize,

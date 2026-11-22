@@ -26,6 +26,11 @@ unsafe fn on_command(hwnd: HWND, wp: WPARAM) -> LRESULT {
         }
     }
 
+    if notif == LBN_DBLCLK as u16 && id == IDC_ACTIVITY_LIST {
+        open_activity_row(hwnd);
+        return LRESULT(0);
+    }
+
     if notif == EN_KILLFOCUS as u16 && id == IDC_PAIR_API_BASE {
         persist_pair_api_base_on_blur(hwnd);
         return LRESULT(0);
