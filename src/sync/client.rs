@@ -53,10 +53,20 @@ impl From<ApiError> for String {
     }
 }
 
+/// One rename inside the bucket: `from` must still hold `etag`.
+#[derive(Debug, Clone)]
+pub struct MoveRequest {
+    pub from: String,
+    pub to: String,
+    pub etag: String,
+}
+
 pub struct SyncApiClient {
     base: String,
     token: String,
     agent: ureq::Agent,
+    /// Moves copy inside the store; a batch of big files takes minutes.
+    slow_agent: ureq::Agent,
 }
 
 impl SyncApiClient {
@@ -69,6 +79,11 @@ impl SyncApiClient {
                 .timeout_read(Duration::from_secs(30))
                 .timeout_write(Duration::from_secs(30))
                 .max_idle_connections_per_host(4)
+                .build(),
+            slow_agent: ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(8))
+                .timeout_read(Duration::from_secs(600))
+                .timeout_write(Duration::from_secs(30))
                 .build(),
         }
     }
@@ -96,6 +111,48 @@ impl SyncApiClient {
             .map_err(map_ureq)?;
         signed_urls(&read_json(resp)?, paths.len())
     }
+
+    /// Server-side renames. One result per move, in order: the new ETag,
+    /// or the reason it failed (the caller then uploads the file).
+    pub fn move_files(
+        &self,
+        moves: &[MoveRequest],
+    ) -> Result<Vec<Result<String, String>>, ApiError> {
+        let list: Vec<_> = moves
+            .iter()
+            .map(|m| json!({ "from": m.from, "to": m.to, "etag": m.etag }))
+            .collect();
+        let resp = self
+            .slow_agent
+            .post(&format!("{}/api/sync/move", self.base))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set("Content-Type", "application/json")
+            .send_string(&json!({ "moves": list }).to_string())
+            .map_err(map_ureq)?;
+        move_results(&read_json(resp)?, moves.len())
+    }
+}
+
+fn move_results(
+    parsed: &serde_json::Value,
+    expected: usize,
+) -> Result<Vec<Result<String, String>>, ApiError> {
+    let results = parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .filter(|r| r.len() == expected)
+        .ok_or_else(|| ApiError::Other(format!("expected {expected} move results")))?;
+    Ok(results
+        .iter()
+        .map(|r| match r.get("etag").and_then(|e| e.as_str()) {
+            Some(etag) => Ok(etag.to_string()),
+            None => Err(r
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("move failed")
+                .to_string()),
+        })
+        .collect())
 }
 
 fn parse_files(parsed: &serde_json::Value) -> Result<Vec<RemoteFile>, ApiError> {

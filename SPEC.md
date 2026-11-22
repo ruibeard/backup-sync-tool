@@ -77,7 +77,7 @@ For each path the device compares local file, bucket object and state:
 | deleted | changed | download it again |
 | changed | deleted | upload it again |
 
-An empty listing after a non-empty sync never deletes local files; they upload again. Desktops do **not** create `.sync-conflict` copies. The overwritten side stays in the bucket's version history for 30 days (the local loser is not kept). A rename is a delete plus an upload. A file put into the bucket by hand syncs to every device.
+An empty listing after a non-empty sync never deletes local files; they upload again. Desktops do **not** create `.sync-conflict` copies. The overwritten side stays in the bucket's version history for 30 days (the local loser is not kept). A rename or move sends no file bytes: the server copies the object inside the store (see **Moves**). A file put into the bucket by hand syncs to every device.
 
 ### Customers and devices
 
@@ -158,6 +158,7 @@ Authenticated with `Authorization: Bearer <device_token>`. Revoked tokens receiv
 | --- | --- |
 | `GET /api/sync/files` | Every object under the device's customer folder: `{files:[{path,size,etag,modified}]}` |
 | `POST /api/sync/sign` | `{method: GET\|PUT\|DELETE, paths:[…]}` (1..500) → `{urls, expires_in}`: one presigned URL per path, same order |
+| `POST /api/sync/move` | `{moves:[{from,to,etag}]}` (1..100) → `{results:[{etag}\|{error}]}`, same order. Per move: S3 CopyObject `from`→`to`, check the new ETag equals `etag` (else delete `to` and fail), then delete `from`. No bytes leave the store |
 
 Sync routes are rate-limited per device (`throttle:sync`, 600/min), not per IP: behind the Cloudflare tunnel many devices can share one IP.
 
@@ -171,9 +172,15 @@ On launch (if paired), after approval, and after watch-path save:
 2. Each round: `GET /api/sync/files`. A quiet round (no FS event, listing equal to the state) stops here. Otherwise scan the folder and decide every path (table above). Files present on both sides with a change get an MD5 (streamed, 4 workers).
 3. Upload in batches (≤200 files, ~256 MB): one `sign` for PUT URLs, then 8 parallel streaming PUTs with `Content-Length`. The response ETag goes to the state. A file that changed during the upload is not recorded and retries next round.
 4. Download in the same batches: one `sign` for GET URLs, 8 parallel streams into `.{name}.bst-tmp` files in the target folder (the scanner and watcher ignore `*.bst-tmp`), MD5 and size check, then an atomic rename. If the user edited the file meanwhile, the download is dropped and retried.
-5. Deletes: presigned DELETE for the bucket, plain removal for local files.
+5. Deletes: presigned DELETE for the bucket, plain removal for local files. Moves run before all transfers (see **Moves**).
 6. Skip unchanged files by size + nanosecond mtime.
 7. Report status and activity through `AppCommand::EngineStatus` / `Activity`; auth failure sends `EngineFailed` (pair again). Offline is not credential failure. PUT/GET retry transient store errors in place.
+
+### Moves
+
+- **This device moved a file.** A new local path whose size equals a path this device deleted from the bucket in the same round is hashed. Equal MD5 and the old path's ETag: one `sync/move` instead of an upload plus a delete. Batches ≤100 files, ≤1 GiB. A rejected move falls back to upload + delete in the same round. A failed call does neither; the next round sees what the server did, and that path uploads if it still needs to.
+- **Another device moved a file.** A new bucket path with no local file, whose ETag and size match a file this device holds unchanged, is placed from that file: renamed when the old path left the bucket, copied (temp file, then rename) when it stays. This also covers the moment between the server's copy and delete. A failure falls back to a download.
+- Only plain MD5 ETags match (single-part uploads; files are ≤5 GiB, the CopyObject limit).
 
 All approved devices may create, edit, rename, and delete. There is no `can_delete_files` flag.
 
@@ -240,7 +247,7 @@ Windows 7 is a release blocker for Windows artifacts. macOS build/signing is ind
 
 ### Done
 
-- Laravel (`box-rui-cam` `live-sync`): pairing, one shared bucket, `sync/files` and `sync/sign`, customer page with bucket listing, per-file history, download and restore. Tables: `devices`, `pairing_requests` only.
+- Laravel (`box-rui-cam` `live-sync`): pairing, one shared bucket, `sync/files`, `sync/sign` and `sync/move`, customer page with bucket listing, per-file history, download and restore. Tables: `devices`, `pairing_requests` only.
 - Desktop: pairing (Win + Mac), in-process sync engine, whole-file sync by real name and path, three-way compare against the bucket listing, FS watcher.
 - Signed file URLs: devices hold no store keys; revoke is the token alone. Signer checked against the AWS SigV4 example.
 - Two-device e2e without Docker: `dev/e2e/two-device-sync.sh` (rclone S3 server + Laravel on scratch SQLite + `two_device_sync_e2e`). `E2E_API=https://backup.rui.cam` runs the same test against a deployed control plane and its real store: no local stack, and an admin approves the two printed codes into one new customer folder. 262 files + 9 MiB seed in ~1.6 s (debug build, single-threaded PHP dev server).

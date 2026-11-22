@@ -92,6 +92,8 @@ pub enum Direction {
     DeletedRemote,
     /// Deleted on another device, so deleted here.
     DeletedLocal,
+    /// Renamed or moved without moving the bytes again.
+    Moved,
 }
 
 impl Direction {
@@ -101,6 +103,7 @@ impl Direction {
             Direction::Up => "\u{2191}",
             Direction::Down => "\u{2193}",
             Direction::DeletedRemote | Direction::DeletedLocal => "\u{2715}",
+            Direction::Moved => "\u{2192}",
         }
     }
 
@@ -113,6 +116,8 @@ impl Direction {
             (Direction::Down, true) => format!("Downloaded {name}"),
             (Direction::DeletedRemote, _) => format!("Deleted {name} (from server)"),
             (Direction::DeletedLocal, _) => format!("Deleted {name} (here)"),
+            (Direction::Moved, false) => format!("Moving {name}"),
+            (Direction::Moved, true) => format!("Moved {name}"),
         }
     }
 }
@@ -126,6 +131,8 @@ pub fn parse_activity(line: &str) -> Option<Activity<'_>> {
         ("Downloaded ", Direction::Down, true),
         ("Deleted ", Direction::DeletedRemote, true),
         ("Removed ", Direction::DeletedLocal, true),
+        ("Moving ", Direction::Moved, false),
+        ("Moved ", Direction::Moved, true),
     ] {
         if let Some(path) = line.strip_prefix(prefix) {
             return file(dir, done, path);
