@@ -19,7 +19,7 @@ Technical contract: [SPEC.md](SPEC.md) (roadmap and status).
 ```bash
 ./build-macos.sh              # .app + launch
 ./build-macos.sh --package    # updater archive
-./release.sh                  # requires the Windows distribution first
+./release.sh                  # bump + build Windows (remote) + Mac + tag + GitHub
 ```
 
 ```powershell

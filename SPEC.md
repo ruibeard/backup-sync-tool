@@ -219,7 +219,7 @@ Only `./build-macos.sh`, `.\build-windows.ps1`, and `./release.sh`.
 | --- | --- |
 | `./build-macos.sh` | Build/sign/package macOS app; launch unless `--no-launch` |
 | `.\build-windows.ps1` | Build Win7-compatible desktop into `dist\windows\`; `-NoLaunch` skips run |
-| `./release.sh` | Requires staged Windows dist; bump/tag/upload without moving tags |
+| `./release.sh` | Releases Windows + Mac together: bump, remote Windows build, mac package, tag, upload |
 
 Never launch from `target/debug` or `target/release`. Auto-update replaces the whole tested desktop bundle (one binary; no separate engine).
 

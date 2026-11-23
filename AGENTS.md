@@ -39,7 +39,7 @@ Three scripts only:
 | --- | --- |
 | `./build-macos.sh` | Mac: build + launch `.app` (`--package` / `--install` / `--no-launch` / `--identity=…`) |
 | `.\build-windows.ps1` | Win7 desktop → `dist\windows\` (`-NoLaunch` to skip run) |
-| `./release.sh` | Mac: needs Windows bundle already staged → bump + mac package + tag + GitHub |
+| `./release.sh` | Mac: releases BOTH — bump → Windows build on the Windows machine → mac package → tag → GitHub |
 
 Never launch from `target/debug` or `target/release`. Confirm: 0 errors · process running (or staged with no-launch).
 
@@ -81,7 +81,7 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 
 ## Release
 
-`./build-macos.sh` / `.\build-windows.ps1` for cycles; `./release.sh` for `vX.Y.Z` (complete Windows bundle must already be in `dist/windows/`). Do not force-move tags unless repairing.
+`./build-macos.sh` / `.\build-windows.ps1` for cycles; `./release.sh` for `vX.Y.Z` (always ships Windows and Mac together). Do not force-move tags unless repairing.
 
 ## Win32 Gotchas
 
