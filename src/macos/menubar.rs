@@ -11,13 +11,15 @@ use dispatch::Queue;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem};
-use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSButton, NSColor, NSFont, NSImage, NSImageView, NSMenu,
+    NSMenuItem, NSTextField, NSView,
+};
+use objc2_foundation::{NSAttributedString, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem as TrayMenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Default)]
@@ -37,6 +39,54 @@ define_class!(
         #[unsafe(method(bstCloseFront:))]
         fn bst_close_front(&self, _: Option<&AnyObject>) {
             close_frontmost_window();
+        }
+        #[unsafe(method(bstOpenWindow:))]
+        fn bst_open_window(&self, _: Option<&AnyObject>) {
+            close_tray_menu();
+            with_shared(open_main_window);
+        }
+        #[unsafe(method(bstTogglePause:))]
+        fn bst_toggle_pause(&self, _: Option<&AnyObject>) {
+            close_tray_menu();
+            with_shared(toggle_pause);
+        }
+        #[unsafe(method(bstOpenFolder:))]
+        fn bst_open_folder(&self, _: Option<&AnyObject>) {
+            with_shared(do_open_finder);
+        }
+        #[unsafe(method(bstReveal:))]
+        fn bst_reveal(&self, sender: Option<&AnyObject>) {
+            let Some(sender) = sender else { return };
+            let tag: isize = unsafe { msg_send![sender, tag] };
+            let path = RECENT.with(|r| r.borrow().get(tag as usize).cloned());
+            if let Some(path) = path {
+                let _ = std::process::Command::new("open").arg("-R").arg(&path).status();
+            }
+        }
+        #[unsafe(method(bstLogin:))]
+        fn bst_login(&self, _: Option<&AnyObject>) {
+            with_shared(|s| {
+                do_toggle_login(s);
+                refresh_status_window(s);
+            });
+        }
+        #[unsafe(method(bstAuto:))]
+        fn bst_auto(&self, _: Option<&AnyObject>) {
+            with_shared(do_toggle_auto_update);
+        }
+        #[unsafe(method(bstLogs:))]
+        fn bst_logs(&self, _: Option<&AnyObject>) {
+            do_open_logs();
+        }
+        #[unsafe(method(bstControlPlane:))]
+        fn bst_control_plane(&self, _: Option<&AnyObject>) {
+            with_shared(start_set_control_plane);
+        }
+        #[unsafe(method(bstQuit:))]
+        fn bst_quit(&self, _: Option<&AnyObject>) {
+            if let Some(mtm) = MainThreadMarker::new() {
+                NSApplication::sharedApplication(mtm).terminate(None);
+            }
         }
     }
 );
@@ -147,15 +197,6 @@ struct MainTray(TrayIcon);
 unsafe impl Send for MainTray {}
 unsafe impl Sync for MainTray {}
 
-struct Ids {
-    pause: String,
-    open_window: String,
-    open_logs: String,
-    set_control_plane: String,
-    login: String,
-    auto_update: String,
-    quit: String,
-}
 
 #[derive(Clone, Copy)]
 enum IconKind {
@@ -200,52 +241,13 @@ pub fn run() {
     let icon_syncing = png_to_icon(ICON_SYNCING).expect("menubar syncing icon");
     let icon_complete = png_to_icon(ICON_COMPLETE).expect("menubar complete icon");
 
-    let paused = host.lock().expect("host").is_paused();
-    let pause = TrayMenuItem::new(pause_label(paused), true, None);
-    let open_window = TrayMenuItem::new("Open Backup Sync Tool", true, None);
-    let open_logs = TrayMenuItem::new("Open Logs", true, None);
-    let set_control_plane = TrayMenuItem::new("Control plane URL…", true, None);
-    let (login_on, auto_on) = {
-        let h = host.lock().expect("host");
-        (h.config.start_with_windows, h.config.auto_update)
-    };
-    let login = CheckMenuItem::new("Start at Login", true, login_on, None);
-    let auto_update = CheckMenuItem::new("Auto-update", true, auto_on, None);
-    let quit = TrayMenuItem::new("Quit Backup Sync", true, None);
-
-    let ids = Ids {
-        pause: pause.id().as_ref().to_string(),
-        open_window: open_window.id().as_ref().to_string(),
-        open_logs: open_logs.id().as_ref().to_string(),
-        set_control_plane: set_control_plane.id().as_ref().to_string(),
-        login: login.id().as_ref().to_string(),
-        auto_update: auto_update.id().as_ref().to_string(),
-        quit: quit.id().as_ref().to_string(),
-    };
-
-    let menu = Menu::new();
-    let _ = menu.append(&pause);
-    let _ = menu.append(&open_window);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&login);
-    let _ = menu.append(&auto_update);
-    let advanced = Submenu::new("Advanced", true);
-    let _ = advanced.append(&open_logs);
-    let _ = advanced.append(&set_control_plane);
-    let _ = menu.append(&advanced);
-    let _ = menu.append(&PredefinedMenuItem::separator());
-    let _ = menu.append(&quit);
-
-    PAUSE_ITEM.with(|slot| *slot.borrow_mut() = Some(pause));
     let tray = TrayIconBuilder::new()
         .with_tooltip("Backup Sync Tool")
         .with_icon(icon_idle.clone())
         .with_icon_as_template(true)
-        .with_menu(Box::new(menu))
         .build()
         .expect("create menubar status item");
-    // Primary click opens the full status window; menu stays for secondary click.
-    tray.set_show_menu_on_left_click(false);
+    // Primary click opens the status window; secondary click shows our own menu.
 
     let tray = Arc::new(Mutex::new(MainTray(tray)));
     let icons = Arc::new(TrayIcons {
@@ -290,42 +292,7 @@ pub fn run() {
     });
 
     let running = Arc::new(AtomicBool::new(true));
-    let shared_ev = shared.clone();
-    let running_ev = running.clone();
-
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        let id = event.id().as_ref().to_string();
-        if id == ids.quit {
-            running_ev.store(false, Ordering::SeqCst);
-            if let Some(mtm) = MainThreadMarker::new() {
-                NSApplication::sharedApplication(mtm).terminate(None);
-            }
-            return;
-        }
-        if id == ids.pause {
-            toggle_pause(&shared_ev);
-            return;
-        }
-        if id == ids.open_window {
-            open_main_window(&shared_ev);
-            return;
-        }
-        if id == ids.open_logs {
-            do_open_logs();
-            return;
-        }
-        if id == ids.set_control_plane {
-            start_set_control_plane(&shared_ev);
-            return;
-        }
-        if id == ids.login {
-            do_toggle_login(&shared_ev);
-            return;
-        }
-        if id == ids.auto_update {
-            do_toggle_auto_update(&shared_ev);
-        }
-    }));
+    SHARED.with(|c| *c.borrow_mut() = Some(shared.clone()));
 
     let shared_tray = shared.clone();
     TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
@@ -340,6 +307,13 @@ pub fn run() {
                 logs::append("menubar: primary click → status window");
                 open_main_window(&shared);
             });
+        } else if let TrayIconEvent::Click {
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Up,
+            ..
+        } = event
+        {
+            Queue::main().exec_async(show_tray_menu);
         }
     }));
 
@@ -362,16 +336,12 @@ pub fn run() {
 }
 
 thread_local! {
-    /// The tray menu item lives on the main thread; menu events arrive there too.
-    static PAUSE_ITEM: std::cell::RefCell<Option<TrayMenuItem>> = const { std::cell::RefCell::new(None) };
-}
-
-fn pause_label(paused: bool) -> &'static str {
-    if paused {
-        "Resume Sync"
-    } else {
-        "Pause Sync"
-    }
+    /// Main thread only: the tray menu target and the state it acts on.
+    static SHARED: std::cell::RefCell<Option<Shared>> = const { std::cell::RefCell::new(None) };
+    static MENU_TARGET: std::cell::RefCell<Option<Retained<MenuTarget>>> = const { std::cell::RefCell::new(None) };
+    static OPEN_MENU: std::cell::RefCell<Option<Retained<NSMenu>>> = const { std::cell::RefCell::new(None) };
+    /// Full paths of the "Recent" rows, by menu item tag.
+    static RECENT: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Pause or resume. Stopping can wait for a file part, so it runs off the main thread.
@@ -380,11 +350,6 @@ fn toggle_pause(shared: &Shared) {
         Ok(h) => !h.is_paused(),
         Err(_) => return,
     };
-    PAUSE_ITEM.with(|slot| {
-        if let Some(item) = slot.borrow().as_ref() {
-            item.set_text(pause_label(paused));
-        }
-    });
     let shared = shared.clone();
     thread::spawn(move || {
         if let Ok(mut h) = shared.host.lock() {
@@ -865,4 +830,318 @@ fn apply_status(shared: &Shared) {
     set_icon(&shared.tray, &shared.icons, kind);
     tip(&shared.tray, &tip_text);
     refresh_status_window(shared);
+}
+
+// —— Tray menu (secondary click) ——————————————————————————————————————————
+// Native NSMenu, built fresh on each click so it shows the current state:
+// a header row (app, state, pause/play), the folder, the last 10 files,
+// Advanced, Quit.
+
+const MENU_W: f64 = 300.0;
+const RECENT_ROWS: usize = 10;
+
+fn with_shared(f: impl FnOnce(&Shared)) {
+    let shared = SHARED.with(|c| c.borrow().clone());
+    if let Some(shared) = shared {
+        f(&shared);
+    }
+}
+
+fn close_tray_menu() {
+    OPEN_MENU.with(|m| {
+        if let Some(menu) = m.borrow().as_ref() {
+            menu.cancelTracking();
+        }
+    });
+}
+
+fn menu_target(mtm: MainThreadMarker) -> Retained<MenuTarget> {
+    MENU_TARGET.with(|c| {
+        c.borrow_mut()
+            .get_or_insert_with(|| unsafe {
+                msg_send![super(MenuTarget::alloc(mtm).set_ivars(MenuTargetIvars)), init]
+            })
+            .clone()
+    })
+}
+
+fn target_obj(t: &MenuTarget) -> &AnyObject {
+    unsafe { &*(t as *const MenuTarget as *const AnyObject) }
+}
+
+fn menu_item(mtm: MainThreadMarker, t: &MenuTarget, title: &str, action: Option<objc2::runtime::Sel>, key: &str) -> Retained<NSMenuItem> {
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(title),
+            action,
+            &NSString::from_str(key),
+        )
+    };
+    if action.is_some() {
+        unsafe { item.setTarget(Some(target_obj(t))) };
+    }
+    item
+}
+
+fn symbol(name: &str, size: f64) -> Option<Retained<NSImage>> {
+    let img = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)?;
+    img.setSize(NSSize::new(size, size));
+    Some(img)
+}
+
+fn menu_label(mtm: MainThreadMarker, text: &str, frame: NSRect, size: f64, bold: bool) -> Retained<NSTextField> {
+    let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+    l.setFrame(frame);
+    let font = if bold { NSFont::boldSystemFontOfSize(size) } else { NSFont::systemFontOfSize(size) };
+    l.setFont(Some(&font));
+    l.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+    l
+}
+
+/// "All synced · 21:35", "Syncing 8 file(s) · 3%", "Paused", …
+fn short_state(s: &StatusSnapshot) -> String {
+    if s.paused {
+        "Paused".into()
+    } else if !s.connected && !s.connecting {
+        s.server_status.clone()
+    } else if s.checking || s.connecting {
+        "Checking…".into()
+    } else if s.syncing {
+        format!("Syncing {} file(s) · {}%", s.need_files, s.pct)
+    } else if s.synced_at > 0 {
+        format!("All synced · {}", crate::app::time_label(s.synced_at))
+    } else {
+        "All synced".into()
+    }
+}
+
+/// App icon, name, state; the whole row opens the window, the round button
+/// pauses or resumes.
+fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Retained<NSView> {
+    let h = 48.0;
+    let view = NSView::new(mtm);
+    view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(MENU_W, h)));
+
+    let open = NSButton::new(mtm);
+    open.setBordered(false);
+    open.setTitle(&NSString::from_str(""));
+    open.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(MENU_W - 44.0, h)));
+    unsafe {
+        open.setTarget(Some(target_obj(t)));
+        open.setAction(Some(sel!(bstOpenWindow:)));
+    }
+    view.addSubview(&open);
+
+    let icon = NSImageView::new(mtm);
+    icon.setFrame(NSRect::new(NSPoint::new(12.0, 8.0), NSSize::new(32.0, 32.0)));
+    if let Some(img) = NSApplication::sharedApplication(mtm).applicationIconImage() {
+        icon.setImage(Some(&img));
+    }
+    view.addSubview(&icon);
+
+    view.addSubview(&menu_label(mtm, "Backup Sync Tool", NSRect::new(NSPoint::new(52.0, 24.0), NSSize::new(190.0, 17.0)), 13.0, true));
+    let state = menu_label(mtm, &short_state(s), NSRect::new(NSPoint::new(52.0, 8.0), NSSize::new(190.0, 15.0)), 11.0, false);
+    state.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    view.addSubview(&state);
+
+    let pause = NSButton::new(mtm);
+    pause.setBordered(false);
+    pause.setFrame(NSRect::new(NSPoint::new(MENU_W - 40.0, 12.0), NSSize::new(24.0, 24.0)));
+    let (sym, tip) = if s.paused { ("play.circle.fill", "Resume") } else { ("pause.circle.fill", "Pause") };
+    if let Some(img) = symbol(sym, 22.0) {
+        pause.setImage(Some(&img));
+    }
+    pause.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+    pause.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+    pause.setToolTip(Some(&NSString::from_str(tip)));
+    unsafe {
+        pause.setTarget(Some(target_obj(t)));
+        pause.setAction(Some(sel!(bstTogglePause:)));
+    }
+    view.addSubview(&pause);
+    view
+}
+
+/// Menu item text with an icon in front (item images do not show on all
+/// macOS versions, text attachments do) and an optional grey right part.
+fn icon_title(img: Option<&NSImage>, text: &str, right: Option<&str>) -> Retained<NSAttributedString> {
+    use objc2::AnyThread;
+    use objc2_app_kit::{
+        NSAttributedStringAttachmentConveniences, NSFontAttributeName, NSForegroundColorAttributeName,
+        NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSTextAlignment, NSTextAttachment, NSTextTab,
+    };
+    use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange};
+    let text: String = if text.chars().count() > 34 {
+        let head: String = text.chars().take(33).collect();
+        format!("{head}…")
+    } else {
+        text.to_string()
+    };
+    let out = NSMutableAttributedString::new();
+    if let Some(img) = img {
+        let att = NSTextAttachment::new();
+        att.setImage(Some(img));
+        let sz = img.size();
+        att.setBounds(NSRect::new(NSPoint::new(0.0, -3.0), sz));
+        out.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(&att));
+        out.appendAttributedString(&NSAttributedString::from_nsstring(&NSString::from_str("  ")));
+    }
+    let body_start = out.length();
+    let body = match right {
+        Some(r) => format!("{text}\t{r}"),
+        None => text,
+    };
+    out.appendAttributedString(&NSAttributedString::from_nsstring(&NSString::from_str(&body)));
+    let all = NSRange::new(0, out.length());
+    let para = NSMutableParagraphStyle::new();
+    let tab = unsafe {
+        NSTextTab::initWithTextAlignment_location_options(
+            NSTextTab::alloc(),
+            NSTextAlignment::Right,
+            MENU_W - 52.0,
+            &NSDictionary::new(),
+        )
+    };
+    para.setTabStops(Some(&objc2_foundation::NSArray::from_retained_slice(&[tab])));
+    let font = NSFont::menuFontOfSize(13.0);
+    unsafe {
+        out.addAttribute_value_range(NSParagraphStyleAttributeName, &para, all);
+        out.addAttribute_value_range(NSFontAttributeName, &font, all);
+        if let Some(r) = right {
+            let n = r.encode_utf16().count();
+            let start = out.length() - n;
+            out.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::secondaryLabelColor(), NSRange::new(start, n));
+        }
+    }
+    let _ = body_start;
+    Retained::into_super(out)
+}
+
+/// SF Symbol tinted for use inside text.
+fn tinted_symbol(name: &str, size: f64, color: &NSColor) -> Option<Retained<NSImage>> {
+    let img = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)?;
+    let conf = objc2_app_kit::NSImageSymbolConfiguration::configurationWithHierarchicalColor(color);
+    let img = img.imageWithSymbolConfiguration(&conf)?;
+    img.setSize(NSSize::new(size, size));
+    Some(img)
+}
+
+/// Last finished files, newest first, one row per file.
+fn recent_files(s: &StatusSnapshot) -> Vec<(crate::app::Direction, String, u64)> {
+    use crate::app::Activity;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (at, line) in &s.activity_lines {
+        if let Some(Activity::File { dir, done: true, path }) = crate::app::parse_activity(line) {
+            if seen.insert(path.to_string()) {
+                out.push((dir, path.to_string(), *at));
+                if out.len() == RECENT_ROWS {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn show_tray_menu() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(shared) = SHARED.with(|c| c.borrow().clone()) else { return };
+    let snap = match shared.host.try_lock() {
+        Ok(h) => window_snapshot(&shared, &h),
+        Err(_) => return,
+    };
+    let (login_on, auto_on) = match shared.host.try_lock() {
+        Ok(h) => (h.config.start_with_windows, h.config.auto_update),
+        Err(_) => (false, false),
+    };
+    let t = menu_target(mtm);
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+
+    let header = NSMenuItem::new(mtm);
+    header.setView(Some(&header_view(mtm, &t, &snap)));
+    menu.addItem(&header);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    // Folder: Finder icon and name; click opens it.
+    let folder = snap.watch_folder.trim();
+    if !folder.is_empty() {
+        let name = std::path::Path::new(folder)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| folder.to_string());
+        let item = menu_item(mtm, &t, &name, Some(sel!(bstOpenFolder:)), "");
+        let img = objc2_app_kit::NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(folder));
+        img.setSize(NSSize::new(18.0, 18.0));
+        item.setAttributedTitle(Some(&icon_title(Some(&img), &name, None)));
+        item.setToolTip(Some(&NSString::from_str(folder)));
+        menu.addItem(&item);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+    }
+
+    // Recent files: click shows the file in Finder.
+    let recent = recent_files(&snap);
+    if !recent.is_empty() {
+        let head = menu_item(mtm, &t, "Recent", None, "");
+        head.setEnabled(false);
+        menu.addItem(&head);
+        let mut paths = Vec::new();
+        for (i, (dir, path, at)) in recent.iter().enumerate() {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let item = menu_item(mtm, &t, name, Some(sel!(bstReveal:)), "");
+            item.setTag(i as isize);
+            let sym = match dir {
+                crate::app::Direction::Up => "arrow.up",
+                crate::app::Direction::Down => "arrow.down",
+                crate::app::Direction::Moved => "arrow.right",
+                _ => "xmark",
+            };
+            let img = tinted_symbol(sym, 12.0, &NSColor::secondaryLabelColor());
+            item.setAttributedTitle(Some(&icon_title(img.as_deref(), name, Some(&crate::app::time_label(*at)))));
+            item.setToolTip(Some(&NSString::from_str(path)));
+            menu.addItem(&item);
+            paths.push(std::path::Path::new(folder).join(path));
+        }
+        RECENT.with(|r| *r.borrow_mut() = paths);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+    }
+
+    // Advanced: settings and tools.
+    let adv = NSMenu::new(mtm);
+    adv.setAutoenablesItems(false);
+    let login = menu_item(mtm, &t, "Start at Login", Some(sel!(bstLogin:)), "");
+    login.setState(if login_on { 1 } else { 0 });
+    adv.addItem(&login);
+    let auto = menu_item(mtm, &t, "Auto-update", Some(sel!(bstAuto:)), "");
+    auto.setState(if auto_on { 1 } else { 0 });
+    adv.addItem(&auto);
+    adv.addItem(&NSMenuItem::separatorItem(mtm));
+    adv.addItem(&menu_item(mtm, &t, "Control plane URL…", Some(sel!(bstControlPlane:)), ""));
+    adv.addItem(&menu_item(mtm, &t, "Open Logs", Some(sel!(bstLogs:)), ""));
+    let adv_item = menu_item(mtm, &t, "Advanced", None, "");
+    let img = tinted_symbol("slider.horizontal.3", 14.0, &NSColor::labelColor());
+    adv_item.setAttributedTitle(Some(&icon_title(img.as_deref(), "Advanced", None)));
+    adv_item.setSubmenu(Some(&adv));
+    menu.addItem(&adv_item);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    let quit = menu_item(mtm, &t, "Quit", Some(sel!(bstQuit:)), "q");
+    let img = tinted_symbol("power", 14.0, &NSColor::labelColor());
+    quit.setAttributedTitle(Some(&icon_title(img.as_deref(), "Quit", None)));
+    menu.addItem(&quit);
+
+    menu.setMinimumWidth(MENU_W);
+    OPEN_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
+    // Just under the menu bar, at the pointer.
+    let mouse = objc2_app_kit::NSEvent::mouseLocation();
+    let top = objc2_app_kit::NSScreen::mainScreen(mtm)
+        .map(|sc| {
+            let f = sc.visibleFrame();
+            f.origin.y + f.size.height
+        })
+        .unwrap_or(mouse.y);
+    menu.popUpMenuPositioningItem_atLocation_inView(None, NSPoint::new(mouse.x - 12.0, top - 2.0), None);
+    OPEN_MENU.with(|m| *m.borrow_mut() = None);
 }
