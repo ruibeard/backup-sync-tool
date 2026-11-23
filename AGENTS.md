@@ -48,7 +48,7 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 - Rust app lives in the repo root.
 - Windows UI is raw Win32 through `windows-rs`; do not add egui, nwg, webview, Electron, or an async runtime.
 - HTTP uses blocking `ureq`; no async runtime or AWS SDK.
-- Config is `backupsynctool.json` next to the exe on Windows and under app support on macOS.
+- Config is `backupsynctool.json` in the app data folder (`%LOCALAPPDATA%\BackupSyncTool` on Windows, app support on macOS). Nothing is written beside the exe.
 - Device token: Windows DPAPI in `src/secret.rs` (entropy `webdavsync-v1`); macOS Keychain via `security … -A` (no Keychain password prompts on ad-hoc rebuilds).
 - Sync is the in-process Rust engine (whole-file, bucket-listing protocol in `SPEC.md`). Do not reintroduce Syncthing, WebDAV, or a second transfer stack.
 - Tray: closing hides; double-click reopens.
@@ -66,7 +66,7 @@ Never launch from `target/debug` or `target/release`. Confirm: 0 errors · proce
 - Desktop validates, protects the token, atomically saves the config, and starts the sync loop.
 - Default `pair_api_base` = `https://backup.rui.cam`; editable + persisted. Optional Laravel `control_plane_url` on pair/start → mismatch log if different.
 - API calls use the device token (`sync/files`, `sync/sign`). File PUT/GET/DELETE use the signed URLs, straight to the object store. Never log those URLs.
-- Logs always on under `logs/` next to the exe on Windows and app support on macOS.
+- Logs always on under `logs/` in the same app data folder.
 
 ## Sync Errors
 

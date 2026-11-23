@@ -389,9 +389,10 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
             String::new(),
         )
     } else if all_synced {
+        // Done: no bar and no "100%" (that reads as still finishing).
         (
             "All synced".to_string(),
-            100,
+            0,
             C_GREEN,
             String::new(),
             String::new(),
@@ -429,11 +430,22 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
         &head,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
     );
-    if pct > 0 || all_synced {
+    if pct > 0 {
         let pct_text = format!("{pct}%");
         draw_text_w(hdc, &row1, &pct_text, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
     }
     SelectObject(hdc, of_h);
+    if all_synced {
+        let synced_at = st.app.snapshot().synced_at;
+        if synced_at > 0 {
+            let of_t = SelectObject(hdc, hf_detail);
+            SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
+            let text = format!("Last sync {}", activity_time_label(synced_at));
+            draw_text_w(hdc, &row1, &text, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+            SelectObject(hdc, of_t);
+        }
+        return;
+    }
 
     let bar_y = rc.top + SYNC_BAND_HEAD_H + SYNC_BAND_HEAD_BAR_GAP;
     let track = RECT {

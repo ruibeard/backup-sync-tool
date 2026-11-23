@@ -1,7 +1,5 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-#[cfg(target_os = "macos")]
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, RwLock};
 
@@ -124,38 +122,10 @@ pub fn ensure_logs_dir() -> PathBuf {
     dir
 }
 
+/// Logs live in the app data folder on every system, never beside the
+/// executable (on macOS that would break the app signature).
 fn logs_dir() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    #[cfg(target_os = "macos")]
-    if is_macos_app_executable(&exe) {
-        // Writing below Contents/MacOS invalidates the app's sealed signature.
-        return crate::paths::app_support_dir().join("logs");
-    }
-
-    let mut dir = exe;
-    dir.pop();
-    dir.push("logs");
-    dir
-}
-
-#[cfg(target_os = "macos")]
-fn is_macos_app_executable(exe: &Path) -> bool {
-    let Some(macos_dir) = exe.parent() else {
-        return false;
-    };
-    let Some(contents_dir) = macos_dir.parent() else {
-        return false;
-    };
-    let Some(app_dir) = contents_dir.parent() else {
-        return false;
-    };
-    macos_dir.file_name().is_some_and(|name| name == "MacOS")
-        && contents_dir
-            .file_name()
-            .is_some_and(|name| name == "Contents")
-        && app_dir
-            .extension()
-            .is_some_and(|extension| extension == "app")
+    crate::paths::app_support_dir().join("logs")
 }
 
 fn log_file_path() -> PathBuf {
@@ -205,21 +175,7 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{is_macos_app_executable, redact, redact_named_value, register_secret};
-    use std::path::Path;
-
-    #[test]
-    fn detects_only_executables_inside_app_macos_directory() {
-        assert!(is_macos_app_executable(Path::new(
-            "/Applications/Backup Sync Tool.app/Contents/MacOS/backupsynctool"
-        )));
-        assert!(!is_macos_app_executable(Path::new(
-            "/usr/local/bin/backupsynctool"
-        )));
-        assert!(!is_macos_app_executable(Path::new(
-            "/tmp/Fake.app/backupsynctool"
-        )));
-    }
+    use super::{redact, redact_named_value, register_secret};
 
     #[test]
     fn redacts_structured_and_registered_credentials() {

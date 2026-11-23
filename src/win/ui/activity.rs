@@ -3,11 +3,7 @@ unsafe fn draw_activity_text(hdc: HDC, rc: &mut RECT, text: &str, format: DRAW_T
     DrawTextW(hdc, &mut wide, rc, format);
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
+use crate::app::unix_now;
 
 /// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -31,19 +27,8 @@ fn local_offset_secs() -> i64 {
     unsafe { secs(GetLocalTime()) - secs(GetSystemTime()) }
 }
 
-/// "14:05" for today, "Yesterday 23:10" for older rows.
 fn activity_time_label(at: u64) -> String {
-    let offset = local_offset_secs();
-    let local = at as i64 + offset;
-    let today = (unix_now() as i64 + offset).div_euclid(86_400);
-    let day = local.div_euclid(86_400);
-    let mins = local.rem_euclid(86_400) / 60;
-    let clock = format!("{:02}:{:02}", mins / 60, mins % 60);
-    if day == today {
-        clock
-    } else {
-        format!("Yesterday {clock}")
-    }
+    crate::app::activity_time_label(at, local_offset_secs())
 }
 
 /// Rolling log of finished rows: `<unix secs>\t<activity line>`.
@@ -246,8 +231,7 @@ fn insert_activity_row(st: &mut WndState, key: Option<&str>, row: ActivityRow) {
     st.activity_rows.truncate(MAX_ACTIVITY_ROWS);
 }
 
-unsafe fn apply_activity_log(hwnd: HWND, message: &str) {
-    let at = unix_now();
+unsafe fn apply_activity_log(hwnd: HWND, at: u64, message: &str) {
     let Some((key, row)) = row_from_log_message(message, at) else {
         return;
     };

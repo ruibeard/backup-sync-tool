@@ -30,6 +30,8 @@ const COL_GAP: f64 = 16.0;
 const ACT_H: f64 = 200.0;
 const BTN_H: f64 = 28.0;
 const ROW_H: f64 = 24.0;
+/// Room for "Yesterday 23:10".
+const TIME_W: f64 = 96.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusAction {
@@ -51,8 +53,8 @@ pub struct StatusSnapshot {
     pub server_status: String,
     pub start_at_login: bool,
     pub auto_update: bool,
-    /// Newest first.
-    pub activity_lines: Vec<String>,
+    /// Newest first, each with the Unix time it arrived.
+    pub activity_lines: Vec<(u64, String)>,
     pub syncing: bool,
     pub need_files: u64,
     /// Percent done in this round.
@@ -71,6 +73,8 @@ pub struct StatusSnapshot {
     pub check_pct: u64,
     /// Engine started, server not answered yet: not an error.
     pub connecting: bool,
+    /// Unix time the folder was last fully in sync; 0 = not yet.
+    pub synced_at: u64,
 }
 
 type ActionFn = Arc<dyn Fn(StatusAction) + Send + Sync>;
@@ -90,6 +94,8 @@ struct Row {
     label: String,
     /// Path under the watch folder; double-click opens it.
     path: Option<String>,
+    /// When it finished. Rows still running show no time.
+    at: Option<u64>,
 }
 
 struct Widgets {
@@ -266,6 +272,16 @@ fn cell(mtm: MainThreadMarker, col: &str, row: NSInteger) -> Retained<NSTextFiel
         f.setStringValue(&NSString::from_str(icon));
         f.setAlignment(NSTextAlignment::Center);
         f.setTextColor(Some(&tint));
+    } else if col == "time" {
+        if let Some(at) = r.at {
+            f.setStringValue(&NSString::from_str(&crate::app::activity_time_label(
+                at,
+                local_offset_secs(),
+            )));
+        }
+        f.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        f.setAlignment(NSTextAlignment::Right);
+        f.setTextColor(Some(&NSColor::secondaryLabelColor()));
     } else {
         f.setStringValue(&NSString::from_str(&r.label));
         let color = match r.kind {
@@ -283,10 +299,10 @@ fn cell(mtm: MainThreadMarker, col: &str, row: NSInteger) -> Retained<NSTextFiel
 
 /// Activity lines (newest first) to rows, the same rules as Windows:
 /// one row per file with its latest state.
-fn rows_from(lines: &[String]) -> Vec<Row> {
+fn rows_from(lines: &[(u64, String)]) -> Vec<Row> {
     let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
-    for line in lines {
+    for (at, line) in lines {
         use crate::app::Activity;
         let (kind, label, path) = match crate::app::parse_activity(line) {
             Some(Activity::File { dir, done, path }) => {
@@ -310,13 +326,20 @@ fn rows_from(lines: &[String]) -> Vec<Row> {
                 continue;
             }
         }
+        let running = matches!(kind, RowKind::File(_, false));
         rows.push(Row {
             kind,
             label,
             path: path.map(str::to_string),
+            at: (!running).then_some(*at),
         });
     }
     rows
+}
+
+/// Local time minus UTC, in seconds.
+fn local_offset_secs() -> i64 {
+    objc2_foundation::NSTimeZone::localTimeZone().secondsFromGMT() as i64
 }
 
 fn failed_label(name: &str, reason: &str) -> String {
@@ -529,10 +552,24 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     set_text(&ui.head, &head);
     let all_synced = head == "All synced";
     let checking_known = s.checking && !s.check_detail.is_empty();
+    // Done: no bar and no "100%" (that reads as still finishing). Say when.
+    let (font, color) = if all_synced {
+        (NSFont::systemFontOfSize(12.0), NSColor::secondaryLabelColor())
+    } else {
+        (NSFont::boldSystemFontOfSize(13.0), NSColor::labelColor())
+    };
+    ui.pct.setFont(Some(&font));
+    ui.pct.setTextColor(Some(&color));
+    ui.bar.setHidden(all_synced);
     set_text(
         &ui.pct,
-        &if all_synced {
-            "100%".to_string()
+        &if all_synced && s.synced_at > 0 {
+            format!(
+                "Last sync {}",
+                crate::app::activity_time_label(s.synced_at, local_offset_secs())
+            )
+        } else if all_synced {
+            String::new()
         } else if moving {
             format!("{}%", s.pct)
         } else if checking_known {
@@ -550,9 +587,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         unsafe { ui.bar.startAnimation(None) };
     } else {
         unsafe { ui.bar.stopAnimation(None) };
-        ui.bar.setDoubleValue(if all_synced {
-            100.0
-        } else if checking_known {
+        ui.bar.setDoubleValue(if checking_known {
             s.check_pct as f64
         } else if moving {
             s.pct as f64
@@ -697,9 +732,10 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     add_sep(&root, mtm, rect(PAD, top(166.0, 1.0), inner, 1.0));
 
     // —— Sync band: headline + %, bar, upload/download + time left ——
-    let head = label(mtm, "", rect(PAD, top(180.0, 20.0), inner - 60.0, 20.0), 14.0, true);
+    let head = label(mtm, "", rect(PAD, top(180.0, 20.0), inner - 170.0, 20.0), 14.0, true);
     root.addSubview(&head);
-    let pct = label(mtm, "", rect(W - PAD - 60.0, top(180.0, 20.0), 60.0, 20.0), 13.0, true);
+    // "42%" while moving; "Last sync Yesterday 23:10" when done.
+    let pct = label(mtm, "", rect(W - PAD - 170.0, top(180.0, 20.0), 170.0, 20.0), 13.0, true);
     pct.setAlignment(NSTextAlignment::Right);
     root.addSubview(&pct);
     let bar = NSProgressIndicator::new(mtm);
@@ -733,7 +769,11 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     let table = NSTableView::new(mtm);
     table.setFrame(rect(0.0, 0.0, inner, ACT_H));
     // Room for the scroller and the cell spacing of the plain style.
-    for (id, w) in [("icon", 22.0), ("label", inner - 22.0 - 40.0)] {
+    for (id, w) in [
+        ("icon", 22.0),
+        ("label", inner - 22.0 - TIME_W - 48.0),
+        ("time", TIME_W),
+    ] {
         let col = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &NSString::from_str(id));
         col.setWidth(w);
         col.setResizingMask(NSTableColumnResizingOptions::NoResizing);

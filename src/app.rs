@@ -122,6 +122,28 @@ impl Direction {
     }
 }
 
+/// Seconds since 1970, UTC.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// "14:05" for today, "Yesterday 23:10" for older rows. `offset` is local
+/// time minus UTC, in seconds; each UI reads it from its own system.
+pub fn activity_time_label(at: u64, offset: i64) -> String {
+    let local = at as i64 + offset;
+    let today = (unix_now() as i64 + offset).div_euclid(86_400);
+    let day = local.div_euclid(86_400);
+    let mins = local.rem_euclid(86_400) / 60;
+    let clock = format!("{:02}:{:02}", mins / 60, mins % 60);
+    if day == today {
+        clock
+    } else {
+        format!("Yesterday {clock}")
+    }
+}
+
 pub fn parse_activity(line: &str) -> Option<Activity<'_>> {
     let file = |dir, done, path| Some(Activity::File { dir, done, path });
     for (prefix, dir, done) in [
@@ -170,8 +192,11 @@ pub struct AppSnapshot {
     pub need_files: u64,
     pub need_bytes: u64,
     pub transfer: Transfer,
-    pub activity: VecDeque<String>,
+    /// Activity lines, oldest first, each with the Unix time it arrived.
+    pub activity: VecDeque<(u64, String)>,
     pub last_event_id: u64,
+    /// Unix time the folder was last seen fully in sync; 0 = not yet.
+    pub synced_at: u64,
 }
 
 impl AppSnapshot {
@@ -285,6 +310,7 @@ impl Default for AppSnapshot {
             transfer: Transfer::default(),
             activity: VecDeque::new(),
             last_event_id: 0,
+            synced_at: 0,
         }
     }
 }
@@ -430,12 +456,14 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
             state.work = WorkState::Scanning;
         }
         AppCommand::Work(work) => {
+            let was = state.work.clone();
             state.work = work;
             if state.work == WorkState::Idle {
                 state.connection = ConnectionState::Connected;
                 state.hub_connected = true;
                 state.pairing = PairingState::Idle;
             }
+            mark_synced(state, was);
         }
         AppCommand::EngineStatus {
             connected,
@@ -445,6 +473,7 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
             need_bytes,
             transfer,
         } => {
+            let was = state.work.clone();
             state.hub_connected = connected;
             state.connection = if connected {
                 ConnectionState::Connected
@@ -464,10 +493,11 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
                 _ if state.need_files > 0 || state.need_bytes > 0 => WorkState::Syncing,
                 _ => WorkState::Idle,
             };
+            mark_synced(state, was);
         }
         AppCommand::Activity(line) => {
-            if state.activity.back() != Some(&line) {
-                state.activity.push_back(line);
+            if state.activity.back().map(|(_, last)| last) != Some(&line) {
+                state.activity.push_back((unix_now(), line));
                 state.last_event_id += 1;
                 while state.activity.len() > MAX_RECENT_ACTIVITY {
                     state.activity.pop_front();
@@ -480,6 +510,16 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
             state.work = WorkState::PausedForReconnect;
         }
         AppCommand::Shutdown => {}
+    }
+}
+
+/// Note the time when work ends, or when the first round finds nothing to do.
+fn mark_synced(state: &mut AppSnapshot, was: WorkState) {
+    if state.work == WorkState::Idle
+        && state.hub_connected
+        && (was != WorkState::Idle || state.synced_at == 0)
+    {
+        state.synced_at = unix_now();
     }
 }
 
@@ -553,7 +593,7 @@ mod tests {
             AppCommand::Activity("Uploaded Invoices/one.pdf".into()),
             &mpsc::channel().0,
         );
-        assert_eq!(state.activity.back().unwrap(), "Uploaded Invoices/one.pdf");
+        assert_eq!(state.activity.back().unwrap().1, "Uploaded Invoices/one.pdf");
         assert_eq!(state.last_event_id, 1);
     }
 }

@@ -413,6 +413,7 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         check_detail: app.checking_detail(),
         check_pct: app.checking_pct(),
         connecting: matches!(app.connection, crate::app::ConnectionState::Connecting),
+        synced_at: app.synced_at,
     }
 }
 

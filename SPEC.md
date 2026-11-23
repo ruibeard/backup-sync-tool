@@ -108,9 +108,9 @@ Paths:
 
 | State | Windows | macOS |
 | --- | --- | --- |
-| Desktop config | beside `backupsynctool.exe` | `~/Library/Application Support/BackupSyncTool/backupsynctool.json` |
+| Desktop config | `%LOCALAPPDATA%\BackupSyncTool\backupsynctool.json` (an old one beside the exe moves here once) | `~/Library/Application Support/BackupSyncTool/backupsynctool.json` |
 | Local sync DB | `%LOCALAPPDATA%\BackupSyncTool\sync\` | `~/Library/Application Support/BackupSyncTool/sync/` |
-| Logs | `logs\` beside executable | `~/Library/Application Support/BackupSyncTool/logs` |
+| Logs | `%LOCALAPPDATA%\BackupSyncTool\logs\` | `~/Library/Application Support/BackupSyncTool/logs` |
 
 On macOS, secret fields are Keychain handles; ad-hoc dev signing must not prompt for a Keychain password. On Windows, DPAPI uses the established application entropy (`webdavsync-v1`). Never log device tokens or signed file URLs.
 

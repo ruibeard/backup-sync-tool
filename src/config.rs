@@ -60,32 +60,27 @@ pub fn needs_repair(cfg: &Config) -> bool {
 pub const REPAIR_MESSAGE: &str =
     "This computer has an old pairing. Pair this computer again to start sync.";
 
+/// The config lives in the app data folder on every system. An older build
+/// kept it beside the executable: move that file over once, so nothing is
+/// left next to the app (for example on the Windows desktop).
 fn config_path() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        let support = crate::paths::app_support_dir().join("backupsynctool.json");
-        if support.is_file() {
+    let support = crate::paths::app_support_dir().join("backupsynctool.json");
+    if support.is_file() {
+        return support;
+    }
+    let mut beside = std::env::current_exe().unwrap_or_default();
+    beside.set_file_name("backupsynctool.json");
+    if beside.is_file() {
+        if let Some(parent) = support.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::copy(&beside, &support).is_ok() {
+            let _ = std::fs::remove_file(&beside);
             return support;
         }
-        let mut beside = std::env::current_exe().unwrap_or_default();
-        beside.set_file_name("backupsynctool.json");
-        if beside.is_file() {
-            if let Some(parent) = support.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if std::fs::copy(&beside, &support).is_ok() {
-                return support;
-            }
-            return beside;
-        }
-        support
+        return beside;
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut path = std::env::current_exe().unwrap_or_default();
-        path.set_file_name("backupsynctool.json");
-        path
-    }
+    support
 }
 
 fn default_true() -> bool {

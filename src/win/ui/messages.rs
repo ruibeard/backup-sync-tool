@@ -1,7 +1,7 @@
 // ── App messages ──────────────────────────────────────────────────────────────
 unsafe fn on_app_log(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let msg = Box::from_raw(lp.0 as *mut String);
-    apply_activity_log(hwnd, &msg);
+    apply_activity_log(hwnd, unix_now(), &msg);
     LRESULT(0)
 }
 
@@ -33,12 +33,12 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
         // Every line added since the last snapshot, oldest first.
         let fresh = snapshot.last_event_id.saturating_sub(st.last_event_id) as usize;
         let skip = snapshot.activity.len().saturating_sub(fresh);
-        let activity: Vec<String> = snapshot.activity.iter().skip(skip).cloned().collect();
+        let activity: Vec<(u64, String)> = snapshot.activity.iter().skip(skip).cloned().collect();
         st.last_event_id = st.last_event_id.max(snapshot.last_event_id);
         (activity, (st.sync_progress_done, st.sync_progress_total, 0))
     };
-    for line in &new_activity.0 {
-        apply_activity_log(hwnd, line);
+    for (at, line) in &new_activity.0 {
+        apply_activity_log(hwnd, *at, line);
     }
     if state == UiSyncState::Checking || state == UiSyncState::Syncing {
         SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
@@ -261,6 +261,7 @@ unsafe fn on_app_pair_result(hwnd: HWND, wp: WPARAM, lp: LPARAM) -> LRESULT {
     }
     apply_activity_log(
         hwnd,
+        unix_now(),
         &format!("! Destination approved: {}", pair.customer),
     );
     match restart_sync_engine(hwnd) {
