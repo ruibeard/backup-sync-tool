@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem as TrayMenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem as TrayMenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Default)]
@@ -152,7 +152,6 @@ struct Ids {
     open_window: String,
     open_logs: String,
     set_control_plane: String,
-    reconnect: String,
     login: String,
     auto_update: String,
     quit: String,
@@ -203,10 +202,9 @@ pub fn run() {
 
     let paused = host.lock().expect("host").is_paused();
     let pause = TrayMenuItem::new(pause_label(paused), true, None);
-    let open_window = TrayMenuItem::new("Open Backup Sync Tool…", true, None);
+    let open_window = TrayMenuItem::new("Open Backup Sync Tool", true, None);
     let open_logs = TrayMenuItem::new("Open Logs", true, None);
     let set_control_plane = TrayMenuItem::new("Control plane URL…", true, None);
-    let reconnect = TrayMenuItem::new("Reconnect Server…", true, None);
     let (login_on, auto_on) = {
         let h = host.lock().expect("host");
         (h.config.start_with_windows, h.config.auto_update)
@@ -220,7 +218,6 @@ pub fn run() {
         open_window: open_window.id().as_ref().to_string(),
         open_logs: open_logs.id().as_ref().to_string(),
         set_control_plane: set_control_plane.id().as_ref().to_string(),
-        reconnect: reconnect.id().as_ref().to_string(),
         login: login.id().as_ref().to_string(),
         auto_update: auto_update.id().as_ref().to_string(),
         quit: quit.id().as_ref().to_string(),
@@ -228,14 +225,14 @@ pub fn run() {
 
     let menu = Menu::new();
     let _ = menu.append(&pause);
-    let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&open_window);
-    let _ = menu.append(&open_logs);
-    let _ = menu.append(&set_control_plane);
-    let _ = menu.append(&reconnect);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&login);
     let _ = menu.append(&auto_update);
+    let advanced = Submenu::new("Advanced", true);
+    let _ = advanced.append(&open_logs);
+    let _ = advanced.append(&set_control_plane);
+    let _ = menu.append(&advanced);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
@@ -319,10 +316,6 @@ pub fn run() {
         }
         if id == ids.set_control_plane {
             start_set_control_plane(&shared_ev);
-            return;
-        }
-        if id == ids.reconnect {
-            start_pair(&shared_ev);
             return;
         }
         if id == ids.login {

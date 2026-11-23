@@ -125,9 +125,11 @@ struct Widgets {
     version: Retained<NSTextField>,
     update_btn: Retained<NSButton>,
     more: Retained<NSButton>,
+    folder_icon: Retained<NSButton>,
+    folder_path: RefCell<String>,
     list_sep: Retained<NSBox>,
     empty: Retained<NSTextField>,
-    more_menu: Retained<NSMenu>,
+    change: Retained<NSButton>,
 }
 
 struct Live {
@@ -156,16 +158,6 @@ define_class!(
     unsafe impl NSObjectProtocol for StatusTarget {}
 
     impl StatusTarget {
-        #[unsafe(method(actMore:))]
-        fn act_more(&self, _: Option<&AnyObject>) {
-            LIVE.with(|c| {
-                if let Some(live) = c.borrow().as_ref() {
-                    let w = &live.widgets;
-                    let at = NSPoint::new(0.0, w.more.frame().size.height + 4.0);
-                    w.more_menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(&w.more));
-                }
-            });
-        }
         #[unsafe(method(actOpen:))]
         fn act_open(&self, _: Option<&AnyObject>) {
             fire(StatusAction::OpenWatch);
@@ -532,7 +524,17 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     };
     set_text(&ui.watch, watch);
     ui.watch.setToolTip(Some(&NSString::from_str(watch)));
+    // The real Finder icon of the folder (custom icons too).
+    if *ui.folder_path.borrow() != s.watch_folder {
+        *ui.folder_path.borrow_mut() = s.watch_folder.clone();
+        let path = if s.watch_folder.trim().is_empty() { "/Users" } else { s.watch_folder.as_str() };
+        let img = objc2_app_kit::NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(path));
+        ui.folder_icon.setImage(Some(&img));
+    }
     set_text(&ui.size, &s.folder_summary);
+    let used = if s.folder_summary.is_empty() { 0.0 } else { ui.size.fittingSize().width + 2.0 };
+    let f = ui.size.frame();
+    ui.change.setFrame(rect(f.origin.x + used, f.origin.y - 1.0, 60.0, 18.0));
 
     let lower = s.server_status.to_ascii_lowercase();
     let (sym, tint, title, detail) = if s.connecting {
@@ -574,6 +576,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     ui.server_title.setHidden(!linked);
     ui.server_detail.setHidden(!linked);
     ui.server_icon.setHidden(!linked);
+    ui.more.setHidden(!linked);
     let pair_title = if lower.contains("reconnect") { "Reconnect Server" } else { "Connect Server" };
     if ui.pair.title().to_string() != pair_title {
         ui.pair.setTitle(&NSString::from_str(pair_title));
@@ -728,20 +731,13 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     let folder_icon = NSButton::new(mtm);
     folder_icon.setBordered(false);
     folder_icon.setRefusesFirstResponder(true);
-    folder_icon.setFrame(rect(PAD, top(18.0, 32.0), 32.0, 32.0));
+    folder_icon.setFrame(rect(PAD - 2.0, top(15.0, 38.0), 38.0, 38.0));
     folder_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     folder_icon.setToolTip(Some(&NSString::from_str("Open in Finder")));
     unsafe {
         folder_icon.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject)));
         folder_icon.setAction(Some(sel!(actOpen:)));
     }
-    if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("folder.fill"),
-        Some(&NSString::from_str("Folder")),
-    ) {
-        folder_icon.setImage(Some(&img));
-    }
-    folder_icon.setContentTintColor(Some(&NSColor::controlAccentColor()));
     root.addSubview(&folder_icon);
 
     let text_x = PAD + 44.0;
@@ -754,6 +750,9 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     let size = label(mtm, "", rect(text_x, top(36.0, 16.0), text_w, 16.0), 11.0, false);
     size.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&size);
+    // "Change…" sits right after the size text; paint() moves it.
+    let change = link_btn_colored(mtm, &target, "Change…", sel!(actChoose:), rect(text_x, top(35.0, 18.0), 60.0, 18.0), NSColor::linkColor());
+    root.addSubview(&change);
 
     // Server: name, then a small cloud and the state.
     let rx = W - PAD - more_w - 8.0 - right_w;
@@ -784,38 +783,21 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     let more = NSButton::new(mtm);
     more.setBordered(false);
     more.setRefusesFirstResponder(true);
-    more.setFrame(rect(W - PAD - more_w, top(20.0, more_w), more_w, more_w));
+    more.setFrame(rect(W - PAD - more_w + 6.0, top(25.0, 18.0), 18.0, 18.0));
     if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("gearshape"),
-        Some(&NSString::from_str("Settings")),
+        &NSString::from_str("arrow.triangle.2.circlepath"),
+        Some(&NSString::from_str("Reconnect server")),
     ) {
         more.setImage(Some(&img));
     }
     more.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+    more.setToolTip(Some(&NSString::from_str("Reconnect server")));
     more.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
     unsafe {
         more.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject)));
-        more.setAction(Some(sel!(actMore:)));
+        more.setAction(Some(sel!(actPair:)));
     }
     root.addSubview(&more);
-
-    let more_menu = NSMenu::new(mtm);
-    for (title, action) in [
-        ("Open in Finder", sel!(actOpen:)),
-        ("Change Folder…", sel!(actChoose:)),
-        ("Reconnect Server…", sel!(actPair:)),
-    ] {
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(title),
-                Some(action),
-                &NSString::from_str(""),
-            )
-        };
-        unsafe { item.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject))) };
-        more_menu.addItem(&item);
-    }
 
     add_sep(&root, mtm, rect(PAD, top(66.0, 1.0), inner, 1.0));
 
@@ -962,7 +944,9 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         version,
         update_btn,
         more,
-        more_menu,
+        change,
+        folder_icon,
+        folder_path: RefCell::new("\u{0}".into()),
         list_sep,
         empty,
     }
@@ -1036,15 +1020,26 @@ fn link_btn(
     action: Sel,
     frame: NSRect,
 ) -> Retained<NSButton> {
+    link_btn_colored(mtm, target, title, action, frame, NSColor::linkColor())
+}
+
+fn link_btn_colored(
+    mtm: MainThreadMarker,
+    target: &StatusTarget,
+    title: &str,
+    action: Sel,
+    frame: NSRect,
+    color: Retained<NSColor>,
+) -> Retained<NSButton> {
     let b = NSButton::new(mtm);
     b.setBezelStyle(NSBezelStyle::AccessoryBar);
     b.setBordered(false);
     b.setControlSize(NSControlSize::Small);
     b.setFrame(frame);
     // Underlined brand-green attributed title — reads as a real text link.
-    let font = NSFont::systemFontOfSize(11.0);
-    let green = NSColor::secondaryLabelColor();
-    let underline = NSNumber::numberWithInteger(NSUnderlineStyle::None.0);
+    let font = NSFont::systemFontOfSize(12.0);
+    let green = color;
+    let underline = NSNumber::numberWithInteger(NSUnderlineStyle::Single.0);
     let attrs: Retained<NSDictionary<NSString, AnyObject>> = unsafe {
         NSDictionary::from_slices(
             &[
