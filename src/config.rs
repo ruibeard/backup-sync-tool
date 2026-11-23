@@ -92,6 +92,8 @@ fn default_true() -> bool {
     true
 }
 
+const LEGACY_PAIR_API_BASE: &str = "https://box.rui.cam";
+
 fn default_pair_api_base() -> String {
     "https://backup.rui.cam".to_string()
 }
@@ -134,6 +136,10 @@ fn from_json(data: &str) -> Config {
     };
     cfg.pair_api_base =
         normalize_pair_api_base(&cfg.pair_api_base).unwrap_or_else(|_| default_pair_api_base());
+    // Old builds defaulted to box.rui.cam and persisted it; the control plane is backup.rui.cam.
+    if cfg.pair_api_base.eq_ignore_ascii_case(LEGACY_PAIR_API_BASE) {
+        cfg.pair_api_base = default_pair_api_base();
+    }
     cfg
 }
 

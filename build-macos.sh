@@ -86,7 +86,10 @@ if [[ $NOTARIZE -eq 1 ]]; then
   spctl --assess --type execute --verbose=2 "$APP"
 fi
 
-LAUNCH_APP="$(cd "$OUT" && pwd)/Backup Sync Tool.app"
+# Repo-root copy, like backupsynctool.exe on Windows; launch from here.
+rm -rf "Backup Sync Tool.app"
+ditto "$APP" "Backup Sync Tool.app"
+LAUNCH_APP="$(pwd)/Backup Sync Tool.app"
 if [[ $PACKAGE -eq 1 ]]; then
   arch=$(uname -m); [[ $arch == arm64 ]] && arch=aarch64
   tar -C "$OUT" -czf "$OUT/backupsynctool-macos-${arch}.tar.gz" \
