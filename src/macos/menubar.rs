@@ -15,7 +15,8 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSButton, NSColor, NSFont, NSImage, NSImageView, NSMenu,
     NSMenuItem, NSTextField, NSView,
 };
-use objc2_foundation::{NSAttributedString, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2::DefinedClass;
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -833,12 +834,97 @@ fn apply_status(shared: &Shared) {
 }
 
 // —— Tray menu (secondary click) ——————————————————————————————————————————
-// Native NSMenu, built fresh on each click so it shows the current state:
-// a header row (app, state, pause/play), the folder, the last 10 files,
-// Advanced, Quit.
+// Native NSMenu, built fresh on each click. Every row is our own view on one
+// grid, so icons, text and the right column line up exactly:
+//   | 14 | icon column 28 | 8 | text …………… right text | 14 |
 
-const MENU_W: f64 = 300.0;
+const MENU_W: f64 = 320.0;
 const RECENT_ROWS: usize = 10;
+const EDGE: f64 = 14.0;
+const ICON_COL: f64 = 28.0;
+const TEXT_X: f64 = EDGE + ICON_COL + 8.0;
+const ROW_H: f64 = 24.0;
+
+/// What a click on a row does.
+#[derive(Clone, Copy, PartialEq)]
+enum RowAction {
+    None,
+    OpenFolder,
+    Reveal(usize),
+    Quit,
+}
+
+struct MenuRowIvars {
+    action: std::cell::Cell<RowAction>,
+    icon: std::cell::RefCell<Option<Retained<NSImageView>>>,
+    title: std::cell::RefCell<Option<Retained<NSTextField>>>,
+    right: std::cell::RefCell<Option<Retained<NSTextField>>>,
+    /// Colours when not highlighted.
+    right_grey: std::cell::Cell<bool>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BstMenuRow"]
+    #[ivars = MenuRowIvars]
+    struct MenuRow;
+
+    impl MenuRow {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let lit = self
+                .enclosingMenuItem()
+                .map(|i| i.isHighlighted() && i.isEnabled())
+                .unwrap_or(false);
+            if lit {
+                let b = self.bounds();
+                let r = NSRect::new(
+                    NSPoint::new(5.0, 0.0),
+                    NSSize::new(b.size.width - 10.0, b.size.height),
+                );
+                NSColor::controlAccentColor().setFill();
+                objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, 5.0, 5.0).fill();
+            }
+            let iv = self.ivars();
+            let main = if lit { NSColor::whiteColor() } else { NSColor::labelColor() };
+            let grey = if lit { NSColor::whiteColor() } else { NSColor::secondaryLabelColor() };
+            if let Some(t) = iv.title.borrow().as_ref() {
+                t.setTextColor(Some(&main));
+            }
+            if let Some(t) = iv.right.borrow().as_ref() {
+                t.setTextColor(Some(if iv.right_grey.get() { &grey } else { &main }));
+            }
+            if let Some(i) = iv.icon.borrow().as_ref() {
+                i.setContentTintColor(Some(&grey));
+            }
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _e: &objc2_app_kit::NSEvent) {
+            let action = self.ivars().action.get();
+            if action == RowAction::None {
+                return;
+            }
+            close_tray_menu();
+            match action {
+                RowAction::OpenFolder => with_shared(do_open_finder),
+                RowAction::Reveal(i) => {
+                    let path = RECENT.with(|r| r.borrow().get(i).cloned());
+                    if let Some(path) = path {
+                        let _ = std::process::Command::new("open").arg("-R").arg(&path).status();
+                    }
+                }
+                RowAction::Quit => {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        NSApplication::sharedApplication(mtm).terminate(None);
+                    }
+                }
+                RowAction::None => {}
+            }
+        }
+    }
+);
 
 fn with_shared(f: impl FnOnce(&Shared)) {
     let shared = SHARED.with(|c| c.borrow().clone());
@@ -869,13 +955,13 @@ fn target_obj(t: &MenuTarget) -> &AnyObject {
     unsafe { &*(t as *const MenuTarget as *const AnyObject) }
 }
 
-fn menu_item(mtm: MainThreadMarker, t: &MenuTarget, title: &str, action: Option<objc2::runtime::Sel>, key: &str) -> Retained<NSMenuItem> {
+fn menu_item(mtm: MainThreadMarker, t: &MenuTarget, title: &str, action: Option<objc2::runtime::Sel>) -> Retained<NSMenuItem> {
     let item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
             &NSString::from_str(title),
             action,
-            &NSString::from_str(key),
+            &NSString::from_str(""),
         )
     };
     if action.is_some() {
@@ -884,19 +970,75 @@ fn menu_item(mtm: MainThreadMarker, t: &MenuTarget, title: &str, action: Option<
     item
 }
 
-fn symbol(name: &str, size: f64) -> Option<Retained<NSImage>> {
-    let img = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)?;
-    img.setSize(NSSize::new(size, size));
-    Some(img)
+fn symbol(name: &str) -> Option<Retained<NSImage>> {
+    NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)
 }
 
 fn menu_label(mtm: MainThreadMarker, text: &str, frame: NSRect, size: f64, bold: bool) -> Retained<NSTextField> {
     let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
     l.setFrame(frame);
-    let font = if bold { NSFont::boldSystemFontOfSize(size) } else { NSFont::systemFontOfSize(size) };
+    let font = if bold { NSFont::boldSystemFontOfSize(size) } else { NSFont::menuFontOfSize(size) };
     l.setFont(Some(&font));
-    l.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+    l.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle);
     l
+}
+
+/// One row on the grid: icon, text, optional right text (time or chevron).
+fn row_item(
+    mtm: MainThreadMarker,
+    icon: Option<Retained<NSImage>>,
+    title: &str,
+    right: Option<(&str, bool)>,
+    action: RowAction,
+) -> Retained<NSMenuItem> {
+    let view: Retained<MenuRow> = unsafe {
+        msg_send![
+            super(MenuRow::alloc(mtm).set_ivars(MenuRowIvars {
+                action: std::cell::Cell::new(action),
+                icon: Default::default(),
+                title: Default::default(),
+                right: Default::default(),
+                right_grey: std::cell::Cell::new(true),
+            })),
+            initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(MENU_W, ROW_H))
+        ]
+    };
+    view.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+    if let Some(img) = icon {
+        let iv = NSImageView::new(mtm);
+        iv.setFrame(NSRect::new(NSPoint::new(EDGE, 4.0), NSSize::new(ICON_COL, 16.0)));
+        iv.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyDown);
+        iv.setImage(Some(&img));
+        view.addSubview(&iv);
+        *view.ivars().icon.borrow_mut() = Some(iv);
+    }
+    let right_w = if right.is_some() { 70.0 } else { 0.0 };
+    let t = menu_label(
+        mtm,
+        title,
+        NSRect::new(NSPoint::new(TEXT_X, 3.0), NSSize::new(MENU_W - TEXT_X - EDGE - right_w, 18.0)),
+        13.0,
+        false,
+    );
+    view.addSubview(&t);
+    *view.ivars().title.borrow_mut() = Some(t);
+    if let Some((text, grey)) = right {
+        let r = menu_label(
+            mtm,
+            text,
+            NSRect::new(NSPoint::new(MENU_W - EDGE - right_w, 3.0), NSSize::new(right_w, 18.0)),
+            13.0,
+            false,
+        );
+        r.setAlignment(objc2_app_kit::NSTextAlignment::Right);
+        r.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin);
+        view.addSubview(&r);
+        view.ivars().right_grey.set(grey);
+        *view.ivars().right.borrow_mut() = Some(r);
+    }
+    let item = NSMenuItem::new(mtm);
+    item.setView(Some(&view));
+    item
 }
 
 /// "All synced · 21:35", "Syncing 8 file(s) · 3%", "Paused", …
@@ -916,13 +1058,13 @@ fn short_state(s: &StatusSnapshot) -> String {
     }
 }
 
-/// App icon, name, state; the whole row opens the window, the round button
-/// pauses or resumes.
+/// App shield, name, state; the row opens the window, the round button
+/// pauses or resumes. Same grid as the rows.
 fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Retained<NSView> {
-    let h = 48.0;
+    use objc2::AnyThread;
+    let h = 44.0;
     let view = NSView::new(mtm);
     view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(MENU_W, h)));
-    // The menu stretches the row to its own width; the button stays at the edge.
     view.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
 
     let open = NSButton::new(mtm);
@@ -937,10 +1079,8 @@ fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Ret
     view.addSubview(&open);
 
     let icon = NSImageView::new(mtm);
-    // The shield itself, not the app icon (macOS draws a grey plate around it).
-    icon.setFrame(NSRect::new(NSPoint::new(16.0, 10.0), NSSize::new(28.0, 28.0)));
+    icon.setFrame(NSRect::new(NSPoint::new(EDGE, 8.0), NSSize::new(ICON_COL, ICON_COL)));
     icon.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
-    use objc2::AnyThread;
     let data = objc2_foundation::NSData::with_bytes(ICON_IDLE);
     if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
         img.setTemplate(true);
@@ -949,17 +1089,19 @@ fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Ret
     icon.setContentTintColor(Some(&crate::macos::brand::green()));
     view.addSubview(&icon);
 
-    view.addSubview(&menu_label(mtm, "Backup Sync Tool", NSRect::new(NSPoint::new(52.0, 24.0), NSSize::new(190.0, 17.0)), 13.0, true));
-    let state = menu_label(mtm, &short_state(s), NSRect::new(NSPoint::new(52.0, 8.0), NSSize::new(190.0, 15.0)), 11.0, false);
+    let text_w = MENU_W - TEXT_X - EDGE - 32.0;
+    view.addSubview(&menu_label(mtm, "Backup Sync Tool", NSRect::new(NSPoint::new(TEXT_X, 22.0), NSSize::new(text_w, 17.0)), 13.0, true));
+    let state = menu_label(mtm, &short_state(s), NSRect::new(NSPoint::new(TEXT_X, 6.0), NSSize::new(text_w, 15.0)), 11.0, false);
     state.setTextColor(Some(&NSColor::secondaryLabelColor()));
     view.addSubview(&state);
 
+    // Right edge of the button = right edge of the times below.
     let pause = NSButton::new(mtm);
     pause.setBordered(false);
-    pause.setFrame(NSRect::new(NSPoint::new(MENU_W - 56.0, 12.0), NSSize::new(24.0, 24.0)));
+    pause.setFrame(NSRect::new(NSPoint::new(MENU_W - EDGE - 22.0, 11.0), NSSize::new(22.0, 22.0)));
     pause.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin);
     let (sym, tip) = if s.paused { ("play.circle.fill", "Resume") } else { ("pause.circle.fill", "Pause") };
-    if let Some(img) = symbol(sym, 22.0) {
+    if let Some(img) = symbol(sym) {
         pause.setImage(Some(&img));
     }
     pause.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
@@ -971,70 +1113,6 @@ fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Ret
     }
     view.addSubview(&pause);
     view
-}
-
-/// Menu item text with an icon in front (item images do not show on all
-/// macOS versions, text attachments do) and an optional grey right part.
-fn icon_title(img: Option<&NSImage>, text: &str, right: Option<&str>, tab_at: f64) -> Retained<NSAttributedString> {
-    use objc2::AnyThread;
-    use objc2_app_kit::{
-        NSAttributedStringAttachmentConveniences, NSFontAttributeName, NSForegroundColorAttributeName,
-        NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSTextAlignment, NSTextAttachment, NSTextTab,
-    };
-    use objc2_foundation::{NSDictionary, NSMutableAttributedString, NSRange};
-    let text: String = if text.chars().count() > 34 {
-        let head: String = text.chars().take(33).collect();
-        format!("{head}…")
-    } else {
-        text.to_string()
-    };
-    let out = NSMutableAttributedString::new();
-    if let Some(img) = img {
-        let att = NSTextAttachment::new();
-        att.setImage(Some(img));
-        let sz = img.size();
-        att.setBounds(NSRect::new(NSPoint::new(0.0, -3.0), sz));
-        out.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(&att));
-        out.appendAttributedString(&NSAttributedString::from_nsstring(&NSString::from_str("  ")));
-    }
-    let body_start = out.length();
-    let body = match right {
-        Some(r) => format!("{text}\t{r}"),
-        None => text,
-    };
-    out.appendAttributedString(&NSAttributedString::from_nsstring(&NSString::from_str(&body)));
-    let all = NSRange::new(0, out.length());
-    let para = NSMutableParagraphStyle::new();
-    let tab = unsafe {
-        NSTextTab::initWithTextAlignment_location_options(
-            NSTextTab::alloc(),
-            NSTextAlignment::Right,
-            tab_at,
-            &NSDictionary::new(),
-        )
-    };
-    para.setTabStops(Some(&objc2_foundation::NSArray::from_retained_slice(&[tab])));
-    let font = NSFont::menuFontOfSize(13.0);
-    unsafe {
-        out.addAttribute_value_range(NSParagraphStyleAttributeName, &para, all);
-        out.addAttribute_value_range(NSFontAttributeName, &font, all);
-        if let Some(r) = right {
-            let n = r.encode_utf16().count();
-            let start = out.length() - n;
-            out.addAttribute_value_range(NSForegroundColorAttributeName, &NSColor::secondaryLabelColor(), NSRange::new(start, n));
-        }
-    }
-    let _ = body_start;
-    Retained::into_super(out)
-}
-
-/// SF Symbol tinted for use inside text.
-fn tinted_symbol(name: &str, size: f64, color: &NSColor) -> Option<Retained<NSImage>> {
-    let img = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)?;
-    let conf = objc2_app_kit::NSImageSymbolConfiguration::configurationWithHierarchicalColor(color);
-    let img = img.imageWithSymbolConfiguration(&conf)?;
-    img.setSize(NSSize::new(size, size));
-    Some(img)
 }
 
 /// Last finished files, newest first, one row per file.
@@ -1075,42 +1153,40 @@ fn show_tray_menu() {
     menu.addItem(&header);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    // Folder: Finder icon and name; click opens it.
     let folder = snap.watch_folder.trim();
     if !folder.is_empty() {
         let name = std::path::Path::new(folder)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| folder.to_string());
-        let item = menu_item(mtm, &t, &name, Some(sel!(bstOpenFolder:)), "");
-        let img = objc2_app_kit::NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(folder));
-        img.setSize(NSSize::new(18.0, 18.0));
-        item.setAttributedTitle(Some(&icon_title(Some(&img), &name, None, 0.0)));
+        let item = row_item(mtm, symbol("folder"), &name, None, RowAction::OpenFolder);
         item.setToolTip(Some(&NSString::from_str(folder)));
         menu.addItem(&item);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
     }
 
-    // Recent files: click shows the file in Finder.
     let recent = recent_files(&snap);
     if !recent.is_empty() {
-        let head = menu_item(mtm, &t, "Recent", None, "");
+        let head = row_item(mtm, None, "", None, RowAction::None);
+        if let Some(view) = head.view() {
+            // Section caption on the text column.
+            let cap = menu_label(mtm, "Recent", NSRect::new(NSPoint::new(EDGE, 3.0), NSSize::new(200.0, 18.0)), 11.0, true);
+            cap.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            view.addSubview(&cap);
+        }
         head.setEnabled(false);
         menu.addItem(&head);
         let mut paths = Vec::new();
         for (i, (dir, path, at)) in recent.iter().enumerate() {
             let name = path.rsplit('/').next().unwrap_or(path);
-            let item = menu_item(mtm, &t, name, Some(sel!(bstReveal:)), "");
-            item.setTag(i as isize);
             let sym = match dir {
                 crate::app::Direction::Up => "arrow.up",
                 crate::app::Direction::Down => "arrow.down",
                 crate::app::Direction::Moved => "arrow.right",
                 _ => "xmark",
             };
-            let img = tinted_symbol(sym, 12.0, &NSColor::secondaryLabelColor());
             let time = crate::app::time_label(*at);
-            item.setAttributedTitle(Some(&icon_title(img.as_deref(), name, Some(&time), MENU_W)));
+            let item = row_item(mtm, symbol(sym), name, Some((&time, true)), RowAction::Reveal(i));
             item.setToolTip(Some(&NSString::from_str(path)));
             menu.addItem(&item);
             paths.push(std::path::Path::new(folder).join(path));
@@ -1119,33 +1195,26 @@ fn show_tray_menu() {
         menu.addItem(&NSMenuItem::separatorItem(mtm));
     }
 
-    // Advanced: settings and tools.
+    // Advanced: settings and tools, in a native submenu.
     let adv = NSMenu::new(mtm);
     adv.setAutoenablesItems(false);
-    let login = menu_item(mtm, &t, "Start at Login", Some(sel!(bstLogin:)), "");
+    let login = menu_item(mtm, &t, "Start at Login", Some(sel!(bstLogin:)));
     login.setState(if login_on { 1 } else { 0 });
     adv.addItem(&login);
-    let auto = menu_item(mtm, &t, "Auto-update", Some(sel!(bstAuto:)), "");
+    let auto = menu_item(mtm, &t, "Auto-update", Some(sel!(bstAuto:)));
     auto.setState(if auto_on { 1 } else { 0 });
     adv.addItem(&auto);
     adv.addItem(&NSMenuItem::separatorItem(mtm));
-    adv.addItem(&menu_item(mtm, &t, "Control plane URL…", Some(sel!(bstControlPlane:)), ""));
-    adv.addItem(&menu_item(mtm, &t, "Open Logs", Some(sel!(bstLogs:)), ""));
-    let adv_item = menu_item(mtm, &t, "Advanced", None, "");
-    let img = tinted_symbol("slider.horizontal.3", 14.0, &NSColor::labelColor());
-    adv_item.setAttributedTitle(Some(&icon_title(img.as_deref(), "Advanced", None, 0.0)));
+    adv.addItem(&menu_item(mtm, &t, "Control plane URL…", Some(sel!(bstControlPlane:))));
+    adv.addItem(&menu_item(mtm, &t, "Open Logs", Some(sel!(bstLogs:))));
+    let adv_item = row_item(mtm, symbol("slider.horizontal.3"), "Advanced", Some(("›", false)), RowAction::None);
     adv_item.setSubmenu(Some(&adv));
     menu.addItem(&adv_item);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    let quit = menu_item(mtm, &t, "Quit", Some(sel!(bstQuit:)), "");
-    let img = tinted_symbol("power", 14.0, &NSColor::labelColor());
-    quit.setAttributedTitle(Some(&icon_title(img.as_deref(), "Quit", None, 0.0)));
-    menu.addItem(&quit);
+    menu.addItem(&row_item(mtm, symbol("power"), "Quit", None, RowAction::Quit));
 
-    menu.setMinimumWidth(MENU_W);
     OPEN_MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
-    // Just under the menu bar, at the pointer.
     let mouse = objc2_app_kit::NSEvent::mouseLocation();
     let top = objc2_app_kit::NSScreen::mainScreen(mtm)
         .map(|sc| {
