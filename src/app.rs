@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-pub const MAX_RECENT_ACTIVITY: usize = 200;
+pub const MAX_RECENT_ACTIVITY: usize = 500;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -129,9 +129,9 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// "14:05" for today, "Yesterday 23:10" for older rows. `offset` is local
-/// time minus UTC, in seconds; each UI reads it from its own system.
-pub fn activity_time_label(at: u64, offset: i64) -> String {
+/// "14:05" for today, "Yesterday 23:10" for older times.
+pub fn time_label(at: u64) -> String {
+    let offset = local_offset_secs();
     let local = at as i64 + offset;
     let today = (unix_now() as i64 + offset).div_euclid(86_400);
     let day = local.div_euclid(86_400);
@@ -142,6 +142,53 @@ pub fn activity_time_label(at: u64, offset: i64) -> String {
     } else {
         format!("Yesterday {clock}")
     }
+}
+
+/// Local time minus UTC, in seconds.
+#[cfg(windows)]
+fn local_offset_secs() -> i64 {
+    use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+    // Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+    fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
+    let secs = |t: windows::Win32::Foundation::SYSTEMTIME| {
+        days_from_civil(t.wYear as i64, t.wMonth as i64, t.wDay as i64) * 86_400
+            + t.wHour as i64 * 3600
+            + t.wMinute as i64 * 60
+            + t.wSecond as i64
+    };
+    unsafe { secs(GetLocalTime()) - secs(GetSystemTime()) }
+}
+
+/// Local time minus UTC, in seconds.
+#[cfg(target_os = "macos")]
+fn local_offset_secs() -> i64 {
+    objc2_foundation::NSTimeZone::localTimeZone().secondsFromGMT() as i64
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn local_offset_secs() -> i64 {
+    0
+}
+
+/// "1,234 files · 2.3 GB" for the synced folder.
+pub fn folder_summary(files: u64, bytes: u64) -> String {
+    let digits = files.to_string();
+    let mut count = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            count.push(',');
+        }
+        count.push(c);
+    }
+    let noun = if files == 1 { "file" } else { "files" };
+    format!("{count} {noun} · {}", format_bytes(bytes))
 }
 
 pub fn parse_activity(line: &str) -> Option<Activity<'_>> {
@@ -197,6 +244,8 @@ pub struct AppSnapshot {
     pub last_event_id: u64,
     /// Unix time the folder was last seen fully in sync; 0 = not yet.
     pub synced_at: u64,
+    /// Total size of the synced folder, from the engine's last round.
+    pub folder_bytes: u64,
 }
 
 impl AppSnapshot {
@@ -311,6 +360,7 @@ impl Default for AppSnapshot {
             activity: VecDeque::new(),
             last_event_id: 0,
             synced_at: 0,
+            folder_bytes: 0,
         }
     }
 }
@@ -344,6 +394,8 @@ pub enum AppCommand {
         transfer: Transfer,
     },
     Activity(String),
+    /// Files and bytes in the synced folder.
+    FolderSize { files: u64, bytes: u64 },
     EngineFailed(String),
     #[cfg_attr(not(windows), allow(dead_code))] // Windows shell only
     Shutdown,
@@ -379,7 +431,11 @@ impl AppHandle {
 pub struct AppController;
 
 impl AppController {
-    pub fn start(initial: AppSnapshot) -> (AppHandle, Receiver<AppEvent>) {
+    pub fn start(mut initial: AppSnapshot) -> (AppHandle, Receiver<AppEvent>) {
+        // The list starts with the last 24 hours, kept on disk.
+        let history = crate::activity_log::trim();
+        let skip = history.len().saturating_sub(MAX_RECENT_ACTIVITY);
+        initial.activity = history.into_iter().skip(skip).collect();
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let shared = Arc::new(RwLock::new(initial.clone()));
@@ -403,7 +459,15 @@ fn run_controller(
 ) {
     while let Ok(command) = commands.recv() {
         let shutdown = matches!(command, AppCommand::Shutdown);
+        let before = state.last_event_id;
         reduce(&mut state, command, &events);
+        if state.last_event_id != before {
+            if let Some((at, line)) = state.activity.back() {
+                if crate::activity_log::is_finished(line) {
+                    crate::activity_log::append(*at, line);
+                }
+            }
+        }
         *shared
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = state.clone();
@@ -504,6 +568,10 @@ fn reduce(state: &mut AppSnapshot, command: AppCommand, events: &Sender<AppEvent
                 }
             }
         }
+        AppCommand::FolderSize { files, bytes } => {
+            state.local_files = files;
+            state.folder_bytes = bytes;
+        }
         AppCommand::EngineFailed(reason) => {
             state.hub_connected = false;
             state.connection = ConnectionState::ReconnectRequired { reason };
@@ -583,6 +651,20 @@ mod tests {
             parse_activity("Could not sync models/a.glb: stat failed"),
             Some(Activity::Failed { path: "models/a.glb", reason: "stat failed" })
         );
+    }
+
+    #[test]
+    fn folder_summary_groups_thousands() {
+        assert_eq!(folder_summary(1, 512), "1 file · 512 B");
+        assert_eq!(folder_summary(1234567, 0), "1,234,567 files · 0 B");
+    }
+
+    #[test]
+    fn finished_lines_are_kept() {
+        assert!(crate::activity_log::is_finished("Uploaded a.txt"));
+        assert!(crate::activity_log::is_finished("Could not sync a.txt: x"));
+        assert!(!crate::activity_log::is_finished("Uploading a.txt"));
+        assert!(!crate::activity_log::is_finished("Waiting to upload a.txt"));
     }
 
     #[test]

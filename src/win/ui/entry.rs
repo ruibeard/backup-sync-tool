@@ -170,6 +170,9 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_COMMAND => on_command(hwnd, wparam),
+        WM_CONTEXTMENU if HWND(wparam.0 as *mut _) == activity_list_hwnd(hwnd) => {
+            on_activity_context_menu(hwnd, lparam)
+        }
         WM_MEASUREITEM => on_measure_item(hwnd, lparam),
         WM_DRAWITEM => on_draw_item(lparam),
 

@@ -383,7 +383,7 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         crate::app::ConnectionState::ReconnectRequired { .. } => "Reconnect required".into(),
         crate::app::ConnectionState::Connecting => "Connecting…".into(),
         crate::app::ConnectionState::Connected => "Connected".into(),
-        crate::app::ConnectionState::Disconnected if paired => "Hub offline".into(),
+        crate::app::ConnectionState::Disconnected if paired => "Offline, retrying…".into(),
         crate::app::ConnectionState::Disconnected => "Not connected".into(),
     };
     let syncing = matches!(
@@ -414,6 +414,11 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         check_pct: app.checking_pct(),
         connecting: matches!(app.connection, crate::app::ConnectionState::Connecting),
         synced_at: app.synced_at,
+        folder_summary: if app.folder_bytes > 0 || app.local_files > 0 {
+            crate::app::folder_summary(app.local_files, app.folder_bytes)
+        } else {
+            String::new()
+        },
     }
 }
 
@@ -821,18 +826,20 @@ fn apply_status(shared: &Shared) {
                     "Backup Sync — syncing".into()
                 },
             )
-        } else if h.engine_running() {
+        } else if h.engine_running()
+            && matches!(app.connection, crate::app::ConnectionState::Disconnected)
+        {
+            (IconKind::Idle, "Backup Sync — offline, retrying".into())
+        } else if h.engine_running() && app.synced_at > 0 {
             (
                 IconKind::Complete,
                 format!(
-                    "Backup Sync — watching {}",
-                    if h.config.watch_folder.is_empty() {
-                        "(no folder)".into()
-                    } else {
-                        h.config.watch_folder.clone()
-                    }
+                    "Backup Sync — all synced · last sync {}",
+                    crate::app::time_label(app.synced_at)
                 ),
             )
+        } else if h.engine_running() {
+            (IconKind::Complete, "Backup Sync — checking".into())
         } else if h.is_configured() {
             (IconKind::Complete, "Backup Sync — configured".into())
         } else if h.is_paired() {

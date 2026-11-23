@@ -398,6 +398,7 @@ struct BridgeLayout {
     right_ico: RECT,
     right_name: RECT,
     left_path: RECT,
+    left_size: RECT,
     right_conn: RECT,
 }
 
@@ -467,6 +468,13 @@ fn bridge_layout_at(top: i32, inner_w: i32) -> BridgeLayout {
             right: mid - PAD,
             bottom: name_y + BRIDGE_PATH_H,
         },
+        // Folder size, on the same line as the server's "Connected".
+        left_size: RECT {
+            left: left_node_x,
+            top: path_y,
+            right: mid - PAD,
+            bottom: path_y + BRIDGE_CONN_LABEL_H,
+        },
         right_conn: RECT {
             left: mid + PAD,
             top: path_y,
@@ -500,8 +508,8 @@ const C_PROGRESS_TRACK: u32 = 0x00E0E0E0;
 const MIN_ACTIVITY_LIST_H: i32 = 152;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
 /// The list keeps the last 24 hours, up to this many rows.
-const MAX_ACTIVITY_ROWS: usize = 5000;
-const ACTIVITY_KEEP_SECS: u64 = 24 * 60 * 60;
+const MAX_ACTIVITY_ROWS: usize = crate::activity_log::MAX_ROWS;
+const ACTIVITY_KEEP_SECS: u64 = crate::activity_log::KEEP_SECS;
 const ACTIVITY_ROW_H_DONE: i32 = 30;
 const ACTIVITY_ROW_H_ACTIVE: i32 = 40;
 const ACTIVITY_ROW_H_ERROR: i32 = 48;

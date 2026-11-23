@@ -9,14 +9,14 @@ use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBorderType,
     NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlSize, NSControlStateValueOff,
     NSControlStateValueOn, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
-    NSImageScaling, NSImageView, NSLineBreakMode, NSProgressIndicator, NSProgressIndicatorStyle,
+    NSAutoresizingMaskOptions, NSImageScaling, NSImageView, NSLineBreakMode, NSMenu, NSMenuItem, NSProgressIndicator, NSProgressIndicatorStyle,
     NSControlTextEditingDelegate, NSScrollView, NSTableColumn, NSTableColumnResizingOptions,
     NSTableView, NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
     NSTableViewStyle, NSTextAlignment, NSTextField, NSTitlePosition, NSUnderlineStyle,
     NSUnderlineStyleAttributeName, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSAttributedString, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectProtocol,
+    NSArray, NSAttributedString, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectProtocol,
     NSInteger, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use std::cell::RefCell;
@@ -75,6 +75,8 @@ pub struct StatusSnapshot {
     pub connecting: bool,
     /// Unix time the folder was last fully in sync; 0 = not yet.
     pub synced_at: u64,
+    /// "1,234 files · 2.3 GB", or empty before the first count.
+    pub folder_summary: String,
 }
 
 type ActionFn = Arc<dyn Fn(StatusAction) + Send + Sync>;
@@ -103,6 +105,7 @@ struct Widgets {
     #[allow(dead_code)]
     target: Retained<StatusTarget>,
     watch: Retained<NSTextField>,
+    size: Retained<NSTextField>,
     server_icon: Retained<NSImageView>,
     server_title: Retained<NSTextField>,
     server_detail: Retained<NSTextField>,
@@ -177,6 +180,13 @@ define_class!(
         fn act_author(&self, _: Option<&AnyObject>) {
             fire(StatusAction::OpenAuthor);
         }
+        #[unsafe(method(actReveal:))]
+        fn act_reveal(&self, _: Option<&AnyObject>) {
+            let row = LIVE.with(|c| c.borrow().as_ref().map(|l| l.widgets.table.clickedRow()));
+            if let Some(row) = row.filter(|r| *r >= 0) {
+                reveal_row(row as usize);
+            }
+        }
         #[unsafe(method(actRow:))]
         fn act_row(&self, sender: Option<&AnyObject>) {
             let Some(sender) = sender else { return };
@@ -206,7 +216,7 @@ define_class!(
         ) -> Option<Retained<NSView>> {
             let mtm = self.mtm();
             let col = column.map(|c| c.identifier().to_string()).unwrap_or_default();
-            Some(Retained::into_super(Retained::into_super(cell(mtm, &col, row))))
+            Some(cell(mtm, &col, row))
         }
     }
 
@@ -248,8 +258,20 @@ fn fire(action: StatusAction) {
     }
 }
 
-/// One table cell: icon, label or status column of an activity row.
-fn cell(mtm: MainThreadMarker, col: &str, row: NSInteger) -> Retained<NSTextField> {
+/// One table cell, centered in the row height.
+fn cell(mtm: MainThreadMarker, col: &str, row: NSInteger) -> Retained<NSView> {
+    let f = cell_text(mtm, col, row);
+    let h = f.fittingSize().height.ceil();
+    let wrap = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 100.0, ROW_H));
+    wrap.setAutoresizesSubviews(true);
+    f.setFrame(rect(0.0, ((ROW_H - h) / 2.0).floor(), 100.0, h));
+    f.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    wrap.addSubview(&f);
+    wrap
+}
+
+/// The text of one cell: icon, label or time column of an activity row.
+fn cell_text(mtm: MainThreadMarker, col: &str, row: NSInteger) -> Retained<NSTextField> {
     let r = ROWS.with(|rows| rows.borrow().get(row.max(0) as usize).cloned());
     let f = NSTextField::labelWithString(&NSString::from_str(""), mtm);
     f.setFont(Some(&NSFont::systemFontOfSize(12.0)));
@@ -274,10 +296,7 @@ fn cell(mtm: MainThreadMarker, col: &str, row: NSInteger) -> Retained<NSTextFiel
         f.setTextColor(Some(&tint));
     } else if col == "time" {
         if let Some(at) = r.at {
-            f.setStringValue(&NSString::from_str(&crate::app::activity_time_label(
-                at,
-                local_offset_secs(),
-            )));
+            f.setStringValue(&NSString::from_str(&crate::app::time_label(at)));
         }
         f.setFont(Some(&NSFont::systemFontOfSize(11.0)));
         f.setAlignment(NSTextAlignment::Right);
@@ -337,11 +356,6 @@ fn rows_from(lines: &[(u64, String)]) -> Vec<Row> {
     rows
 }
 
-/// Local time minus UTC, in seconds.
-fn local_offset_secs() -> i64 {
-    objc2_foundation::NSTimeZone::localTimeZone().secondsFromGMT() as i64
-}
-
 fn failed_label(name: &str, reason: &str) -> String {
     if reason.is_empty() {
         format!("Could not sync {name}")
@@ -356,23 +370,35 @@ fn file_name(path: &str) -> &str {
 
 /// Open the file of a row. If it is gone, open the nearest folder that exists.
 fn open_row(row: usize) {
-    let Some(rel) = ROWS.with(|r| r.borrow().get(row).and_then(|r| r.path.clone())) else {
-        return;
-    };
+    if let Some(url) = row_url(row) {
+        let _ = objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+    }
+}
+
+/// Show the file of a row selected in Finder.
+fn reveal_row(row: usize) {
+    if let Some(url) = row_url(row) {
+        objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+    }
+}
+
+/// The file of a row. If it is gone, the nearest folder that exists.
+fn row_url(row: usize) -> Option<Retained<NSURL>> {
+    let rel = ROWS.with(|r| r.borrow().get(row).and_then(|r| r.path.clone()))?;
     let root = ROOT.with(|r| r.borrow().clone());
     if root.trim().is_empty() {
-        return;
+        return None;
     }
     let root = std::path::PathBuf::from(root.trim());
     let mut target = root.join(&rel);
     while !target.exists() {
         match target.parent() {
             Some(p) if p.starts_with(&root) => target = p.to_path_buf(),
-            _ => return,
+            _ => return None,
         }
     }
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&target.to_string_lossy()));
-    let _ = objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+    Some(NSURL::fileURLWithPath(&NSString::from_str(&target.to_string_lossy())))
 }
 
 pub fn is_open() -> bool {
@@ -493,6 +519,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     };
     set_text(&ui.watch, watch);
     ui.watch.setToolTip(Some(&NSString::from_str(watch)));
+    set_text(&ui.size, &s.folder_summary);
 
     let lower = s.server_status.to_ascii_lowercase();
     let (sym, tint, title, detail) = if s.connecting {
@@ -501,21 +528,21 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         } else {
             s.folder_label.as_str()
         };
-        ("shield", NSColor::secondaryLabelColor(), title, "Connecting…")
+        ("icloud", NSColor::secondaryLabelColor(), title, "Connecting…")
     } else if s.connected {
         let title = if s.folder_label.trim().is_empty() {
             "Backup destination"
         } else {
             s.folder_label.as_str()
         };
-        ("checkmark.shield.fill", crate::macos::brand::green(), title, "Connected")
+        ("checkmark.icloud.fill", crate::macos::brand::green(), title, "Connected")
     } else {
         let detail = if lower.contains("pair") || lower.contains("reconnect") || lower.contains("connecting") || lower.contains("offline") {
             s.server_status.as_str()
         } else {
             "Not connected"
         };
-        ("exclamationmark.shield.fill", NSColor::systemRedColor(), "Server", detail)
+        ("exclamationmark.icloud.fill", NSColor::systemRedColor(), "Server", detail)
     };
     if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(sym),
@@ -566,7 +593,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         &if all_synced && s.synced_at > 0 {
             format!(
                 "Last sync {}",
-                crate::app::activity_time_label(s.synced_at, local_offset_secs())
+                crate::app::time_label(s.synced_at)
             )
         } else if all_synced {
             String::new()
@@ -694,11 +721,15 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     server_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     root.addSubview(&server_icon);
 
-    let watch = label(mtm, "", rect(left_x, top(82.0, 18.0), col_w, 18.0), 12.0, false);
+    // Same two lines as the server side: the folder, then its size.
+    let watch = label(mtm, "", rect(left_x, top(80.0, 18.0), col_w, 18.0), 12.0, false);
     watch.setAlignment(NSTextAlignment::Center);
     watch.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-    watch.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&watch);
+    let size = label(mtm, "", rect(left_x, top(98.0, 16.0), col_w, 16.0), 12.0, false);
+    size.setAlignment(NSTextAlignment::Center);
+    size.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    root.addSubview(&size);
 
     let server_title = label(mtm, "Server", rect(right_x, top(80.0, 18.0), col_w, 18.0), 13.0, true);
     server_title.setAlignment(NSTextAlignment::Center);
@@ -791,6 +822,19 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         table.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject)));
         table.setDoubleAction(Some(sel!(actRow:)));
     }
+    // Right-click a row: show the file in Finder.
+    let menu = NSMenu::new(mtm);
+    let reveal = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Show in Finder"),
+            Some(sel!(actReveal:)),
+            &NSString::from_str(""),
+        )
+    };
+    unsafe { reveal.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject))) };
+    menu.addItem(&reveal);
+    unsafe { table.setMenu(Some(&menu)) };
     scroll.setDocumentView(Some(&table as &NSView));
     root.addSubview(&scroll);
 
@@ -856,6 +900,7 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         window,
         target,
         watch,
+        size,
         server_icon,
         server_title,
         server_detail,

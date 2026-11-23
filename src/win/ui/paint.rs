@@ -289,6 +289,7 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
     let right_ico = offset_rect_x(layout.right_ico, br.left);
     let right_name = offset_rect_x(layout.right_name, br.left);
     let left_path = offset_rect_x(layout.left_path, br.left);
+    let left_size = offset_rect_x(layout.left_size, br.left);
     let right_conn = offset_rect_x(layout.right_conn, br.left);
 
     round_rect_color(hdc, &left_tile, C_BRIDGE_ICO_BG, C_BRIDGE_ICO_BORDER, 8);
@@ -314,10 +315,8 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
         &bridge_server_name(st),
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
-    let conn_color = if is_paired(&st.config) && !st.config.customer.trim().is_empty() {
-        C_BRIDGE_PATH_TXT
-    } else if st.bridge_conn_ok {
-        C_BRIDGE_CONN_OK
+    let conn_color = if st.bridge_conn_ok || st.connecting {
+        C_STATUS_MUTED
     } else {
         C_BRIDGE_CONN_FAIL
     };
@@ -336,6 +335,16 @@ unsafe fn draw_sync_bridge(hdc: HDC, br: &RECT, st: &WndState) {
         &bridge_pc_path(st),
         DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
     );
+    let app = st.app.snapshot();
+    if app.local_files > 0 || app.folder_bytes > 0 {
+        SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
+        draw_text_w(
+            hdc,
+            &left_size,
+            &crate::app::folder_summary(app.local_files, app.folder_bytes),
+            DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+    }
 
     let divider = RECT {
         left: br.left,

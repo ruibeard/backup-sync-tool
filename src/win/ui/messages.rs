@@ -28,7 +28,7 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
             UiSyncState::Syncing => format!("Syncing {} file(s)...", snapshot.need_files),
             UiSyncState::Idle if snapshot.hub_connected => "All synced".into(),
             _ if st.connecting => "Connecting...".into(),
-            UiSyncState::Idle => "Hub offline".into(),
+            UiSyncState::Idle => "Offline, retrying...".into(),
         };
         // Every line added since the last snapshot, oldest first.
         let fresh = snapshot.last_event_id.saturating_sub(st.last_event_id) as usize;
@@ -49,6 +49,8 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
     set_status_strip_connection(hwnd);
     update_sync_footer(hwnd, state as usize, new_activity.1);
     let _ = InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_progress_rect), TRUE);
+    // The folder size sits under the folder path.
+    let _ = InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_rect), TRUE);
     LRESULT(0)
 }
 
@@ -57,9 +59,16 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
 unsafe fn set_tray_idle(hwnd: HWND) {
     let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _);
     let hicon = LoadIconW(hi, w!("APP_ICON_IDLE")).unwrap_or_default();
-    let text = &stmut(hwnd).sync_status_text;
+    let st = stmut(hwnd);
+    let text = &st.sync_status_text;
+    let synced_at = st.app.snapshot().synced_at;
     let tip = if text.is_empty() {
         "Backup Sync Tool".to_string()
+    } else if text == "All synced" && synced_at > 0 {
+        format!(
+            "Backup Sync Tool - All synced, last sync {}",
+            crate::app::time_label(synced_at)
+        )
     } else {
         format!("Backup Sync Tool - {text}")
     };

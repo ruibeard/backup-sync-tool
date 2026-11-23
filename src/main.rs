@@ -2,6 +2,7 @@
 // #![windows_subsystem = "windows"] suppresses the console window on release builds.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod activity_log;
 mod app;
 mod config;
 mod logs;

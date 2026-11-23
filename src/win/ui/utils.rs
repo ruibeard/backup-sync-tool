@@ -21,14 +21,17 @@ unsafe fn update_bridge_display(hwnd: HWND) {
     let is_syncing = st.sync_status_state == UiSyncState::Syncing as usize;
 
     st.bridge_conn_ok = paired && st.connected && !auth_fail;
+    // The name sits above; this line says how the link is (as on macOS).
     st.bridge_conn_label = if !paired {
         "Not connected".to_string()
-    } else if !st.config.customer.trim().is_empty() {
-        st.config.customer.trim().to_string()
     } else if auth_fail {
-        "Control plane unavailable".to_string()
+        "Reconnect required".to_string()
+    } else if st.bridge_conn_ok {
+        "Connected".to_string()
+    } else if st.connecting {
+        "Connecting...".to_string()
     } else {
-        "Control plane unavailable".to_string()
+        "Offline, retrying...".to_string()
     };
 
     st.bridge_sync_head = if st.config.sync_paused {

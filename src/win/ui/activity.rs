@@ -5,87 +5,13 @@ unsafe fn draw_activity_text(hdc: HDC, rc: &mut RECT, text: &str, format: DRAW_T
 
 use crate::app::unix_now;
 
-/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-/// Local time minus UTC, in seconds.
-fn local_offset_secs() -> i64 {
-    use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
-    let secs = |t: windows::Win32::Foundation::SYSTEMTIME| {
-        days_from_civil(t.wYear as i64, t.wMonth as i64, t.wDay as i64) * 86_400
-            + t.wHour as i64 * 3600
-            + t.wMinute as i64 * 60
-            + t.wSecond as i64
-    };
-    unsafe { secs(GetLocalTime()) - secs(GetSystemTime()) }
-}
-
 fn activity_time_label(at: u64) -> String {
-    crate::app::activity_time_label(at, local_offset_secs())
-}
-
-/// Rolling log of finished rows: `<unix secs>\t<activity line>`.
-fn activity_history_path() -> std::path::PathBuf {
-    crate::paths::app_support_dir().join("activity.log")
-}
-
-/// Rows written since the file was last trimmed to 24 hours.
-static ACTIVITY_APPENDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Lines from the last 24 hours, oldest first.
-fn read_activity_history() -> Vec<(u64, String)> {
-    let cutoff = unix_now().saturating_sub(ACTIVITY_KEEP_SECS);
-    let text = std::fs::read_to_string(activity_history_path()).unwrap_or_default();
-    let mut lines: Vec<(u64, String)> = text
-        .lines()
-        .filter_map(|l| {
-            let (at, msg) = l.split_once('\t')?;
-            Some((at.parse().ok()?, msg.to_string()))
-        })
-        .filter(|(at, _)| *at >= cutoff)
-        .collect();
-    let keep = lines.len().saturating_sub(MAX_ACTIVITY_ROWS);
-    lines.drain(..keep);
-    lines
-}
-
-/// Rewrite the file with the last 24 hours only.
-fn trim_activity_history(lines: &[(u64, String)]) {
-    let path = activity_history_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let text: String = lines.iter().map(|(at, msg)| format!("{at}\t{msg}\n")).collect();
-    let _ = std::fs::write(path, text);
-    ACTIVITY_APPENDS.store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn append_activity_history(at: u64, message: &str) {
-    use std::io::Write;
-    let path = activity_history_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(f, "{at}\t{}", message.replace(['\n', '\r'], " "));
-    }
-    if ACTIVITY_APPENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1000 {
-        trim_activity_history(&read_activity_history());
-    }
+    crate::app::time_label(at)
 }
 
 /// Fill the list from the file at startup, newest first.
 unsafe fn load_activity_history(hwnd: HWND) {
-    let lines = read_activity_history();
-    trim_activity_history(&lines);
-    for (at, msg) in &lines {
+    for (at, msg) in &crate::activity_log::read() {
         if let Some((key, row)) = row_from_log_message(msg, *at) {
             insert_activity_row(stmut(hwnd), key.as_deref(), row);
         }
@@ -235,9 +161,6 @@ unsafe fn apply_activity_log(hwnd: HWND, at: u64, message: &str) {
     let Some((key, row)) = row_from_log_message(message, at) else {
         return;
     };
-    if row.at.is_some() {
-        append_activity_history(at, message);
-    }
     insert_activity_row(stmut(hwnd), key.as_deref(), row);
     refresh_activity_listbox(hwnd);
 }
@@ -483,6 +406,87 @@ unsafe fn on_draw_activity_item(lp: LPARAM) -> LRESULT {
     LRESULT(1)
 }
 
+/// The file of an activity row, or its nearest folder if the file is gone.
+unsafe fn activity_row_target(hwnd: HWND, idx: usize) -> Option<std::path::PathBuf> {
+    let st = stmut(hwnd);
+    let rel = st.activity_rows.get(idx).and_then(|r| r.path.clone())?;
+    let root = st.config.watch_folder.trim().to_string();
+    if root.is_empty() {
+        return None;
+    }
+    let mut target = Path::new(&root).join(rel.replace('/', "\\"));
+    while !target.exists() {
+        match target.parent() {
+            Some(p) if p.starts_with(&root) => target = p.to_path_buf(),
+            _ => return None,
+        }
+    }
+    Some(target)
+}
+
+/// Right-click on an activity row: "Show in Explorer" selects the file.
+unsafe fn on_activity_context_menu(hwnd: HWND, lp: LPARAM) -> LRESULT {
+    let hlb = activity_list_hwnd(hwnd);
+    let mut pt = POINT {
+        x: (lp.0 & 0xFFFF) as i16 as i32,
+        y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32,
+    };
+    let idx = if pt.x == -1 && pt.y == -1 {
+        // Keyboard (Shift+F10): use the selected row, menu at the cursor.
+        let _ = GetCursorPos(&mut pt);
+        SendMessageW(hlb, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0
+    } else {
+        let mut client = pt;
+        let _ = ScreenToClient(hlb, &mut client);
+        let packed = (client.x as u16 as u32) | ((client.y as u16 as u32) << 16);
+        let hit = SendMessageW(hlb, LB_ITEMFROMPOINT, WPARAM(0), LPARAM(packed as isize)).0;
+        if (hit >> 16) & 0xFFFF != 0 {
+            return LRESULT(0);
+        }
+        let idx = hit & 0xFFFF;
+        SendMessageW(hlb, LB_SETCURSEL, WPARAM(idx as usize), LPARAM(0));
+        idx
+    };
+    if idx < 0 {
+        return LRESULT(0);
+    }
+    let Some(target) = activity_row_target(hwnd, idx as usize) else {
+        return LRESULT(0);
+    };
+    const ID_SHOW: u32 = 1;
+    let Ok(menu) = CreatePopupMenu() else {
+        return LRESULT(0);
+    };
+    let _ = AppendMenuW(menu, MF_STRING, ID_SHOW as usize, w!("Show in Explorer"));
+    let cmd = TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON | TPM_RETURNCMD,
+        pt.x,
+        pt.y,
+        Some(0),
+        hwnd,
+        None,
+    );
+    let _ = DestroyMenu(menu);
+    if cmd.0 as u32 == ID_SHOW {
+        let path = target.to_string_lossy().to_string();
+        let args = if target.is_file() {
+            format!("/select,\"{path}\"")
+        } else {
+            format!("\"{path}\"")
+        };
+        let _ = windows::Win32::UI::Shell::ShellExecuteW(
+            Some(hwnd),
+            w!("open"),
+            w!("explorer.exe"),
+            &hstring(&args),
+            None,
+            SW_SHOWNORMAL,
+        );
+    }
+    LRESULT(0)
+}
+
 /// Double-click on an activity row: open that file, or its folder if the file is gone.
 unsafe fn open_activity_row(hwnd: HWND) {
     let hlb = activity_list_hwnd(hwnd);
@@ -490,25 +494,9 @@ unsafe fn open_activity_row(hwnd: HWND) {
     if idx < 0 {
         return;
     }
-    let st = stmut(hwnd);
-    let Some(rel) = st
-        .activity_rows
-        .get(idx as usize)
-        .and_then(|r| r.path.clone())
-    else {
+    let Some(target) = activity_row_target(hwnd, idx as usize) else {
         return;
     };
-    let root = st.config.watch_folder.trim().to_string();
-    if root.is_empty() {
-        return;
-    }
-    let mut target = Path::new(&root).join(rel.replace('/', "\\"));
-    while !target.exists() {
-        match target.parent() {
-            Some(p) if p.starts_with(&root) => target = p.to_path_buf(),
-            _ => return,
-        }
-    }
     let _ = windows::Win32::UI::Shell::ShellExecuteW(
         Some(hwnd),
         w!("open"),

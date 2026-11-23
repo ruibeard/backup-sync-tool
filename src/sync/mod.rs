@@ -141,11 +141,16 @@ impl Drop for SyncEngine {
 struct Reporter {
     tx: Sender<AppCommand>,
     last: Option<(bool, &'static str, u64, u64, u64, Transfer)>,
+    last_size: Option<(u64, u64)>,
 }
 
 impl Reporter {
     fn new(tx: Sender<AppCommand>) -> Self {
-        Self { tx, last: None }
+        Self {
+            tx,
+            last: None,
+            last_size: None,
+        }
     }
 
     /// True when the window last showed "All synced".
@@ -200,6 +205,22 @@ impl Reporter {
         for path in paths {
             let _ = self.tx.send(AppCommand::Activity(format!("{verb} {path}")));
         }
+    }
+
+    /// Files and bytes in the folder, sent only when they change.
+    fn folder_size(&mut self, state: &SyncState) {
+        let size = (
+            state.files.len() as u64,
+            state.files.values().map(|f| f.size).sum(),
+        );
+        if self.last_size == Some(size) {
+            return;
+        }
+        self.last_size = Some(size);
+        let _ = self.tx.send(AppCommand::FolderSize {
+            files: size.0,
+            bytes: size.1,
+        });
     }
 
     fn failed(&mut self, reason: &str) {
@@ -265,6 +286,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
     let mut state = SyncState::load_for(&state_path, &ctx.root.to_string_lossy());
     let dirty = Arc::new(AtomicBool::new(true));
     let _watcher = FolderWatcher::start(&ctx.root, Arc::clone(&dirty));
+    reporter.folder_size(&state);
 
     while !ctx.stopping() {
         if dirty.load(Ordering::Acquire) {
@@ -280,6 +302,7 @@ fn run_loop(cfg: Config, stop: Arc<AtomicBool>, mut reporter: Reporter) {
                         logs::append(&format!("sync: state save failed: {err}"));
                     }
                 }
+                reporter.folder_size(&state);
                 reporter.status(true, "idle", state.files.len(), 0, 0, Transfer::default());
                 if outcome.retry {
                     dirty.store(true, Ordering::Release);
