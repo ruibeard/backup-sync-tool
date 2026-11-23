@@ -39,7 +39,7 @@ fn top_y(y: f64, h: f64) -> f64 {
 }
 
 /// Room for "Yesterday 23:10".
-const TIME_W: f64 = 96.0;
+const TIME_W: f64 = 104.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusAction {
@@ -823,7 +823,7 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     // Room for the scroller and the cell spacing of the plain style.
     for (id, w) in [
         ("icon", 22.0),
-        ("label", inner - 22.0 - TIME_W - 48.0),
+        ("label", inner - 22.0 - TIME_W - 64.0),
         ("time", TIME_W),
     ] {
         let col = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &NSString::from_str(id));
