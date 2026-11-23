@@ -786,8 +786,8 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     more.setRefusesFirstResponder(true);
     more.setFrame(rect(W - PAD - more_w, top(20.0, more_w), more_w, more_w));
     if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("ellipsis.circle"),
-        Some(&NSString::from_str("More")),
+        &NSString::from_str("gearshape"),
+        Some(&NSString::from_str("Settings")),
     ) {
         more.setImage(Some(&img));
     }
