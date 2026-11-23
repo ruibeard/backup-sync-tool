@@ -44,11 +44,26 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
         SetTimer(hwnd, IDT_SYNC_ANIM, SYNC_ANIM_MS, None);
     } else {
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
+        set_tray_idle(hwnd);
     }
     set_status_strip_connection(hwnd);
     update_sync_footer(hwnd, state as usize, new_activity.1);
     let _ = InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_progress_rect), TRUE);
     LRESULT(0)
+}
+
+/// The spinner timer sets the tray icon and tip only while busy. When the
+/// work stops, put back the still icon and the current status text.
+unsafe fn set_tray_idle(hwnd: HWND) {
+    let hi = HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE) as *mut _);
+    let hicon = LoadIconW(hi, w!("APP_ICON_IDLE")).unwrap_or_default();
+    let text = &stmut(hwnd).sync_status_text;
+    let tip = if text.is_empty() {
+        "Backup Sync Tool".to_string()
+    } else {
+        format!("Backup Sync Tool - {text}")
+    };
+    tray::set_tray_icon_and_tip(hwnd, hicon, &tip);
 }
 
 unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
@@ -61,6 +76,7 @@ unsafe fn on_timer(hwnd: HWND, wp: WPARAM) -> LRESULT {
         && st.sync_status_state != UiSyncState::Syncing as usize
     {
         let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
+        set_tray_idle(hwnd);
         return LRESULT(0);
     }
 

@@ -747,8 +747,6 @@ unsafe fn layout_main(hwnd: HWND) {
     let startup_w = 154i32;
     let auto_update_x = startup_x + startup_w + 12;
     let auto_update_w = 114i32;
-    let policy_x = auto_update_x + auto_update_w + 12;
-    let policy_w = (M + (*st).inner_w - policy_x).max(1);
 
     SetWindowPos(
         GetDlgItem(hwnd, IDC_START_WINDOWS as i32),
@@ -766,16 +764,6 @@ unsafe fn layout_main(hwnd: HWND) {
         auto_update_x,
         check_y,
         auto_update_w,
-        check_h,
-        SWP_NOZORDER,
-    )
-    .ok();
-    SetWindowPos(
-        GetDlgItem(hwnd, IDC_SERVER_DELETION_POLICY as i32),
-        None,
-        policy_x,
-        check_y,
-        policy_w,
         check_h,
         SWP_NOZORDER,
     )

@@ -150,10 +150,6 @@ unsafe fn on_create(hwnd: HWND) {
         hfont_bridge,
         hfont_link,
     );
-    let _ = SetWindowTextW(
-        GetDlgItem(hwnd, IDC_SERVER_DELETION_POLICY as i32),
-        &hstring("Changes and deletions sync across devices"),
-    );
     apply_server_readonly(hwnd);
     update_pair_button_enabled(hwnd);
     if !is_paired(&cfg) && !cfg.watch_folder.trim().is_empty() {
@@ -373,7 +369,7 @@ unsafe fn build_ui(
             hwnd,
             hi,
             IDC_ACTIVITY_HDR,
-            "CURRENT ACTIVITY",
+            "ACTIVITY",
             M,
             y,
             INNER_W - sub_w - PAD,
@@ -413,7 +409,7 @@ unsafe fn build_ui(
             lb_h - 2,
             hf_small,
         );
-        refresh_activity_listbox(hwnd);
+        load_activity_history(hwnd);
         y += lb_h;
         st.post_list_gap = PAD;
         y += PAD;
@@ -469,8 +465,6 @@ unsafe fn build_ui(
         let startup_w = 154i32;
         let auto_update_x = startup_x + startup_w + 12;
         let auto_update_w = 114i32;
-        let policy_x = auto_update_x + auto_update_w + 12;
-        let policy_w = (M + INNER_W - policy_x).max(1);
 
         mkcheck(
             hwnd,
@@ -495,18 +489,6 @@ unsafe fn build_ui(
             check_h,
             hf,
             cfg.auto_update,
-        );
-        mkstatic_align(
-            hwnd,
-            hi,
-            IDC_SERVER_DELETION_POLICY,
-            "Changes and deletions sync across devices",
-            policy_x,
-            check_y,
-            policy_w,
-            check_h,
-            hf_small,
-            SS_RIGHT,
         );
 
         y += row_h;

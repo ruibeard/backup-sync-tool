@@ -307,7 +307,6 @@ const IDC_SYNC_ETA: u16 = 219;
 const IDC_REFRESH_REMOTE: u16 = 221;
 const IDC_PAIR_API_BASE: u16 = 222;
 const IDC_PAIR_API_LABEL: u16 = 223;
-const IDC_SERVER_DELETION_POLICY: u16 = 224;
 
 const WM_APP_LOG: u32 = WM_APP + 10;
 const WM_APP_CONNECTED: u32 = WM_APP + 11;
@@ -500,13 +499,15 @@ const C_PROGRESS_TRACK: u32 = 0x00E0E0E0;
 
 const MIN_ACTIVITY_LIST_H: i32 = 152;
 const INNER_W: i32 = WIN_W - M * 2; // usable inner width
-const MAX_ACTIVITY_ROWS: usize = 200;
+/// The list keeps the last 24 hours, up to this many rows.
+const MAX_ACTIVITY_ROWS: usize = 5000;
+const ACTIVITY_KEEP_SECS: u64 = 24 * 60 * 60;
 const ACTIVITY_ROW_H_DONE: i32 = 30;
 const ACTIVITY_ROW_H_ACTIVE: i32 = 40;
 const ACTIVITY_ROW_H_ERROR: i32 = 48;
 const ACTIVITY_PAD_LEFT: i32 = 12;
 const ACTIVITY_PAD_RIGHT: i32 = 10;
-const ACTIVITY_STATUS_W: i32 = 78;
+const ACTIVITY_STATUS_W: i32 = 96;
 const C_PROGRESS_MINI: u32 = 0x00FFA500; // #00A5FF BGR
 const C_ACTIVITY_TRACK: u32 = 0x00E8E8E8;
 
@@ -527,8 +528,8 @@ struct ActivityRow {
     detail: Option<String>,
     /// Match key for replacing an in-flight sync row.
     replace_key: Option<String>,
-    /// Local time label for info rows (e.g. "10:42 AM").
-    time_label: Option<String>,
+    /// Unix seconds when the row finished; `None` while it runs.
+    at: Option<u64>,
     /// Path under the watch folder; double-click opens it.
     path: Option<String>,
     /// Up / down / delete arrow.
@@ -647,7 +648,7 @@ fn bridge_section_total_h(st: &WndState) -> i32 {
 }
 
 fn activity_subhdr_text() -> String {
-    format!("This run · up to {MAX_ACTIVITY_ROWS}")
+    "Last 24 hours · newest first".to_string()
 }
 
 struct PairResult {

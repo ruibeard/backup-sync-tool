@@ -3,28 +3,109 @@ unsafe fn draw_activity_text(hdc: HDC, rc: &mut RECT, text: &str, format: DRAW_T
     DrawTextW(hdc, &mut wide, rc, format);
 }
 
-fn activity_time_label_now() -> String {
-    use windows::Win32::System::SystemInformation::GetLocalTime;
-    unsafe {
-        let st = GetLocalTime();
-        let h = st.wHour;
-        let m = st.wMinute;
-        let (h12, suffix) = match h {
-            0 => (12, "AM"),
-            1..=11 => (h, "AM"),
-            12 => (12, "PM"),
-            _ => (h - 12, "PM"),
-        };
-        format!("{h12}:{m:02} {suffix}")
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Local time minus UTC, in seconds.
+fn local_offset_secs() -> i64 {
+    use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+    let secs = |t: windows::Win32::Foundation::SYSTEMTIME| {
+        days_from_civil(t.wYear as i64, t.wMonth as i64, t.wDay as i64) * 86_400
+            + t.wHour as i64 * 3600
+            + t.wMinute as i64 * 60
+            + t.wSecond as i64
+    };
+    unsafe { secs(GetLocalTime()) - secs(GetSystemTime()) }
+}
+
+/// "14:05" for today, "Yesterday 23:10" for older rows.
+fn activity_time_label(at: u64) -> String {
+    let offset = local_offset_secs();
+    let local = at as i64 + offset;
+    let today = (unix_now() as i64 + offset).div_euclid(86_400);
+    let day = local.div_euclid(86_400);
+    let mins = local.rem_euclid(86_400) / 60;
+    let clock = format!("{:02}:{:02}", mins / 60, mins % 60);
+    if day == today {
+        clock
+    } else {
+        format!("Yesterday {clock}")
     }
 }
 
-fn activity_time_for_kind(kind: ActivityKind) -> Option<String> {
-    if kind == ActivityKind::Info {
-        Some(activity_time_label_now())
-    } else {
-        None
+/// Rolling log of finished rows: `<unix secs>\t<activity line>`.
+fn activity_history_path() -> std::path::PathBuf {
+    crate::paths::app_support_dir().join("activity.log")
+}
+
+/// Rows written since the file was last trimmed to 24 hours.
+static ACTIVITY_APPENDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Lines from the last 24 hours, oldest first.
+fn read_activity_history() -> Vec<(u64, String)> {
+    let cutoff = unix_now().saturating_sub(ACTIVITY_KEEP_SECS);
+    let text = std::fs::read_to_string(activity_history_path()).unwrap_or_default();
+    let mut lines: Vec<(u64, String)> = text
+        .lines()
+        .filter_map(|l| {
+            let (at, msg) = l.split_once('\t')?;
+            Some((at.parse().ok()?, msg.to_string()))
+        })
+        .filter(|(at, _)| *at >= cutoff)
+        .collect();
+    let keep = lines.len().saturating_sub(MAX_ACTIVITY_ROWS);
+    lines.drain(..keep);
+    lines
+}
+
+/// Rewrite the file with the last 24 hours only.
+fn trim_activity_history(lines: &[(u64, String)]) {
+    let path = activity_history_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
+    let text: String = lines.iter().map(|(at, msg)| format!("{at}\t{msg}\n")).collect();
+    let _ = std::fs::write(path, text);
+    ACTIVITY_APPENDS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn append_activity_history(at: u64, message: &str) {
+    use std::io::Write;
+    let path = activity_history_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{at}\t{}", message.replace(['\n', '\r'], " "));
+    }
+    if ACTIVITY_APPENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1000 {
+        trim_activity_history(&read_activity_history());
+    }
+}
+
+/// Fill the list from the file at startup, newest first.
+unsafe fn load_activity_history(hwnd: HWND) {
+    let lines = read_activity_history();
+    trim_activity_history(&lines);
+    for (at, msg) in &lines {
+        if let Some((key, row)) = row_from_log_message(msg, *at) {
+            insert_activity_row(stmut(hwnd), key.as_deref(), row);
+        }
+    }
+    refresh_activity_listbox(hwnd);
 }
 
 fn activity_row_height(row: &ActivityRow) -> i32 {
@@ -44,7 +125,8 @@ fn activity_icon_char(row: &ActivityRow) -> &'static str {
     }
 }
 
-fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> {
+/// `at` is when the line arrived; rows still running get no time.
+fn row_from_log_message(message: &str, at: u64) -> Option<(Option<String>, ActivityRow)> {
     use crate::app::Activity;
     match crate::app::parse_activity(message)? {
         Activity::File { dir, done, path } => {
@@ -61,7 +143,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                     pct: None,
                     detail: None,
                     replace_key: Some(key),
-                    time_label: None,
+                    at: done.then_some(at),
                     path: Some(path.to_string()),
                     icon: dir.icon(),
                 },
@@ -77,7 +159,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                     pct: None,
                     detail: None,
                     replace_key: Some(key),
-                    time_label: None,
+                    at: None,
                     path: Some(path.to_string()),
                     icon: dir.icon(),
                 },
@@ -98,7 +180,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                     pct: None,
                     detail: None,
                     replace_key: Some(key),
-                    time_label: None,
+                    at: Some(at),
                     path: Some(path.to_string()),
                     icon: "!",
                 },
@@ -112,7 +194,7 @@ fn row_from_log_message(message: &str) -> Option<(Option<String>, ActivityRow)> 
                 pct: None,
                 detail: None,
                 replace_key: None,
-                time_label: activity_time_for_kind(ActivityKind::Info),
+                at: Some(at),
                 path: None,
                 icon: "i",
             },
@@ -138,55 +220,42 @@ unsafe fn refresh_activity_listbox(hwnd: HWND) {
     let _ = InvalidateRect(hlb, None, TRUE);
 }
 
-unsafe fn push_activity_row(hwnd: HWND, row: ActivityRow) {
-    let st = stmut(hwnd);
+/// Newest first. A finished row moves to the top, so the list reads in the
+/// order things ended; a running row updates in place.
+fn insert_activity_row(st: &mut WndState, key: Option<&str>, row: ActivityRow) {
     if st.activity_show_empty {
         st.activity_show_empty = false;
         st.activity_rows.clear();
     }
-    st.activity_rows.insert(0, row);
-    if st.activity_rows.len() > MAX_ACTIVITY_ROWS {
-        st.activity_rows.truncate(MAX_ACTIVITY_ROWS);
-    }
-    refresh_activity_listbox(hwnd);
-}
-
-unsafe fn replace_activity_row(hwnd: HWND, replace_key: &str, row: ActivityRow) {
-    let st = stmut(hwnd);
-    st.activity_show_empty = false;
-    if let Some(idx) = st
-        .activity_rows
-        .iter()
-        .position(|r| r.replace_key.as_deref() == Some(replace_key))
-    {
-        st.activity_rows[idx] = row;
-    } else {
-        st.activity_rows.insert(0, row);
-        if st.activity_rows.len() > MAX_ACTIVITY_ROWS {
-            st.activity_rows.truncate(MAX_ACTIVITY_ROWS);
+    let old = key.and_then(|k| {
+        st.activity_rows
+            .iter()
+            .position(|r| r.replace_key.as_deref() == Some(k))
+    });
+    match old {
+        Some(idx) if row.at.is_none() => st.activity_rows[idx] = row,
+        Some(idx) => {
+            st.activity_rows.remove(idx);
+            st.activity_rows.insert(0, row);
         }
+        None => st.activity_rows.insert(0, row),
     }
-    refresh_activity_listbox(hwnd);
+    // Drop finished rows older than 24 hours; running rows stay.
+    let cutoff = unix_now().saturating_sub(ACTIVITY_KEEP_SECS);
+    st.activity_rows.retain(|r| r.at.is_none_or(|at| at >= cutoff));
+    st.activity_rows.truncate(MAX_ACTIVITY_ROWS);
 }
-
 
 unsafe fn apply_activity_log(hwnd: HWND, message: &str) {
-    let Some((replace_key, row)) = row_from_log_message(message) else {
+    let at = unix_now();
+    let Some((key, row)) = row_from_log_message(message, at) else {
         return;
     };
-    if row.kind == ActivityKind::Error {
-        push_activity_row(hwnd, row);
-        return;
+    if row.at.is_some() {
+        append_activity_history(at, message);
     }
-    if stmut(hwnd).activity_show_empty {
-        stmut(hwnd).activity_show_empty = false;
-        stmut(hwnd).activity_rows.clear();
-    }
-    if let Some(key) = replace_key {
-        replace_activity_row(hwnd, &key, row);
-    } else {
-        push_activity_row(hwnd, row);
-    }
+    insert_activity_row(stmut(hwnd), key.as_deref(), row);
+    refresh_activity_listbox(hwnd);
 }
 
 unsafe fn on_measure_item(hwnd: HWND, lp: LPARAM) -> LRESULT {
@@ -293,7 +362,7 @@ unsafe fn draw_activity_row(
 
     let mut label_rc = top_line;
     label_rc.left += 24;
-    label_rc.right = if show_bar || row.time_label.is_some() {
+    label_rc.right = if show_bar || row.at.is_some() {
         status_left - 4
     } else {
         top_line.right
@@ -372,7 +441,8 @@ unsafe fn draw_activity_row(
             FillRect(hdc, &fill, br_fill);
             let _ = DeleteObject(br_fill);
         }
-    } else if let Some(time) = row.time_label.as_deref() {
+    } else if let Some(at) = row.at {
+        let time = activity_time_label(at);
         let of_status = SelectObject(hdc, hf_status);
         SetTextColor(hdc, COLORREF(C_STATUS_MUTED));
         let mut time_rc = top_line;
@@ -381,7 +451,7 @@ unsafe fn draw_activity_row(
         draw_activity_text(
             hdc,
             &mut time_rc,
-            time,
+            &time,
             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
         SelectObject(hdc, of_status);

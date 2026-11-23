@@ -334,6 +334,8 @@ unsafe fn restart_sync_engine(hwnd: HWND) -> std::result::Result<(), String> {
         let st = stmut(hwnd);
         st.sync_status_text = "Paused".into();
         st.sync_status_state = UiSyncState::Idle as usize;
+        let _ = KillTimer(hwnd, IDT_SYNC_ANIM);
+        set_tray_idle(hwnd);
         logs::append("Sync not started: paused.");
         return Ok(());
     }
