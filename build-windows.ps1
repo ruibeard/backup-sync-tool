@@ -38,13 +38,11 @@ $ErrorActionPreference = 'Stop'
 
 $dump = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
 if (-not $dump) {
-  # Plain shells (remote, release.sh) have no VS Developer PATH; find dumpbin via vswhere.
-  $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-  if (Test-Path $vswhere) {
-    $vs = & $vswhere -latest -products * -property installationPath
-    $found = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -Last 1
-    if ($found) { $env:PATH = "$($found.DirectoryName);$env:PATH"; $dump = Get-Command dumpbin.exe -ErrorAction SilentlyContinue }
-  }
+  # Plain shells (remote, release.sh) have no VS Developer PATH; find dumpbin in the VS install.
+  $found = @('C:\Program Files (x86)\Microsoft Visual Studio', 'C:\Program Files\Microsoft Visual Studio') |
+    ForEach-Object { Get-ChildItem "$_\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue } |
+    Select-Object -Last 1
+  if ($found) { $env:PATH = "$($found.DirectoryName);$env:PATH"; $dump = Get-Command dumpbin.exe -ErrorAction SilentlyContinue }
 }
 if (-not $dump) { throw 'dumpbin.exe is required for the Win7 import audit; run from a VS Developer PowerShell' }
 $forbiddenImports = @(
