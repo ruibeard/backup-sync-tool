@@ -27,7 +27,7 @@ const W: f64 = 540.0;
 const H: f64 = 540.0;
 const PAD: f64 = 20.0;
 const COL_GAP: f64 = 16.0;
-const ACT_H: f64 = 300.0;
+const ACT_H: f64 = 322.0;
 const BTN_H: f64 = 28.0;
 const ROW_H: f64 = 24.0;
 /// Height of the bar and the detail line, hidden while idle.
@@ -125,6 +125,8 @@ struct Widgets {
     version: Retained<NSTextField>,
     update_btn: Retained<NSButton>,
     more: Retained<NSButton>,
+    list_sep: Retained<NSBox>,
+    empty: Retained<NSTextField>,
     more_menu: Retained<NSMenu>,
 }
 
@@ -657,7 +659,9 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     let cap_frame = rect(PAD, top_y(150.0 - shift, 16.0), 200.0, 16.0);
     if ui.caption.frame() != cap_frame {
         ui.caption.setFrame(cap_frame);
-        ui.scroll.setFrame(rect(PAD, top_y(172.0 - shift, ACT_H + shift), W - PAD * 2.0, ACT_H + shift));
+        ui.scroll.setFrame(rect(PAD, top_y(150.0 - shift, ACT_H + shift), W - PAD * 2.0, ACT_H + shift));
+        ui.list_sep.setFrame(rect(PAD, top_y(142.0 - shift, 1.0), W - PAD * 2.0, 1.0));
+        ui.empty.setFrame(rect(PAD, top_y(150.0 - shift + (ACT_H + shift) / 2.0 - 10.0, 20.0), W - PAD * 2.0, 20.0));
     }
     ui.detail.setHidden(!busy);
     ui.eta.setHidden(!busy);
@@ -673,6 +677,7 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
             true
         }
     });
+    ui.empty.setHidden(ROWS.with(|r| !r.borrow().is_empty()));
     if changed {
         ui.table.reloadData();
         // Rows move on every update: a kept selection would point at another file.
@@ -719,9 +724,17 @@ fn build(mtm: MainThreadMarker) -> Widgets {
 
     // —— Header: folder on the left, server on the right, "⋯" for actions ——
     let _ = (col_w, left_x, right_x);
-    let folder_icon = NSImageView::new(mtm);
+    // Click the folder to open it in Finder.
+    let folder_icon = NSButton::new(mtm);
+    folder_icon.setBordered(false);
+    folder_icon.setRefusesFirstResponder(true);
     folder_icon.setFrame(rect(PAD, top(18.0, 32.0), 32.0, 32.0));
     folder_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+    folder_icon.setToolTip(Some(&NSString::from_str("Open in Finder")));
+    unsafe {
+        folder_icon.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject)));
+        folder_icon.setAction(Some(sel!(actOpen:)));
+    }
     if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str("folder.fill"),
         Some(&NSString::from_str("Folder")),
@@ -831,11 +844,16 @@ fn build(mtm: MainThreadMarker) -> Widgets {
 
     // —— Activity ——
     let caption = label(mtm, "ACTIVITY · LAST 24 HOURS", rect(PAD, top(150.0, 16.0), 200.0, 16.0), 11.0, true);
-    caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    caption.setHidden(true);
+    let list_sep = NSBox::new(mtm);
+    list_sep.setBoxType(NSBoxType::Separator);
+    list_sep.setTitlePosition(NSTitlePosition::NoTitle);
+    list_sep.setFrame(rect(PAD, top(142.0, 1.0), inner, 1.0));
+    root.addSubview(&list_sep);
     root.addSubview(&caption);
 
     let scroll = NSScrollView::new(mtm);
-    scroll.setFrame(rect(PAD, top(172.0, ACT_H), inner, ACT_H));
+    scroll.setFrame(rect(PAD, top(150.0, ACT_H), inner, ACT_H));
     scroll.setHasVerticalScroller(true);
     scroll.setHasHorizontalScroller(false);
     scroll.setAutohidesScrollers(true);
@@ -882,9 +900,14 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     unsafe { table.setMenu(Some(&menu)) };
     scroll.setDocumentView(Some(&table as &NSView));
     root.addSubview(&scroll);
+    let empty = label(mtm, "No activity in the last 24 hours", rect(PAD, top(150.0 + ACT_H / 2.0 - 10.0, 20.0), inner, 20.0), 12.0, false);
+    empty.setAlignment(NSTextAlignment::Center);
+    empty.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+    empty.setHidden(true);
+    root.addSubview(&empty);
 
     // —— Footer ——
-    add_sep(&root, mtm, rect(PAD, top(172.0 + ACT_H + 16.0, 1.0), inner, 1.0));
+    add_sep(&root, mtm, rect(PAD, top(150.0 + ACT_H + 16.0, 1.0), inner, 1.0));
     let foot_y = 12.0;
     let version = label(
         mtm,
@@ -940,6 +963,8 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         update_btn,
         more,
         more_menu,
+        list_sep,
+        empty,
     }
 }
 
@@ -1017,9 +1042,9 @@ fn link_btn(
     b.setControlSize(NSControlSize::Small);
     b.setFrame(frame);
     // Underlined brand-green attributed title — reads as a real text link.
-    let font = NSFont::systemFontOfSize(12.0);
-    let green = NSColor::linkColor();
-    let underline = NSNumber::numberWithInteger(NSUnderlineStyle::Single.0);
+    let font = NSFont::systemFontOfSize(11.0);
+    let green = NSColor::secondaryLabelColor();
+    let underline = NSNumber::numberWithInteger(NSUnderlineStyle::None.0);
     let attrs: Retained<NSDictionary<NSString, AnyObject>> = unsafe {
         NSDictionary::from_slices(
             &[
