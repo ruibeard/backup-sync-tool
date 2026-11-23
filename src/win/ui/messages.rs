@@ -51,6 +51,13 @@ unsafe fn on_app_snapshot(hwnd: HWND, lp: LPARAM) -> LRESULT {
     let _ = InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_progress_rect), TRUE);
     // The folder size sits under the folder path.
     let _ = InvalidateRect(hwnd, Some(&stmut(hwnd).bridge_rect), TRUE);
+    // The band is one line while idle: lay out again when that changes.
+    let st = stmut(hwnd);
+    let band = st.bridge_progress_rect;
+    if bridge_show_sync_band(st) && band.bottom - band.top != sync_band_h(st) {
+        layout_main(hwnd);
+        let _ = InvalidateRect(hwnd, None, TRUE);
+    }
     LRESULT(0)
 }
 

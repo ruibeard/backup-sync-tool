@@ -455,6 +455,10 @@ unsafe fn draw_sync_band(hdc: HDC, rc: &RECT, st: &WndState) {
         }
         return;
     }
+    if !syncing && !checking {
+        // Paused, offline or not paired: one line, no bar.
+        return;
+    }
 
     let bar_y = rc.top + SYNC_BAND_HEAD_H + SYNC_BAND_HEAD_BAR_GAP;
     let track = RECT {

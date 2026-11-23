@@ -30,6 +30,14 @@ const COL_GAP: f64 = 16.0;
 const ACT_H: f64 = 200.0;
 const BTN_H: f64 = 28.0;
 const ROW_H: f64 = 24.0;
+/// Height of the bar and the detail line, hidden while idle.
+const BAND_EXTRA: f64 = 32.0;
+
+/// AppKit y (bottom-up) for a frame given top-down.
+fn top_y(y: f64, h: f64) -> f64 {
+    H - y - h
+}
+
 /// Room for "Yesterday 23:10".
 const TIME_W: f64 = 96.0;
 
@@ -116,6 +124,8 @@ struct Widgets {
     detail: Retained<NSTextField>,
     eta: Retained<NSTextField>,
     table: Retained<NSTableView>,
+    caption: Retained<NSTextField>,
+    scroll: Retained<NSScrollView>,
     login: Retained<NSButton>,
     auto_update: Retained<NSButton>,
     version: Retained<NSTextField>,
@@ -636,6 +646,17 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         String::new()
     };
     set_text(&ui.detail, &detail_text);
+    // While idle the band is one line: the list moves up into the space of
+    // the bar and the detail line.
+    let busy = moving || s.checking || s.connecting;
+    let shift = if busy { 0.0 } else { BAND_EXTRA };
+    let cap_frame = rect(PAD, top_y(250.0 - shift, 16.0), 200.0, 16.0);
+    if ui.caption.frame() != cap_frame {
+        ui.caption.setFrame(cap_frame);
+        ui.scroll.setFrame(rect(PAD, top_y(272.0 - shift, ACT_H + shift), W - PAD * 2.0, ACT_H + shift));
+    }
+    ui.detail.setHidden(!busy);
+    ui.eta.setHidden(!busy);
     set_text(&ui.eta, if moving { &s.eta } else { "" });
 
     let rows = rows_from(&s.activity_lines);
@@ -786,7 +807,7 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     root.addSubview(&eta);
 
     // —— Activity ——
-    let caption = label(mtm, "CURRENT ACTIVITY", rect(PAD, top(250.0, 16.0), 200.0, 16.0), 11.0, true);
+    let caption = label(mtm, "ACTIVITY · LAST 24 HOURS", rect(PAD, top(250.0, 16.0), 200.0, 16.0), 11.0, true);
     caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&caption);
 
@@ -851,16 +872,6 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         rect(PAD + 136.0, top(set_y + 12.0, 22.0), 120.0, 22.0),
     );
     root.addSubview(&auto_update);
-    let hint = label(
-        mtm,
-        "Changes and deletions sync across devices",
-        rect(W - PAD - 250.0, top(set_y + 15.0, 16.0), 250.0, 16.0),
-        11.0,
-        false,
-    );
-    hint.setAlignment(NSTextAlignment::Right);
-    hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
-    root.addSubview(&hint);
 
     let foot_y = 12.0;
     let version = label(
@@ -911,6 +922,8 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         detail,
         eta,
         table,
+        caption,
+        scroll,
         login,
         auto_update,
         version,

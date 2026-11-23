@@ -1099,9 +1099,9 @@ unsafe fn layout_bridge_section(
             left: M,
             top: y,
             right: M + inner_w,
-            bottom: y + SYNC_BAND_H,
+            bottom: y + sync_band_h(&*st),
         };
-        y += SYNC_BAND_H;
+        y += sync_band_h(&*st);
     } else {
         (*st).bridge_progress_rect = RECT::default();
     }

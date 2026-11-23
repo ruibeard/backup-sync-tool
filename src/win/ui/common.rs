@@ -646,6 +646,19 @@ fn bridge_syncing_progress(st: &WndState) -> bool {
         && st.sync_progress_total > 0
 }
 
+/// While idle the band is one line ("All synced · Last sync"); the bar and
+/// the detail line show only while checking or syncing.
+fn sync_band_h(st: &WndState) -> i32 {
+    let busy = st.sync_status_state == UiSyncState::Checking as usize
+        || st.sync_status_state == UiSyncState::Syncing as usize;
+    if busy {
+        SYNC_BAND_H
+    } else {
+        SYNC_BAND_HEAD_H
+    }
+}
+
+/// Room for the full band, so the window never grows when a sync starts.
 fn bridge_section_total_h(st: &WndState) -> i32 {
     let band = if bridge_show_sync_band(st) {
         SECT + SYNC_BAND_H
