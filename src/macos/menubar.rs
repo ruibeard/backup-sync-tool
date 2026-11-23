@@ -922,11 +922,14 @@ fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Ret
     let h = 48.0;
     let view = NSView::new(mtm);
     view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(MENU_W, h)));
+    // The menu stretches the row to its own width; the button stays at the edge.
+    view.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
 
     let open = NSButton::new(mtm);
     open.setBordered(false);
     open.setTitle(&NSString::from_str(""));
     open.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(MENU_W - 44.0, h)));
+    open.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
     unsafe {
         open.setTarget(Some(target_obj(t)));
         open.setAction(Some(sel!(bstOpenWindow:)));
@@ -934,10 +937,16 @@ fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Ret
     view.addSubview(&open);
 
     let icon = NSImageView::new(mtm);
-    icon.setFrame(NSRect::new(NSPoint::new(12.0, 8.0), NSSize::new(32.0, 32.0)));
-    if let Some(img) = NSApplication::sharedApplication(mtm).applicationIconImage() {
+    // The shield itself, not the app icon (macOS draws a grey plate around it).
+    icon.setFrame(NSRect::new(NSPoint::new(16.0, 10.0), NSSize::new(28.0, 28.0)));
+    icon.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+    use objc2::AnyThread;
+    let data = objc2_foundation::NSData::with_bytes(ICON_IDLE);
+    if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
+        img.setTemplate(true);
         icon.setImage(Some(&img));
     }
+    icon.setContentTintColor(Some(&crate::macos::brand::green()));
     view.addSubview(&icon);
 
     view.addSubview(&menu_label(mtm, "Backup Sync Tool", NSRect::new(NSPoint::new(52.0, 24.0), NSSize::new(190.0, 17.0)), 13.0, true));
@@ -947,7 +956,8 @@ fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Ret
 
     let pause = NSButton::new(mtm);
     pause.setBordered(false);
-    pause.setFrame(NSRect::new(NSPoint::new(MENU_W - 40.0, 12.0), NSSize::new(24.0, 24.0)));
+    pause.setFrame(NSRect::new(NSPoint::new(MENU_W - 56.0, 12.0), NSSize::new(24.0, 24.0)));
+    pause.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin);
     let (sym, tip) = if s.paused { ("play.circle.fill", "Resume") } else { ("pause.circle.fill", "Pause") };
     if let Some(img) = symbol(sym, 22.0) {
         pause.setImage(Some(&img));
@@ -965,7 +975,7 @@ fn header_view(mtm: MainThreadMarker, t: &MenuTarget, s: &StatusSnapshot) -> Ret
 
 /// Menu item text with an icon in front (item images do not show on all
 /// macOS versions, text attachments do) and an optional grey right part.
-fn icon_title(img: Option<&NSImage>, text: &str, right: Option<&str>) -> Retained<NSAttributedString> {
+fn icon_title(img: Option<&NSImage>, text: &str, right: Option<&str>, tab_at: f64) -> Retained<NSAttributedString> {
     use objc2::AnyThread;
     use objc2_app_kit::{
         NSAttributedStringAttachmentConveniences, NSFontAttributeName, NSForegroundColorAttributeName,
@@ -999,7 +1009,7 @@ fn icon_title(img: Option<&NSImage>, text: &str, right: Option<&str>) -> Retaine
         NSTextTab::initWithTextAlignment_location_options(
             NSTextTab::alloc(),
             NSTextAlignment::Right,
-            MENU_W - 52.0,
+            tab_at,
             &NSDictionary::new(),
         )
     };
@@ -1075,7 +1085,7 @@ fn show_tray_menu() {
         let item = menu_item(mtm, &t, &name, Some(sel!(bstOpenFolder:)), "");
         let img = objc2_app_kit::NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(folder));
         img.setSize(NSSize::new(18.0, 18.0));
-        item.setAttributedTitle(Some(&icon_title(Some(&img), &name, None)));
+        item.setAttributedTitle(Some(&icon_title(Some(&img), &name, None, 0.0)));
         item.setToolTip(Some(&NSString::from_str(folder)));
         menu.addItem(&item);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -1099,7 +1109,8 @@ fn show_tray_menu() {
                 _ => "xmark",
             };
             let img = tinted_symbol(sym, 12.0, &NSColor::secondaryLabelColor());
-            item.setAttributedTitle(Some(&icon_title(img.as_deref(), name, Some(&crate::app::time_label(*at)))));
+            let time = crate::app::time_label(*at);
+            item.setAttributedTitle(Some(&icon_title(img.as_deref(), name, Some(&time), MENU_W)));
             item.setToolTip(Some(&NSString::from_str(path)));
             menu.addItem(&item);
             paths.push(std::path::Path::new(folder).join(path));
@@ -1122,14 +1133,14 @@ fn show_tray_menu() {
     adv.addItem(&menu_item(mtm, &t, "Open Logs", Some(sel!(bstLogs:)), ""));
     let adv_item = menu_item(mtm, &t, "Advanced", None, "");
     let img = tinted_symbol("slider.horizontal.3", 14.0, &NSColor::labelColor());
-    adv_item.setAttributedTitle(Some(&icon_title(img.as_deref(), "Advanced", None)));
+    adv_item.setAttributedTitle(Some(&icon_title(img.as_deref(), "Advanced", None, 0.0)));
     adv_item.setSubmenu(Some(&adv));
     menu.addItem(&adv_item);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    let quit = menu_item(mtm, &t, "Quit", Some(sel!(bstQuit:)), "q");
+    let quit = menu_item(mtm, &t, "Quit", Some(sel!(bstQuit:)), "");
     let img = tinted_symbol("power", 14.0, &NSColor::labelColor());
-    quit.setAttributedTitle(Some(&icon_title(img.as_deref(), "Quit", None)));
+    quit.setAttributedTitle(Some(&icon_title(img.as_deref(), "Quit", None, 0.0)));
     menu.addItem(&quit);
 
     menu.setMinimumWidth(MENU_W);
