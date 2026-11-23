@@ -148,6 +148,11 @@ impl Reporter {
         Self { tx, last: None }
     }
 
+    /// True when the window last showed "All synced".
+    fn shows_idle(&self) -> bool {
+        matches!(self.last, Some((true, "idle", ..)))
+    }
+
     fn status(
         &mut self,
         connected: bool,
@@ -455,8 +460,13 @@ fn sync_round(
     }
     // The listing worked: the server is reachable. Say so now, not after
     // the scan and the hashing, which can take minutes on a big folder.
+    // When the window already shows "All synced", keep it: a re-scan after
+    // a bucket change or our own download finds nothing most times. The
+    // hashing and the transfers below show their own progress.
     let local = state.files.len();
-    reporter.status(true, "scanning", local, 0, 0, Transfer::default());
+    if !reporter.shows_idle() {
+        reporter.status(true, "scanning", local, 0, 0, Transfer::default());
+    }
 
     let mut files = scan_files(&ctx.root).map_err(ApiError::Other)?;
     files.retain(|rel, _| !ignore.matches(rel));
@@ -469,6 +479,9 @@ fn sync_round(
         &reporter.tx,
         local as u64,
     );
+    // The hashing above reports past the reporter: send the next status
+    // even when it equals the last one the reporter sent.
+    reporter.last = None;
     let total_files = (plan.uploads.len()
         + plan.downloads.len()
         + plan.remote_deletes.len()
