@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem as TrayMenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem as TrayMenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 #[derive(Default)]
@@ -152,6 +152,9 @@ struct Ids {
     open_window: String,
     open_logs: String,
     set_control_plane: String,
+    reconnect: String,
+    login: String,
+    auto_update: String,
     quit: String,
 }
 
@@ -203,6 +206,13 @@ pub fn run() {
     let open_window = TrayMenuItem::new("Open Backup Sync Tool…", true, None);
     let open_logs = TrayMenuItem::new("Open Logs", true, None);
     let set_control_plane = TrayMenuItem::new("Control plane URL…", true, None);
+    let reconnect = TrayMenuItem::new("Reconnect Server…", true, None);
+    let (login_on, auto_on) = {
+        let h = host.lock().expect("host");
+        (h.config.start_with_windows, h.config.auto_update)
+    };
+    let login = CheckMenuItem::new("Start at Login", true, login_on, None);
+    let auto_update = CheckMenuItem::new("Auto-update", true, auto_on, None);
     let quit = TrayMenuItem::new("Quit Backup Sync", true, None);
 
     let ids = Ids {
@@ -210,6 +220,9 @@ pub fn run() {
         open_window: open_window.id().as_ref().to_string(),
         open_logs: open_logs.id().as_ref().to_string(),
         set_control_plane: set_control_plane.id().as_ref().to_string(),
+        reconnect: reconnect.id().as_ref().to_string(),
+        login: login.id().as_ref().to_string(),
+        auto_update: auto_update.id().as_ref().to_string(),
         quit: quit.id().as_ref().to_string(),
     };
 
@@ -219,6 +232,10 @@ pub fn run() {
     let _ = menu.append(&open_window);
     let _ = menu.append(&open_logs);
     let _ = menu.append(&set_control_plane);
+    let _ = menu.append(&reconnect);
+    let _ = menu.append(&PredefinedMenuItem::separator());
+    let _ = menu.append(&login);
+    let _ = menu.append(&auto_update);
     let _ = menu.append(&PredefinedMenuItem::separator());
     let _ = menu.append(&quit);
 
@@ -302,6 +319,18 @@ pub fn run() {
         }
         if id == ids.set_control_plane {
             start_set_control_plane(&shared_ev);
+            return;
+        }
+        if id == ids.reconnect {
+            start_pair(&shared_ev);
+            return;
+        }
+        if id == ids.login {
+            do_toggle_login(&shared_ev);
+            return;
+        }
+        if id == ids.auto_update {
+            do_toggle_auto_update(&shared_ev);
         }
     }));
 
@@ -395,8 +424,6 @@ fn snapshot_from(host: &SyncHost, update_available: bool) -> StatusSnapshot {
         folder_label: host.config.customer.clone(),
         connected,
         server_status,
-        start_at_login: host.config.start_with_windows,
-        auto_update: host.config.auto_update,
         activity_lines: app.activity.iter().rev().cloned().collect(),
         syncing,
         need_files: app.need_files,
@@ -439,29 +466,6 @@ fn open_main_window(shared: &Shared) {
         }
         StatusAction::ChooseWatch => start_set_watch(&shared_cb),
         StatusAction::Pair => start_pair(&shared_cb),
-        StatusAction::ToggleLogin => {
-            do_toggle_login(&shared_cb);
-            refresh_status_window(&shared_cb);
-        }
-        StatusAction::ToggleAutoUpdate => {
-            if let Ok(mut h) = shared_cb.host.lock() {
-                h.config.auto_update = !h.config.auto_update;
-                let on = h.config.auto_update;
-                if let Err(err) = config::save(&h.config) {
-                    tip(&shared_cb.tray, &format!("Save failed: {err}"));
-                } else {
-                    tip(
-                        &shared_cb.tray,
-                        if on {
-                            "Auto-update ON"
-                        } else {
-                            "Auto-update OFF"
-                        },
-                    );
-                }
-            }
-            refresh_status_window(&shared_cb);
-        }
         StatusAction::Update => start_update(&shared_cb),
         StatusAction::OpenGithub => {
             status_window::open_url("https://github.com/ruibeard/backup-sync-tool")
@@ -491,6 +495,18 @@ fn do_open_finder(shared: &Shared) {
             let _ = std::process::Command::new("open").arg(&path).status();
         } else {
             tip(&shared.tray, "No watch folder set");
+        }
+    }
+}
+
+fn do_toggle_auto_update(shared: &Shared) {
+    if let Ok(mut h) = shared.host.lock() {
+        h.config.auto_update = !h.config.auto_update;
+        let on = h.config.auto_update;
+        if let Err(err) = config::save(&h.config) {
+            tip(&shared.tray, &format!("Save failed: {err}"));
+        } else {
+            tip(&shared.tray, if on { "Auto-update ON" } else { "Auto-update OFF" });
         }
     }
 }

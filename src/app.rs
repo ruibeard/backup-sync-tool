@@ -107,17 +107,16 @@ impl Direction {
         }
     }
 
-    /// "Uploading recipe.md", "Downloaded recipe.md", "Deleted recipe.md (here)".
+    /// Row text. A finished row is the file name only: the arrow already
+    /// says the direction. "Uploading recipe.md" while it moves.
     pub fn label(self, done: bool, name: &str) -> String {
         match (self, done) {
             (Direction::Up, false) => format!("Uploading {name}"),
-            (Direction::Up, true) => format!("Uploaded {name}"),
             (Direction::Down, false) => format!("Downloading {name}"),
-            (Direction::Down, true) => format!("Downloaded {name}"),
-            (Direction::DeletedRemote, _) => format!("Deleted {name} (from server)"),
-            (Direction::DeletedLocal, _) => format!("Deleted {name} (here)"),
             (Direction::Moved, false) => format!("Moving {name}"),
-            (Direction::Moved, true) => format!("Moved {name}"),
+            (Direction::DeletedRemote, _) => format!("{name} (deleted on server)"),
+            (Direction::DeletedLocal, _) => format!("{name} (deleted here)"),
+            (_, true) => name.to_string(),
         }
     }
 }

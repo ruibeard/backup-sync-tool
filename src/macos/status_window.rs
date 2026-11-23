@@ -7,8 +7,8 @@ use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBezelStyle, NSBorderType,
-    NSBox, NSBoxType, NSButton, NSButtonType, NSColor, NSControlSize, NSControlStateValueOff,
-    NSControlStateValueOn, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
+    NSBox, NSBoxType, NSButton, NSColor, NSControlSize,
+    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage,
     NSAutoresizingMaskOptions, NSImageScaling, NSImageView, NSLineBreakMode, NSMenu, NSMenuItem, NSProgressIndicator, NSProgressIndicatorStyle,
     NSControlTextEditingDelegate, NSScrollView, NSTableColumn, NSTableColumnResizingOptions,
     NSTableView, NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
@@ -24,10 +24,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const W: f64 = 540.0;
-const H: f64 = 588.0;
+const H: f64 = 540.0;
 const PAD: f64 = 20.0;
 const COL_GAP: f64 = 16.0;
-const ACT_H: f64 = 200.0;
+const ACT_H: f64 = 300.0;
 const BTN_H: f64 = 28.0;
 const ROW_H: f64 = 24.0;
 /// Height of the bar and the detail line, hidden while idle.
@@ -46,8 +46,6 @@ pub enum StatusAction {
     OpenWatch,
     ChooseWatch,
     Pair,
-    ToggleLogin,
-    ToggleAutoUpdate,
     Update,
     OpenGithub,
     OpenAuthor,
@@ -59,8 +57,6 @@ pub struct StatusSnapshot {
     pub folder_label: String,
     pub connected: bool,
     pub server_status: String,
-    pub start_at_login: bool,
-    pub auto_update: bool,
     /// Newest first, each with the Unix time it arrived.
     pub activity_lines: Vec<(u64, String)>,
     pub syncing: bool,
@@ -126,10 +122,10 @@ struct Widgets {
     table: Retained<NSTableView>,
     caption: Retained<NSTextField>,
     scroll: Retained<NSScrollView>,
-    login: Retained<NSButton>,
-    auto_update: Retained<NSButton>,
     version: Retained<NSTextField>,
     update_btn: Retained<NSButton>,
+    more: Retained<NSButton>,
+    more_menu: Retained<NSMenu>,
 }
 
 struct Live {
@@ -158,6 +154,16 @@ define_class!(
     unsafe impl NSObjectProtocol for StatusTarget {}
 
     impl StatusTarget {
+        #[unsafe(method(actMore:))]
+        fn act_more(&self, _: Option<&AnyObject>) {
+            LIVE.with(|c| {
+                if let Some(live) = c.borrow().as_ref() {
+                    let w = &live.widgets;
+                    let at = NSPoint::new(0.0, w.more.frame().size.height + 4.0);
+                    w.more_menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(&w.more));
+                }
+            });
+        }
         #[unsafe(method(actOpen:))]
         fn act_open(&self, _: Option<&AnyObject>) {
             fire(StatusAction::OpenWatch);
@@ -169,14 +175,6 @@ define_class!(
         #[unsafe(method(actPair:))]
         fn act_pair(&self, _: Option<&AnyObject>) {
             fire(StatusAction::Pair);
-        }
-        #[unsafe(method(actLogin:))]
-        fn act_login(&self, _: Option<&AnyObject>) {
-            fire(StatusAction::ToggleLogin);
-        }
-        #[unsafe(method(actAuto:))]
-        fn act_auto(&self, _: Option<&AnyObject>) {
-            fire(StatusAction::ToggleAutoUpdate);
         }
         #[unsafe(method(actUpdate:))]
         fn act_update(&self, _: Option<&AnyObject>) {
@@ -494,6 +492,7 @@ fn show_main(snapshot: StatusSnapshot, on_action: ActionFn) {
             live.on_action = on_action.clone();
             paint(&live.widgets, &snapshot);
             live.widgets.window.makeKeyAndOrderFront(None);
+            live.widgets.window.makeFirstResponder(None);
             true
         } else {
             false
@@ -509,6 +508,8 @@ fn show_main(snapshot: StatusSnapshot, on_action: ActionFn) {
     widgets.table.scrollRowToVisible(0);
     widgets.window.center();
     widgets.window.makeKeyAndOrderFront(None);
+    // No focus ring on the first button.
+    widgets.window.makeFirstResponder(None);
     OPEN.store(true, Ordering::SeqCst);
     crate::logs::append("status window showing");
     LIVE.with(|c| *c.borrow_mut() = Some(Live { widgets, on_action }));
@@ -565,12 +566,15 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     set_text(&ui.server_detail, detail);
 
     let linked = s.connected || s.connecting;
-    let pair_title = if linked { "Reconnect Server" } else { "Connect Server" };
+    // Only shown when there is something to do. "Reconnect Server…" stays
+    // in the tray menu.
+    ui.pair.setHidden(linked);
+    ui.server_title.setHidden(!linked);
+    ui.server_detail.setHidden(!linked);
+    ui.server_icon.setHidden(!linked);
+    let pair_title = if lower.contains("reconnect") { "Reconnect Server" } else { "Connect Server" };
     if ui.pair.title().to_string() != pair_title {
         ui.pair.setTitle(&NSString::from_str(pair_title));
-        // Connect is the main action while not connected: default (accent) button.
-        ui.pair
-            .setKeyEquivalent(&NSString::from_str(if linked { "" } else { "\r" }));
     }
 
     // Sync band: same states and words as Windows.
@@ -650,10 +654,10 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
     // the bar and the detail line.
     let busy = moving || s.checking || s.connecting;
     let shift = if busy { 0.0 } else { BAND_EXTRA };
-    let cap_frame = rect(PAD, top_y(250.0 - shift, 16.0), 200.0, 16.0);
+    let cap_frame = rect(PAD, top_y(150.0 - shift, 16.0), 200.0, 16.0);
     if ui.caption.frame() != cap_frame {
         ui.caption.setFrame(cap_frame);
-        ui.scroll.setFrame(rect(PAD, top_y(272.0 - shift, ACT_H + shift), W - PAD * 2.0, ACT_H + shift));
+        ui.scroll.setFrame(rect(PAD, top_y(172.0 - shift, ACT_H + shift), W - PAD * 2.0, ACT_H + shift));
     }
     ui.detail.setHidden(!busy);
     ui.eta.setHidden(!busy);
@@ -675,16 +679,6 @@ fn paint(ui: &Widgets, s: &StatusSnapshot) {
         unsafe { ui.table.deselectAll(None) };
     }
 
-    ui.login.setState(if s.start_at_login {
-        NSControlStateValueOn
-    } else {
-        NSControlStateValueOff
-    });
-    ui.auto_update.setState(if s.auto_update {
-        NSControlStateValueOn
-    } else {
-        NSControlStateValueOff
-    });
     set_text(&ui.version, &format!("v{}", s.version));
     ui.update_btn.setHidden(!s.update_available);
 }
@@ -723,71 +717,100 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     // Layout is written top-down: `top(y, h)` turns it into AppKit's bottom-up y.
     let top = |y: f64, h: f64| H - y - h;
 
-    // —— Two devices, side by side (as on Windows) ——
-    let icon = 56.0;
+    // —— Header: folder on the left, server on the right, "⋯" for actions ——
+    let _ = (col_w, left_x, right_x);
     let folder_icon = NSImageView::new(mtm);
-    folder_icon.setFrame(rect(left_x + (col_w - icon) / 2.0, top(18.0, icon), icon, icon));
+    folder_icon.setFrame(rect(PAD, top(18.0, 32.0), 32.0, 32.0));
     folder_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("laptopcomputer"),
-        Some(&NSString::from_str("This Mac")),
+        &NSString::from_str("folder.fill"),
+        Some(&NSString::from_str("Folder")),
     ) {
         folder_icon.setImage(Some(&img));
     }
     folder_icon.setContentTintColor(Some(&NSColor::controlAccentColor()));
     root.addSubview(&folder_icon);
 
-    let server_icon = NSImageView::new(mtm);
-    server_icon.setFrame(rect(right_x + (col_w - icon) / 2.0, top(18.0, icon), icon, icon));
-    server_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
-    root.addSubview(&server_icon);
-
-    // Same two lines as the server side: the folder, then its size.
-    let watch = label(mtm, "", rect(left_x, top(80.0, 18.0), col_w, 18.0), 12.0, false);
-    watch.setAlignment(NSTextAlignment::Center);
+    let text_x = PAD + 44.0;
+    let right_w = 150.0;
+    let more_w = 28.0;
+    let text_w = inner - 44.0 - right_w - more_w - 16.0;
+    let watch = label(mtm, "", rect(text_x, top(16.0, 18.0), text_w, 18.0), 13.0, true);
     watch.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
     root.addSubview(&watch);
-    let size = label(mtm, "", rect(left_x, top(98.0, 16.0), col_w, 16.0), 12.0, false);
-    size.setAlignment(NSTextAlignment::Center);
+    let size = label(mtm, "", rect(text_x, top(36.0, 16.0), text_w, 16.0), 11.0, false);
     size.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&size);
 
-    let server_title = label(mtm, "Server", rect(right_x, top(80.0, 18.0), col_w, 18.0), 13.0, true);
-    server_title.setAlignment(NSTextAlignment::Center);
+    // Server: name, then a small cloud and the state.
+    let rx = W - PAD - more_w - 8.0 - right_w;
+    let server_title = label(mtm, "Server", rect(rx, top(16.0, 18.0), right_w, 18.0), 13.0, true);
+    server_title.setAlignment(NSTextAlignment::Right);
     root.addSubview(&server_title);
-    let server_detail = label(mtm, "", rect(right_x, top(98.0, 16.0), col_w, 16.0), 12.0, false);
-    server_detail.setAlignment(NSTextAlignment::Center);
+    let server_detail = label(mtm, "", rect(rx, top(36.0, 16.0), right_w - 18.0, 16.0), 11.0, false);
+    server_detail.setAlignment(NSTextAlignment::Right);
     server_detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&server_detail);
+    let server_icon = NSImageView::new(mtm);
+    server_icon.setFrame(rect(rx + right_w - 14.0, top(37.0, 14.0), 14.0, 14.0));
+    server_icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+    root.addSubview(&server_icon);
 
-    let btn_y = top(124.0, BTN_H);
-    let (open_w, change_w, gap) = (80.0, 100.0, 8.0);
-    let bx = left_x + (col_w - open_w - gap - change_w) / 2.0;
-    root.addSubview(&button(mtm, &target, "Open", sel!(actOpen:), rect(bx, btn_y, open_w, BTN_H)));
-    root.addSubview(&button(
-        mtm,
-        &target,
-        "Change…",
-        sel!(actChoose:),
-        rect(bx + open_w + gap, btn_y, change_w, BTN_H),
-    ));
-    let pair_w = 160.0;
+    // Shown only when not connected; covers the server text.
+    let pair_w = 140.0;
     let pair = button(
         mtm,
         &target,
         "Connect Server",
         sel!(actPair:),
-        rect(right_x + (col_w - pair_w) / 2.0, btn_y, pair_w, BTN_H),
+        rect(rx + right_w - pair_w, top(20.0, BTN_H), pair_w, BTN_H),
     );
+    pair.setKeyEquivalent(&NSString::from_str("\r"));
     root.addSubview(&pair);
 
-    add_sep(&root, mtm, rect(PAD, top(166.0, 1.0), inner, 1.0));
+    let more = NSButton::new(mtm);
+    more.setBordered(false);
+    more.setRefusesFirstResponder(true);
+    more.setFrame(rect(W - PAD - more_w, top(20.0, more_w), more_w, more_w));
+    if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str("ellipsis.circle"),
+        Some(&NSString::from_str("More")),
+    ) {
+        more.setImage(Some(&img));
+    }
+    more.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+    more.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+    unsafe {
+        more.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject)));
+        more.setAction(Some(sel!(actMore:)));
+    }
+    root.addSubview(&more);
+
+    let more_menu = NSMenu::new(mtm);
+    for (title, action) in [
+        ("Open in Finder", sel!(actOpen:)),
+        ("Change Folder…", sel!(actChoose:)),
+        ("Reconnect Server…", sel!(actPair:)),
+    ] {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(""),
+            )
+        };
+        unsafe { item.setTarget(Some(&*(&*target as *const StatusTarget as *const AnyObject))) };
+        more_menu.addItem(&item);
+    }
+
+    add_sep(&root, mtm, rect(PAD, top(66.0, 1.0), inner, 1.0));
 
     // —— Sync band: headline + %, bar, upload/download + time left ——
-    let head = label(mtm, "", rect(PAD, top(180.0, 20.0), inner - 170.0, 20.0), 14.0, true);
+    let head = label(mtm, "", rect(PAD, top(80.0, 20.0), inner - 170.0, 20.0), 14.0, true);
     root.addSubview(&head);
     // "42%" while moving; "Last sync Yesterday 23:10" when done.
-    let pct = label(mtm, "", rect(W - PAD - 170.0, top(180.0, 20.0), 170.0, 20.0), 13.0, true);
+    let pct = label(mtm, "", rect(W - PAD - 170.0, top(80.0, 20.0), 170.0, 20.0), 13.0, true);
     pct.setAlignment(NSTextAlignment::Right);
     root.addSubview(&pct);
     let bar = NSProgressIndicator::new(mtm);
@@ -796,27 +819,27 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     bar.setIndeterminate(false);
     bar.setMinValue(0.0);
     bar.setMaxValue(100.0);
-    bar.setFrame(rect(PAD, top(204.0, 12.0), inner, 12.0));
+    bar.setFrame(rect(PAD, top(104.0, 12.0), inner, 12.0));
     root.addSubview(&bar);
-    let detail = label(mtm, "", rect(PAD, top(220.0, 16.0), inner - 120.0, 16.0), 11.0, false);
+    let detail = label(mtm, "", rect(PAD, top(120.0, 16.0), inner - 120.0, 16.0), 11.0, false);
     detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&detail);
-    let eta = label(mtm, "", rect(W - PAD - 120.0, top(220.0, 16.0), 120.0, 16.0), 11.0, false);
+    let eta = label(mtm, "", rect(W - PAD - 120.0, top(120.0, 16.0), 120.0, 16.0), 11.0, false);
     eta.setAlignment(NSTextAlignment::Right);
     eta.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&eta);
 
     // —— Activity ——
-    let caption = label(mtm, "ACTIVITY · LAST 24 HOURS", rect(PAD, top(250.0, 16.0), 200.0, 16.0), 11.0, true);
+    let caption = label(mtm, "ACTIVITY · LAST 24 HOURS", rect(PAD, top(150.0, 16.0), 200.0, 16.0), 11.0, true);
     caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
     root.addSubview(&caption);
 
     let scroll = NSScrollView::new(mtm);
-    scroll.setFrame(rect(PAD, top(272.0, ACT_H), inner, ACT_H));
+    scroll.setFrame(rect(PAD, top(172.0, ACT_H), inner, ACT_H));
     scroll.setHasVerticalScroller(true);
     scroll.setHasHorizontalScroller(false);
     scroll.setAutohidesScrollers(true);
-    scroll.setBorderType(NSBorderType::BezelBorder);
+    scroll.setBorderType(NSBorderType::NoBorder);
 
     let table = NSTableView::new(mtm);
     table.setFrame(rect(0.0, 0.0, inner, ACT_H));
@@ -834,7 +857,8 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     table.setHeaderView(None);
     table.setStyle(NSTableViewStyle::Plain);
     table.setRowHeight(ROW_H);
-    table.setUsesAlternatingRowBackgroundColors(true);
+    table.setUsesAlternatingRowBackgroundColors(false);
+    table.setBackgroundColor(&NSColor::windowBackgroundColor());
     table.setColumnAutoresizingStyle(NSTableViewColumnAutoresizingStyle::NoColumnAutoresizing);
     table.setAllowsEmptySelection(true);
     unsafe {
@@ -859,20 +883,8 @@ fn build(mtm: MainThreadMarker) -> Widgets {
     scroll.setDocumentView(Some(&table as &NSView));
     root.addSubview(&scroll);
 
-    // —— Settings + footer ——
-    let set_y = 272.0 + ACT_H + 16.0;
-    add_sep(&root, mtm, rect(PAD, top(set_y, 1.0), inner, 1.0));
-    let login = switch(mtm, &target, "Start at Login", sel!(actLogin:), rect(PAD, top(set_y + 12.0, 22.0), 130.0, 22.0));
-    root.addSubview(&login);
-    let auto_update = switch(
-        mtm,
-        &target,
-        "Auto-update",
-        sel!(actAuto:),
-        rect(PAD + 136.0, top(set_y + 12.0, 22.0), 120.0, 22.0),
-    );
-    root.addSubview(&auto_update);
-
+    // —— Footer ——
+    add_sep(&root, mtm, rect(PAD, top(172.0 + ACT_H + 16.0, 1.0), inner, 1.0));
     let foot_y = 12.0;
     let version = label(
         mtm,
@@ -924,10 +936,10 @@ fn build(mtm: MainThreadMarker) -> Widgets {
         table,
         caption,
         scroll,
-        login,
-        auto_update,
         version,
         update_btn,
+        more,
+        more_menu,
     }
 }
 
@@ -1037,21 +1049,3 @@ fn link_btn(
     b
 }
 
-fn switch(
-    mtm: MainThreadMarker,
-    target: &StatusTarget,
-    title: &str,
-    action: Sel,
-    frame: NSRect,
-) -> Retained<NSButton> {
-    let b = NSButton::new(mtm);
-    b.setTitle(&NSString::from_str(title));
-    b.setButtonType(NSButtonType::Switch);
-    b.setControlSize(NSControlSize::Small);
-    b.setFrame(frame);
-    unsafe {
-        b.setTarget(Some(&*(target as *const StatusTarget as *const AnyObject)));
-        b.setAction(Some(action));
-    }
-    b
-}
